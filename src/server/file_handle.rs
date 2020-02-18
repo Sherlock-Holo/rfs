@@ -1,12 +1,19 @@
 use std::io::SeekFrom;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
+use fuse::{FileAttr, FileType};
+use nix::fcntl;
+use nix::fcntl::FlockArg;
+use time_old::Timespec;
 
 use crate::errno::Errno;
 use crate::Result;
 use crate::server::attr::SetAttr;
+use crate::server::inode::Inode;
 
 pub enum FileHandleKind {
     ReadOnly,
@@ -16,14 +23,16 @@ pub enum FileHandleKind {
 
 pub struct FileHandle {
     id: u64,
+    inode: Inode,
     sys_file: SysFile,
     kind: FileHandleKind, // avoid useless read/write syscall to improve performance
 }
 
 impl FileHandle {
-    pub fn new(id: u64, sys_file: SysFile, kind: FileHandleKind) -> Self {
+    pub fn new(id: u64, inode: Inode, sys_file: SysFile, kind: FileHandleKind) -> Self {
         Self {
             id,
+            inode,
             sys_file,
             kind,
         }
@@ -65,7 +74,28 @@ impl FileHandle {
         Ok(data.len())
     }
 
-    pub async fn set_attr(&mut self, set_attr: SetAttr) -> Result<()> {
+    pub async fn get_attr(&self) -> Result<FileAttr> {
+        let metadata = self.sys_file.metadata().await?;
+
+        Ok(FileAttr {
+            ino: self.inode,
+            size: metadata.len(),
+            blocks: metadata.blocks(),
+            kind: FileType::RegularFile,
+            atime: Timespec::new(metadata.atime(), metadata.atime_nsec() as i32),
+            mtime: Timespec::new(metadata.mtime(), metadata.mtime_nsec() as i32),
+            ctime: Timespec::new(metadata.ctime(), metadata.ctime_nsec() as i32),
+            crtime: Timespec::new(metadata.atime(), metadata.atime_nsec() as i32),
+            perm: metadata.permissions().mode() as u16,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            rdev: metadata.rdev() as u32,
+            flags: 0,
+            nlink: 0,
+        })
+    }
+
+    pub async fn set_attr(&mut self, set_attr: SetAttr) -> Result<FileAttr> {
         if let FileHandleKind::ReadOnly = self.kind {
             return Err(Errno(libc::EBADF));
         }
@@ -82,6 +112,48 @@ impl FileHandle {
             self.sys_file.set_len(size).await?;
         }
 
+        self.get_attr().await
+    }
+
+    pub fn try_set_lock(&self, share: bool) -> Result<()> {
+        let raw_fd = self.sys_file.as_raw_fd();
+
+        let flock_arg = if share {
+            FlockArg::LockSharedNonblock
+        } else {
+            FlockArg::LockExclusiveNonblock
+        };
+
+        fcntl::flock(raw_fd, flock_arg)?;
+
         Ok(())
+    }
+
+    pub fn try_release_lock(&self) -> Result<()> {
+        let raw_fd = self.sys_file.as_raw_fd();
+
+        fcntl::flock(raw_fd, FlockArg::UnlockNonblock)?;
+
+        Ok(())
+    }
+
+    pub async fn flush(&mut self) -> Result<()> {
+        self.sys_file.flush().await?;
+
+        Ok(())
+    }
+
+    pub async fn fsync(&mut self, only_data_sync: bool) -> Result<()> {
+        if only_data_sync {
+            self.sys_file.sync_data().await?;
+        } else {
+            self.sys_file.sync_all().await?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_id(&self) -> u64 {
+        self.id
     }
 }
