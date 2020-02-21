@@ -2,18 +2,19 @@ use std::io::SeekFrom;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
+use std::time::{Duration, UNIX_EPOCH};
 
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
 use fuse::{FileAttr, FileType};
 use nix::fcntl;
 use nix::fcntl::FlockArg;
-use time_old::Timespec;
 
 use crate::errno::Errno;
 use crate::Result;
-use crate::server::attr::SetAttr;
-use crate::server::inode::Inode;
+
+use super::attr::SetAttr;
+use super::inode::Inode;
 
 pub enum FileHandleKind {
     ReadOnly,
@@ -82,10 +83,9 @@ impl FileHandle {
             size: metadata.len(),
             blocks: metadata.blocks(),
             kind: FileType::RegularFile,
-            atime: Timespec::new(metadata.atime(), metadata.atime_nsec() as i32),
-            mtime: Timespec::new(metadata.mtime(), metadata.mtime_nsec() as i32),
-            ctime: Timespec::new(metadata.ctime(), metadata.ctime_nsec() as i32),
-            crtime: Timespec::new(metadata.atime(), metadata.atime_nsec() as i32),
+            atime: metadata.accessed()?,
+            mtime: metadata.modified()?,
+            ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
             perm: metadata.permissions().mode() as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),
@@ -115,6 +115,22 @@ impl FileHandle {
         self.get_attr().await
     }
 
+    pub async fn set_lock(&self, share: bool) -> Result<()> {
+        let raw_fd = self.sys_file.as_raw_fd();
+
+        let flock_arg = if share {
+            FlockArg::LockShared
+        } else {
+            FlockArg::LockExclusive
+        };
+
+        async_std::task::spawn_blocking(move || {
+            fcntl::flock(raw_fd, flock_arg)
+        }).await?;
+
+        Ok(())
+    }
+
     pub fn try_set_lock(&self, share: bool) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
@@ -125,6 +141,16 @@ impl FileHandle {
         };
 
         fcntl::flock(raw_fd, flock_arg)?;
+
+        Ok(())
+    }
+
+    pub async fn release_lock(&self) -> Result<()> {
+        let raw_fd = self.sys_file.as_raw_fd();
+
+        async_std::task::spawn_blocking(move || {
+            fcntl::flock(raw_fd, FlockArg::Unlock)
+        }).await?;
 
         Ok(())
     }

@@ -3,17 +3,18 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, UNIX_EPOCH};
 
 use async_std::fs;
 use async_std::path::Path;
 use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
-use time_old::Timespec;
 
 use crate::Result;
-use crate::server::entry::Entry;
-use crate::server::file_handle::{FileHandle, FileHandleKind};
-use crate::server::inode::{Inode, InodeMap};
+
+use super::entry::Entry;
+use super::file_handle::{FileHandle, FileHandleKind};
+use super::inode::{Inode, InodeMap};
 
 #[derive(Debug)]
 struct InnerFile {
@@ -56,10 +57,9 @@ impl File {
             size: metadata.len(),
             blocks: metadata.blocks(),
             kind: FileType::RegularFile,
-            atime: Timespec::new(metadata.atime(), metadata.atime_nsec() as i32),
-            mtime: Timespec::new(metadata.mtime(), metadata.mtime_nsec() as i32),
-            ctime: Timespec::new(metadata.ctime(), metadata.ctime_nsec() as i32),
-            crtime: Timespec::new(metadata.atime(), metadata.atime_nsec() as i32),
+            atime: metadata.accessed()?,
+            mtime: metadata.modified()?,
+            ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
             perm: metadata.permissions().mode() as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),

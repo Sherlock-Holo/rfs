@@ -3,9 +3,10 @@ use std::sync::Arc;
 use fuse::FileAttr;
 
 use crate::Result;
-use crate::server::dir::Dir;
-use crate::server::file::File;
-use crate::server::inode::Inode;
+
+use super::dir::Dir;
+use super::file::File;
+use super::inode::Inode;
 
 #[derive(Debug)]
 pub enum Entry {

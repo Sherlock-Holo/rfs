@@ -1,7 +1,6 @@
 use std::io::Error as IoError;
 use std::os::raw::c_int;
 
-use nix::errno::Errno as NixErrno;
 use nix::Error as NixError;
 
 pub struct Errno(pub c_int);

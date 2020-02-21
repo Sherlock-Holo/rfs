@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -6,14 +5,14 @@ use async_std::sync::{Arc, RwLock};
 use fuse::{FileAttr, FileType};
 
 use crate::errno::Errno;
-use crate::helper::Apply;
 use crate::path::PathClean;
 use crate::Result;
-use crate::server::attr::SetAttr;
-use crate::server::dir::Dir;
-use crate::server::entry::Entry;
-use crate::server::file_handle::FileHandle;
-use crate::server::inode::{Inode, InodeMap};
+
+use super::attr::SetAttr;
+use super::dir::Dir;
+use super::entry::Entry;
+use super::file_handle::FileHandle;
+use super::inode::{Inode, InodeMap};
 
 pub struct Filesystem {
     inode_map: Arc<RwLock<InodeMap>>,
