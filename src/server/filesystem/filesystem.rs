@@ -126,7 +126,7 @@ impl Filesystem {
         }
     }
 
-    pub async fn create(&self, parent: Inode, name: &OsStr, mode: u32, flags: u32) -> Result<FileHandle> {
+    pub async fn create_file(&self, parent: Inode, name: &OsStr, mode: u32, flags: u32) -> Result<FileHandle> {
         let name = name.clean()?;
 
         if let Entry::Dir(dir) = self.inode_map.read().await

@@ -1,0 +1,362 @@
+syntax = "proto3";
+
+package proto;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+enum EntryType {
+    file = 0;
+    dir = 1;
+}
+
+enum LockType {
+    ReadLock = 0;
+    WriteLock = 1;
+}
+
+message Error {
+    oneof err {
+        uint32 errno = 1;
+        string msg = 2;
+    }
+}
+
+message Attr {
+    uint64 inode = 1;
+    string name = 2;
+    int32 mode = 3;
+    int64 size = 4;
+    EntryType type = 5;
+    google.protobuf.Timestamp accessTime = 6;
+    google.protobuf.Timestamp modifyTime = 7;
+    google.protobuf.Timestamp changeTime = 8;
+}
+
+message ReadDirRequest {
+    Header head = 1;
+    uint64 inode = 2;
+}
+
+message ReadDirResponse {
+    message DirEntry {
+        int64 index = 1;
+        uint64 inode = 2;
+        string name = 3;
+        EntryType type = 4;
+        //        uint32 mode = 5; // such as 0644
+    }
+
+    repeated DirEntry dirEntries = 1;
+    Error error = 2;
+}
+
+message LookupRequest {
+    Header head = 1;
+    uint64 inode = 2;
+    string name = 3;
+}
+
+message LookupResponse {
+    oneof result {
+        Attr attr = 1;
+        Error error = 2;
+    }
+}
+
+message MkdirRequest {
+    Header head = 1;
+    uint64 inode = 2;
+    string name = 3;
+    uint32 mode = 4;
+}
+
+message MkdirResponse {
+    oneof result {
+        Attr attr = 1;
+        Error error = 2;
+    }
+}
+
+message CreateFileRequest {
+    Header head = 1;
+    uint64 inode = 2;
+    string name = 3;
+    uint32 mode = 4; // such as 0644
+    uint32 flags = 5; // O_RDONLY or O_RDWR
+}
+
+message CreateFileResponse {
+    oneof result {
+        uint64 fileHandleId = 1;
+        Error error = 2;
+    }
+}
+
+message UnlinkRequest {
+    Header head = 1;
+    uint64 inode = 2;
+    string name = 3;
+}
+
+message UnlinkResponse {
+    Error error = 1;
+}
+
+message RmDirRequest {
+    Header head = 1;
+    uint64 inode = 2;
+    string Name = 3;
+}
+
+message RmDirResponse {
+    Error error = 1;
+}
+
+message RenameRequest {
+    Header head = 1;
+    uint64 old_parent = 2;
+    string oldName = 3;
+    uint64 new_parent = 4;
+    string newName = 5;
+}
+
+message RenameResponse {
+    Error error = 1;
+}
+
+message OpenFileRequest {
+    Header head = 1;
+    uint64 inode = 2;
+    uint32 flags = 3;
+}
+
+message OpenFileResponse {
+    oneof result {
+        uint64 fileHandleId = 1;
+        Error error = 2;
+    }
+}
+
+/*message AllocateRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+    uint64 offset = 3;
+    uint64 size = 4;
+}
+
+message AllocateResponse {
+    Error error = 1;
+}*/
+
+message ReadFileRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+    uint64 offset = 3;
+    uint64 size = 4;
+}
+
+message ReadFileResponse {
+    oneof result {
+        bytes data = 1; // if data len is less than size, means EOF
+        Error error = 2;
+    }
+}
+
+message WriteFileRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+    int64 offset = 3;
+    bytes data = 4;
+}
+
+message WriteFileResponse {
+    oneof result {
+        uint64 written = 1;
+        Error error = 2;
+    }
+}
+
+message CloseFileRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+}
+
+message CloseFileResponse {
+    Error error = 1;
+}
+
+message SyncFileRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+    //    uint64 offset = 3;
+    //    bytes data = 4;
+}
+
+message SyncFileResponse {
+    Error error = 1;
+}
+
+message GetAttrRequest {
+    Header head = 1;
+    uint64 inode = 2;
+}
+
+message GetAttrResponse {
+    oneof result {
+        Attr attr = 1;
+        Error error = 2;
+    }
+}
+
+message SetAttrRequest {
+    Header head = 1;
+    oneof handle {
+        uint64 inode = 2;
+        uint64 file_handler = 3;
+    }
+    Attr attr = 4;
+}
+
+message SetAttrResponse {
+    oneof result {
+        Attr attr = 1;
+        Error error = 2;
+    }
+}
+
+message SetLockRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+    LockType lockKind = 3;
+    bool block = 4;
+}
+
+message SetLockResponse {
+    Error error = 1;
+}
+
+message ReleaseLockRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+    bool block = 4;
+}
+
+message ReleaseLockResponse {
+    Error error = 1;
+}
+
+// now only handle set lock interrupt
+message InterruptRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+}
+
+message InterruptResponse {
+    Error error = 1;
+}
+
+message Header {
+    string uuid = 1;
+}
+
+message PingRequest {
+    Header header = 1;
+}
+
+message PingResponse {
+}
+
+message RegisterRequest {
+}
+
+message RegisterResponse {
+    string uuid = 1;
+}
+
+message LoginRequest {
+    string uuid = 1;
+}
+
+message LoginResponse {
+    bool exist = 1;
+}
+
+message LogoutRequest {
+    string uuid = 1;
+}
+
+message LogoutResponse {
+}
+
+// no acl, no link
+service Rfs {
+    // dir
+    rpc ReadDir (ReadDirRequest) returns (ReadDirResponse) {
+    }
+
+    rpc Lookup (LookupRequest) returns (LookupResponse) {
+    }
+
+    rpc Mkdir (MkdirRequest) returns (MkdirResponse) {
+    }
+
+    rpc CreateFile (CreateFileRequest) returns (CreateFileResponse) {
+    }
+
+    rpc Unlink (UnlinkRequest) returns (UnlinkResponse) {
+    }
+
+    rpc RmDir (RmDirRequest) returns (RmDirResponse) {
+    }
+
+    rpc Rename (RenameRequest) returns (RenameResponse) {
+    }
+
+    // file
+    rpc OpenFile (OpenFileRequest) returns (OpenFileResponse) {
+    }
+
+    /*rpc Allocate (AllocateRequest) returns (AllocateResponse) {
+    }*/
+
+    rpc ReadFile (ReadFileRequest) returns (ReadFileResponse) {
+    }
+
+    rpc WriteFile (WriteFileRequest) returns (WriteFileResponse) {
+    }
+
+    rpc CloseFile (CloseFileRequest) returns (CloseFileResponse) {
+    }
+
+    rpc SyncFile (SyncFileRequest) returns (SyncFileResponse) {
+    }
+
+    rpc SetLock (SetLockRequest) returns (SetLockResponse) {
+    }
+
+    rpc ReleaseLock (ReleaseLockRequest) returns (ReleaseLockResponse) {
+    }
+
+    rpc Interrupt (InterruptRequest) returns (InterruptResponse) {
+    }
+
+    // normal
+    rpc GetAttr (GetAttrRequest) returns (GetAttrResponse) {
+    }
+
+    rpc SetAttr (SetAttrRequest) returns (SetAttrResponse) {
+    }
+
+    rpc Ping (PingRequest) returns (PingResponse) {
+    }
+
+    rpc Register (RegisterRequest) returns (RegisterResponse) {
+    }
+
+    rpc Login (LoginRequest) returns (LoginResponse) {
+    }
+
+    rpc Logout (LogoutRequest) returns (LogoutResponse) {
+    }
+}

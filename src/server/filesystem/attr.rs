@@ -7,7 +7,6 @@ pub struct SetAttr {
     pub size: Option<u64>,
     pub atime: Option<SystemTime>,
     pub mtime: Option<SystemTime>,
-    pub fh: Option<u64>,
-    pub chgtime: Option<SystemTime>,
+    pub ctime: Option<SystemTime>,
     pub flags: Option<u32>,
 }

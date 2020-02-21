@@ -1,3 +1,9 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use fuse::{FileAttr, FileType};
+
+use crate::server::{PbAttr, PbEntryType};
+
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
         where F: FnOnce(&mut Self),
@@ -9,27 +15,37 @@ pub trait Apply: Sized {
 
 impl<T> Apply for T {}
 
-/*pub trait JoinOsString {
-    fn join(&self, separator: &OsStr) -> OsString;
+fn convert_system_time_to_proto_time(sys_time: SystemTime) -> Option<prost_types::Timestamp> {
+    sys_time.duration_since(UNIX_EPOCH)
+        .map_or(None, |duration| {
+            Some(prost_types::Timestamp {
+                seconds: duration.as_secs() as i64,
+                nanos: duration.as_nanos() as i32,
+            })
+        })
 }
 
-impl JoinOsString for Vec<OsString> {
-    fn join(&self, separator: &OsStr) -> OsString {
-        let new_string_size = self
-            .iter()
-            .map(|string| string.len() + 1)
-            .sum();
+#[inline]
+pub fn convert_proto_time_to_system_time(proto_time: prost_types::Timestamp) -> SystemTime {
+    UNIX_EPOCH + Duration::new(proto_time.seconds as u64, proto_time.nanos as u32)
+}
 
-        self
-            .iter()
-            .fold(OsString::with_capacity(new_string_size), |mut parent, myself| {
-                parent.push(separator);
-                parent.push(myself);
-
-                parent
-            })
+pub fn convert_fuse_attr_to_proto_attr(fuse_attr: FileAttr, name: &str) -> PbAttr {
+    PbAttr {
+        inode: fuse_attr.ino,
+        name: name.to_string(),
+        r#type: match fuse_attr.kind {
+            FileType::Directory => PbEntryType::Dir.into(),
+            FileType::RegularFile => PbEntryType::File.into(),
+            _ => unreachable!()
+        },
+        access_time: convert_system_time_to_proto_time(fuse_attr.atime),
+        modify_time: convert_system_time_to_proto_time(fuse_attr.mtime),
+        change_time: convert_system_time_to_proto_time(fuse_attr.ctime),
+        mode: fuse_attr.perm as i32,
+        size: fuse_attr.size as i64,
     }
-}*/
+}
 
 #[cfg(test)]
 mod tests {

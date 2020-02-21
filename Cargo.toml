@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Sherlock Holo <sherlockya@gmail.com>"]
 edition = "2018"
 license = "MIT"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -16,6 +17,12 @@ fuse = { branch = "master", git = "https://github.com/Sherlock-Holo/fuse-rs" }
 libc = "0.2"
 path-clean = "0.1"
 futures-util = "0.3"
+tonic = { version = "0.1", features = ["transport"] }
+prost = "0.6"
+prost-types = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "0.8", features = ["serde", "v4"] }
+chrono = "0.4"
 
 [dependencies.tokio]
 version = "0.2"
@@ -24,3 +31,6 @@ features = ["rt-threaded"]
 [dependencies.async-std]
 version = "1.5"
 features = ["attributes", "unstable"]
+
+[build-dependencies]
+tonic-build = "0.1"

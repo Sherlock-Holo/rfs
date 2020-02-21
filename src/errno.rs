@@ -3,6 +3,8 @@ use std::os::raw::c_int;
 
 use nix::Error as NixError;
 
+use crate::server::{PbErrKind, PbError};
+
 pub struct Errno(pub c_int);
 
 impl From<IoError> for Errno {
@@ -34,5 +36,13 @@ impl From<Errno> for c_int {
 impl From<c_int> for Errno {
     fn from(errno: i32) -> Self {
         Self(errno)
+    }
+}
+
+impl From<Errno> for PbError {
+    fn from(err: Errno) -> Self {
+        PbError {
+            err: Some(PbErrKind::Errno(err.0 as u32))
+        }
     }
 }
