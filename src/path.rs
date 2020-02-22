@@ -36,6 +36,6 @@ impl<P: AsRef<Path>> PathClean<Result<String, Error>> for P {
 
 impl From<Error> for Errno {
     fn from(_: Error) -> Self {
-        Errno(libc::EINVAL)
+        Errno::from(libc::EINVAL)
     }
 }

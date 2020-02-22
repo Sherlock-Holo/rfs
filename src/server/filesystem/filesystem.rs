@@ -39,22 +39,22 @@ impl Filesystem {
 
         let guard = self.inode_map.read().await;
 
-        if let Entry::Dir(dir) = guard.get(&parent).ok_or(Errno(libc::ENOENT))? {
+        if let Entry::Dir(dir) = guard.get(&parent).ok_or(Errno::from(libc::ENOENT))? {
             dir.lookup(OsStr::new(&name)).await
         } else {
-            Err(Errno(libc::ENOTDIR))
+            Err(Errno::from(libc::ENOTDIR))
         }
     }
 
     #[inline]
     pub async fn get_attr(&self, inode: Inode) -> Result<FileAttr> {
-        self.inode_map.read().await.get(&inode).ok_or(Errno(libc::ENOENT))?.get_attr().await
+        self.inode_map.read().await.get(&inode).ok_or(Errno::from(libc::ENOENT))?.get_attr().await
     }
 
     pub async fn set_dir_attr(&self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
         let guard = self.inode_map.read().await;
 
-        if let Entry::Dir(dir) = guard.get(&inode).ok_or(Errno(libc::ENOENT))? {
+        if let Entry::Dir(dir) = guard.get(&inode).ok_or(Errno::from(libc::ENOENT))? {
             dir.set_attr(set_attr).await
         } else {
             panic!("file must use file handle to set attr")
@@ -64,10 +64,10 @@ impl Filesystem {
     pub async fn create_dir(&self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
         let name = name.clean()?;
 
-        let entry = self.inode_map.read().await.get(&parent).ok_or(Errno(libc::ENOENT))?.clone();
+        let entry = self.inode_map.read().await.get(&parent).ok_or(Errno::from(libc::ENOENT))?.clone();
 
         match entry {
-            Entry::File(_) => Err(Errno(libc::ENOTDIR)),
+            Entry::File(_) => Err(Errno::from(libc::ENOTDIR)),
             Entry::Dir(dir) => dir.create_dir(OsStr::new(&name), mode).await?.get_attr().await
         }
     }
@@ -77,8 +77,8 @@ impl Filesystem {
 
         match self.inode_map.read().await
             .get(&parent)
-            .ok_or(Errno(libc::ENOENT))? {
-            Entry::File(_) => return Err(Errno(libc::ENOTDIR)),
+            .ok_or(Errno::from(libc::ENOENT))? {
+            Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
             Entry::Dir(dir) => dir.remove_entry(OsStr::new(&name), is_dir).await?
         };
 
@@ -91,13 +91,13 @@ impl Filesystem {
 
         let guard = self.inode_map.read().await;
 
-        let old_parent = match guard.get(&old_parent).ok_or(Errno(libc::ENOENT))? {
-            Entry::File(_) => return Err(Errno(libc::ENOTDIR)),
+        let old_parent = match guard.get(&old_parent).ok_or(Errno::from(libc::ENOENT))? {
+            Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
             Entry::Dir(dir) => dir
         };
 
-        let new_parent = match guard.get(&new_parent).ok_or(Errno(libc::ENOENT))? {
-            Entry::File(_) => return Err(Errno(libc::ENOTDIR)),
+        let new_parent = match guard.get(&new_parent).ok_or(Errno::from(libc::ENOENT))? {
+            Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
             Entry::Dir(dir) => dir
         };
 
@@ -107,22 +107,22 @@ impl Filesystem {
     pub async fn open(&self, inode: Inode, flags: u32) -> Result<FileHandle> {
         if let Entry::File(file) = self.inode_map.read().await
             .get(&inode)
-            .ok_or(Errno(libc::ENOENT))?
+            .ok_or(Errno::from(libc::ENOENT))?
         {
             file.open(self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed), flags).await
         } else {
-            Err(Errno(libc::EISDIR))
+            Err(Errno::from(libc::EISDIR))
         }
     }
 
     pub async fn read_dir(&self, inode: Inode, offset: i64) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
         if let Entry::Dir(dir) = self.inode_map.read().await
             .get(&inode)
-            .ok_or(Errno(libc::ENOENT))?
+            .ok_or(Errno::from(libc::ENOENT))?
         {
             dir.read_dir(offset).await
         } else {
-            Err(Errno(libc::ENOTDIR))
+            Err(Errno::from(libc::ENOTDIR))
         }
     }
 
@@ -131,87 +131,33 @@ impl Filesystem {
 
         if let Entry::Dir(dir) = self.inode_map.read().await
             .get(&parent)
-            .ok_or(Errno(libc::ENOENT))?
+            .ok_or(Errno::from(libc::ENOENT))?
         {
             let file = dir.create_file(OsStr::new(&name), mode).await?;
 
             file.open(self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed), flags).await
         } else {
-            Err(Errno(libc::ENOTDIR))
+            Err(Errno::from(libc::ENOTDIR))
         }
     }
 }
 
-/*
-*//*pub struct Filesystem {
-    inode_map: RwLock<InodeMap>,
-    inode_generator: AtomicU64,
-}
+#[cfg(test)]
+mod tests {
+    use tempfile;
 
-impl Filesystem {
-    pub async fn new() -> Result<Self> {
-        let inode_generator = AtomicU64::new(1);
+    use crate::server::filesystem::chroot;
 
-        let root = Dir::from_exist(1, "/", &inode_generator).await?;
+    use super::*;
 
-        let inode_map = InodeMap::new().apply(|inode_map|{
-            inode_map.insert(1, Entry::from(root));
-        });
+    #[async_std::test]
+    async fn init_filesystem() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        Ok(Self {
-            inode_map: RwLock::new(inode_map),
-            inode_generator,
-        })
-    }
+        chroot(tmp_dir.path().to_path_buf()).expect_err("chroot failed");
 
-    pub async fn lookup(&self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
-        self.inode_map.read().await
-    }
-}*//*
-
-struct InnerFilesystem {
-    root: Arc<Dir>,
-    inode_map: BTreeMap<Inode, Entry>,
-    inode_generator: AtomicU64,
-}
-
-impl InnerFilesystem {
-    async fn new() -> Result<RwLock<Self>> {
-        let inode_generator = AtomicU64::new(1);
-
-        Ok(RwLock::new(Self {
-            root: Dir::from_exist(1, "/", &inode_generator).await?,
-            inode_map: BTreeMap::new(),
-            inode_generator: AtomicU64::new(2),
-        }))
+        if let Err(errno) = Filesystem::new().await {
+            panic!("new filesystem failed, errno: {:?}", errno);
+        }
     }
 }
-
-pub struct Filesystem(RwLock<InnerFilesystem>);
-
-impl Filesystem {
-    pub async fn new() -> Result<Arc<Self>> {
-        Ok(Arc::new(Self(InnerFilesystem::new().await?)))
-    }
-
-    pub async fn lookup(self: &Arc<Self>, parent: Inode, name: &OsStr) -> Result<FileAttr> {
-        let guard = self.0.read().await;
-
-        let parent = guard.inode_map.get(&parent).ok_or(Errno(libc::ENOENT))?;
-
-        let parent = match parent {
-            Entry::File(_) => return Err(Errno(libc::ENOTDIR)),
-            Entry::Dir(dir) => dir
-        };
-
-        let entry = parent.lookup(name, &guard.inode_generator, &mut guard.inode_map).await?;
-
-        entry.get_attr().await
-    }
-
-    pub async fn getattr(self: &Arc<Self>, inode: Inode) -> Result<FileAttr> {
-        let entry = self.0.read().await.inode_map.get(&inode).ok_or(Errno(libc::ENOENT))?;
-        entry.get_attr().await
-    }
-}
-*/

@@ -1,3 +1,5 @@
+#![feature(backtrace)]
+
 use log::LevelFilter;
 
 use errno::Errno;

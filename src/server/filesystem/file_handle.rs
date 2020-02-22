@@ -41,7 +41,7 @@ impl FileHandle {
 
     pub async fn read(&mut self, buf: &mut [u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::WriteOnly = self.kind {
-            return Err(Errno(libc::EBADF));
+            return Err(Errno::from(libc::EBADF));
         }
 
         let seek_from = if offset < 0 {
@@ -59,7 +59,7 @@ impl FileHandle {
 
     pub async fn write(&mut self, data: &[u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::ReadOnly = self.kind {
-            return Err(Errno(libc::EBADF));
+            return Err(Errno::from(libc::EBADF));
         }
 
         let seek_from = if offset < 0 {
@@ -97,7 +97,7 @@ impl FileHandle {
 
     pub async fn set_attr(&mut self, set_attr: SetAttr) -> Result<FileAttr> {
         if let FileHandleKind::ReadOnly = self.kind {
-            return Err(Errno(libc::EBADF));
+            return Err(Errno::from(libc::EBADF));
         }
 
         if let Some(mode) = set_attr.mode {

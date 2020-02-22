@@ -15,7 +15,7 @@ use async_std::path::{Path, PathBuf};
 use async_std::stream;
 use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
-use futures_util::stream::StreamExt;
+use futures::stream::StreamExt;
 
 use crate::errno::Errno;
 use crate::helper::Apply;
@@ -43,7 +43,7 @@ pub struct Dir(RwLock<InnerDir>);
 impl Dir {
     pub async fn from_exist<P: AsRef<Path>>(parent: Inode, real_path: P, inode_gen: Arc<AtomicU64>, inode_map: Arc<RwLock<InodeMap>>) -> Result<Arc<Self>> {
         if fs::metadata(&real_path).await?.is_file() {
-            return Err(Errno(libc::ENOTDIR));
+            return Err(Errno::from(libc::ENOTDIR));
         }
 
         let real_path = real_path.as_ref();
@@ -113,7 +113,7 @@ impl Dir {
         self.init_children_map().await?;
 
         self.0.read().await.children.as_ref().expect("children map should be initialized").
-            get(name).ok_or(Errno(libc::ENOENT))?.get_attr().await
+            get(name).ok_or(Errno::from(libc::ENOENT))?.get_attr().await
     }
 
     pub async fn read_dir(&self, offset: i64) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
@@ -147,7 +147,7 @@ impl Dir {
         self.init_children_map().await?;
 
         if self.0.read().await.children.as_ref().expect("children should be initialized").get(name).is_some() {
-            return Err(Errno(libc::EEXIST));
+            return Err(Errno::from(libc::EEXIST));
         }
 
         let mut guard = self.0.write().await;
@@ -160,7 +160,7 @@ impl Dir {
         let children_map = &mut guard.children.as_mut().expect("children should be initialized");
 
         if children_map.get(name).is_some() {
-            return Err(Errno(libc::EEXIST));
+            return Err(Errno::from(libc::EEXIST));
         }
 
         let new_dir_path = PathBuf::from(parent_path).apply(|path| path.push(name));
@@ -182,7 +182,7 @@ impl Dir {
         self.init_children_map().await?;
 
         if self.0.read().await.children.as_ref().expect("children should be initialized").get(name).is_some() {
-            return Err(Errno(libc::EEXIST));
+            return Err(Errno::from(libc::EEXIST));
         }
 
         let mut guard = self.0.write().await;
@@ -196,7 +196,7 @@ impl Dir {
         let children_map = guard.children.as_mut().expect("children should be initialized");
 
         if children_map.get(name).is_some() {
-            return Err(Errno(libc::EEXIST));
+            return Err(Errno::from(libc::EEXIST));
         }
 
         let new_file_path = parent_path.apply(|path| path.push(name));
@@ -223,20 +223,20 @@ impl Dir {
 
         let children_map = guard.children.as_mut().expect("children map should be initialized");
 
-        match children_map.get(name).ok_or(Errno(libc::ENOENT))? {
+        match children_map.get(name).ok_or(Errno::from(libc::ENOENT))? {
             Entry::Dir(dir) => {
                 if !is_dir {
-                    return Err(Errno(libc::EISDIR));
+                    return Err(Errno::from(libc::EISDIR));
                 }
 
                 // always contains . and ..
                 if !dir.read_dir(0).await?.len() > 2 {
-                    return Err(Errno(libc::ENOTEMPTY));
+                    return Err(Errno::from(libc::ENOTEMPTY));
                 }
             }
 
             Entry::File(_) => if is_dir {
-                return Err(Errno(libc::ENOTDIR));
+                return Err(Errno::from(libc::ENOTDIR));
             }
         }
 
@@ -260,11 +260,11 @@ impl Dir {
 
             // let entry = children_map.remove(old_name).ok_or(Errno(libc::ENOENT))?;
             if children_map.get(old_name).is_none() {
-                return Err(Errno(libc::ENOENT));
+                return Err(Errno::from(libc::ENOENT));
             }
 
             if children_map.get(new_name).is_some() {
-                return Err(Errno(libc::EEXIST));
+                return Err(Errno::from(libc::EEXIST));
             }
 
             let entry = children_map.remove(old_name).unwrap();
@@ -287,8 +287,8 @@ impl Dir {
         let old_children_map = old_parent.children.as_mut().expect("children map should be initialized");
         let new_children_map = new_parent.children.as_mut().expect("children map should be initialized");
 
-        old_children_map.get(old_name).ok_or(Errno(libc::ENOENT))?;
-        new_children_map.get(new_name).ok_or(Errno(libc::EEXIST))?;
+        old_children_map.get(old_name).ok_or(Errno::from(libc::ENOENT))?;
+        new_children_map.get(new_name).ok_or(Errno::from(libc::EEXIST))?;
 
         let entry = old_children_map.remove(old_name).unwrap();
 
