@@ -228,8 +228,9 @@ message SetAttrResponse {
 message SetLockRequest {
     Header head = 1;
     uint64 fileHandleId = 2;
-    LockType lockKind = 3;
-    bool block = 4;
+    uint64 unique = 3;
+    LockType lockKind = 4;
+    bool block = 5;
 }
 
 message SetLockResponse {

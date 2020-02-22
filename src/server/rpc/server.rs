@@ -302,15 +302,77 @@ impl Rfs for Server {
     }
 
     async fn set_lock(&self, request: Request<SetLockRequest>) -> Result<Response<SetLockResponse>> {
-        unimplemented!()
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        let share = {
+            let write = LockType::WriteLock as i32;
+            let read = LockType::ReadLock as i32;
+
+            if request.lock_kind == read {
+                true
+            } else if request.lock_kind == write {
+                false
+            } else {
+                warn!("invalid lock kind {}", request.lock_kind);
+                return Err(Status::new(Code::InvalidArgument, "invalid lock kind"));
+            }
+        };
+
+        if request.block {
+            let lock_job = match user.set_lock(request.file_handle_id, request.unique, share).await {
+                Err(err) => return Ok(Response::new(SetLockResponse {
+                    error: Some(err.into()),
+                })),
+
+                Ok(lock_job) => lock_job
+            };
+
+            return if lock_job.await {
+                Ok(Response::new(SetLockResponse {
+                    error: None,
+                }))
+            } else {
+                Ok(Response::new(SetLockResponse {
+                    error: Some(Errno::from(libc::EINTR).into()),
+                }))
+            };
+        }
+
+        match user.try_set_lock(request.file_handle_id, share).await {
+            Err(err) => return Ok(Response::new(SetLockResponse {
+                error: Some(err.into()),
+            })),
+
+            Ok(_) => Ok(Response::new(SetLockResponse {
+                error: None,
+            }))
+        }
     }
 
     async fn release_lock(&self, request: Request<ReleaseLockRequest>) -> Result<Response<ReleaseLockResponse>> {
-        unimplemented!()
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        user.release_lock(request.file_handle_id).await;
+
+        Ok(Response::new(ReleaseLockResponse {
+            error: None
+        }))
     }
 
     async fn interrupt(&self, request: Request<InterruptRequest>) -> Result<Response<InterruptResponse>> {
-        unimplemented!()
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        user.release_lock(request.file_handle_id).await;
+
+        Ok(Response::new(InterruptResponse {
+            error: None
+        }))
     }
 
     async fn get_attr(&self, request: Request<GetAttrRequest>) -> Result<Response<GetAttrResponse>> {
