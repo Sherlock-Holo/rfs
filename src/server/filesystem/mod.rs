@@ -17,7 +17,7 @@ mod file_handle;
 mod attr;
 mod filesystem;
 
-fn chroot<P: NixPath>(new_root: P) -> Result<()> {
+pub fn chroot<P: NixPath>(new_root: P) -> Result<()> {
     unistd::chroot(&new_root)?;
 
     Ok(env::set_current_dir("/")?)

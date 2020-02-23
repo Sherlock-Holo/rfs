@@ -28,6 +28,12 @@ impl Display for Errno {
     }
 }
 
+impl PartialEq for Errno {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
 impl From<IoError> for Errno {
     fn from(err: IoError) -> Self {
         if let Some(errno) = err.raw_os_error() {

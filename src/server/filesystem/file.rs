@@ -9,6 +9,7 @@ use async_std::fs;
 use async_std::path::Path;
 use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
+use log::debug;
 
 use crate::Result;
 
@@ -32,6 +33,8 @@ impl File {
         fs::metadata(&real_path).await?;
 
         let real_path = real_path.as_ref().to_path_buf();
+
+        debug!("create File from real path {:?}", real_path);
 
         let inode = inode_gen.fetch_add(1, Ordering::Relaxed);
 
@@ -60,7 +63,7 @@ impl File {
             atime: metadata.accessed()?,
             mtime: metadata.modified()?,
             ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
-            perm: metadata.permissions().mode() as u16,
+            perm: (metadata.permissions().mode() ^ libc::S_IFREG) as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),
             rdev: metadata.rdev() as u32,
@@ -74,21 +77,21 @@ impl File {
 
         let mut options = fs::OpenOptions::new();
 
-        let fh_kind = if flags & libc::O_WRONLY as u32 > 0 {
-            options.write(true);
-            options.read(false);
-
-            FileHandleKind::WriteOnly
-        } else if flags & libc::O_RDONLY as u32 > 0 {
-            options.write(false);
-            options.read(true);
-
-            FileHandleKind::ReadOnly
-        } else {
+        let fh_kind = if flags & libc::O_RDWR as u32 > 0 {
             options.write(true);
             options.read(true);
 
             FileHandleKind::ReadWrite
+        } else if flags & libc::O_WRONLY as u32 > 0 {
+            options.write(true);
+            options.read(false);
+
+            FileHandleKind::WriteOnly
+        } else {
+            options.write(false);
+            options.read(true);
+
+            FileHandleKind::ReadOnly
         };
 
         let sys_file = options.open(&guard.real_path).await?;
@@ -117,5 +120,20 @@ impl File {
     #[inline]
     pub async fn get_inode(&self) -> Inode {
         self.0.read().await.inode
+    }
+
+    #[inline]
+    pub async fn get_name(&self) -> OsString {
+        self.0.read().await.name.to_os_string()
+    }
+
+    #[inline]
+    pub async fn get_real_path(&self) -> OsString {
+        self.0.read().await.real_path.to_os_string()
+    }
+
+    #[inline]
+    pub async fn get_parent_inode(&self) -> Inode {
+        self.0.read().await.parent
     }
 }

@@ -356,11 +356,15 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        user.release_lock(request.file_handle_id).await;
+        match user.release_lock(request.file_handle_id).await {
+            Err(err) => Ok(Response::new(ReleaseLockResponse {
+                error: Some(err.into())
+            })),
 
-        Ok(Response::new(ReleaseLockResponse {
-            error: None
-        }))
+            Ok(_) => Ok(Response::new(ReleaseLockResponse {
+                error: None
+            }))
+        }
     }
 
     async fn interrupt(&self, request: Request<InterruptRequest>) -> Result<Response<InterruptResponse>> {
@@ -368,11 +372,15 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        user.release_lock(request.file_handle_id).await;
+        match user.interrupt_lock(request.file_handle_id, request.unique).await {
+            Err(err) => Ok(Response::new(InterruptResponse {
+                error: Some(err.into())
+            })),
 
-        Ok(Response::new(InterruptResponse {
-            error: None
-        }))
+            Ok(_) => Ok(Response::new(InterruptResponse {
+                error: None
+            }))
+        }
     }
 
     async fn get_attr(&self, request: Request<GetAttrRequest>) -> Result<Response<GetAttrResponse>> {

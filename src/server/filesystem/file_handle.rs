@@ -13,8 +13,8 @@ use async_std::task;
 use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
 use futures::future::FutureExt;
-use futures::pin_mut;
 use futures::select;
+use log::debug;
 use nix::fcntl;
 use nix::fcntl::FlockArg;
 
@@ -24,6 +24,7 @@ use crate::Result;
 use super::attr::SetAttr;
 use super::inode::Inode;
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
     ReadOnly,
     WriteOnly,
@@ -99,7 +100,7 @@ impl FileHandle {
             atime: metadata.accessed()?,
             mtime: metadata.modified()?,
             ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
-            perm: metadata.permissions().mode() as u16,
+            perm: (metadata.permissions().mode() ^ libc::S_IFREG) as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),
             rdev: metadata.rdev() as u32,
@@ -144,11 +145,11 @@ impl FileHandle {
 
             lock_queue.lock().await.insert(unique, sender);
 
+            debug!("save unique {} lock canceler", unique);
+
             let lock_job = async_std::task::spawn_blocking(move || {
                 fcntl::flock(raw_fd, flock_arg)
             });
-
-            pin_mut!(lock_job);
 
             let lock_success = select! {
                 _ = receiver.recv().fuse() => false,
@@ -194,8 +195,16 @@ impl FileHandle {
     }
 
     pub async fn interrupt_lock(&self, unique: u64) {
+        debug!("try to cancel unique {} lock", unique);
+
         if let Some(lock_canceler) = self.lock_queue.lock().await.get(&unique) {
-            lock_canceler.send(()).await
+            debug!("unique {} lock canceler found", unique);
+
+            lock_canceler.send(()).await;
+
+            debug!("lock cancel");
+        } else {
+            debug!("unique {} lock canceler not found", unique);
         }
     }
 
@@ -220,15 +229,20 @@ impl FileHandle {
         Ok(())
     }
 
+    #[inline]
     pub fn get_id(&self) -> u64 {
         self.id
+    }
+
+    pub fn get_file_handle_kind(&self) -> FileHandleKind {
+        self.kind
     }
 }
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
         task::block_on(async {
-            self.flush().await;
+            let _ = self.flush().await;
         })
     }
 }

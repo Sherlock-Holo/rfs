@@ -251,6 +251,7 @@ message ReleaseLockResponse {
 message InterruptRequest {
     Header head = 1;
     uint64 fileHandleId = 2;
+    uint64 unique = 3;
 }
 
 message InterruptResponse {

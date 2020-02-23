@@ -16,6 +16,7 @@ use async_std::stream;
 use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
 use futures::stream::StreamExt;
+use log::debug;
 
 use crate::errno::Errno;
 use crate::helper::Apply;
@@ -48,11 +49,17 @@ impl Dir {
 
         let real_path = real_path.as_ref();
 
+        debug!("create Dir from exist path {:?}", real_path);
+
         let inode = inode_gen.fetch_add(1, Ordering::Relaxed);
 
         let dir = Arc::new(Dir(RwLock::new(InnerDir {
             inode,
-            name: real_path.file_name().expect("name should be valid").to_os_string(),
+            name: if real_path == Path::new("/") {
+                real_path.as_os_str().to_os_string()
+            } else {
+                real_path.file_name().expect("name should be valid").to_os_string()
+            },
             real_path: real_path.as_os_str().to_os_string(),
             parent,
             children: None,
@@ -78,7 +85,7 @@ impl Dir {
             atime: metadata.accessed()?,
             mtime: metadata.modified()?,
             ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
-            perm: metadata.permissions().mode() as u16,
+            perm: (metadata.permissions().mode() ^ libc::S_IFDIR) as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),
             rdev: metadata.rdev() as u32,
@@ -179,13 +186,19 @@ impl Dir {
     }
 
     pub async fn create_file(&self, name: &OsStr, mode: u32) -> Result<Arc<File>> {
+        debug!("init children map");
+
         self.init_children_map().await?;
 
         if self.0.read().await.children.as_ref().expect("children should be initialized").get(name).is_some() {
             return Err(Errno::from(libc::EEXIST));
         }
 
+        debug!("children map is initialize");
+
         let mut guard = self.0.write().await;
+
+        debug!("guard acquired");
 
         let parent_path = PathBuf::from(guard.real_path.clone());
         let inode_map = Arc::clone(&guard.inode_map);
@@ -195,16 +208,23 @@ impl Dir {
 
         let children_map = guard.children.as_mut().expect("children should be initialized");
 
+        debug!("get children map");
+
         if children_map.get(name).is_some() {
             return Err(Errno::from(libc::EEXIST));
         }
 
         let new_file_path = parent_path.apply(|path| path.push(name));
 
+        debug!("new file path {:?}", new_file_path);
+
         OpenOptions::new()
             .create_new(true)
+            .write(true)
             .mode(mode)
             .open(&new_file_path).await?;
+
+        debug!("created real file {:?}", new_file_path);
 
         let file = File::from_exist(parent_inode, &new_file_path, &inode_gen, inode_map.write().await.deref_mut()).await?;
 
@@ -215,6 +235,8 @@ impl Dir {
 
     pub async fn remove_entry(&self, name: &OsStr, is_dir: bool) -> Result<Entry> {
         self.init_children_map().await?;
+
+        debug!("remove entry children map initialize");
 
         let mut guard = self.0.write().await;
 
@@ -229,14 +251,20 @@ impl Dir {
                     return Err(Errno::from(libc::EISDIR));
                 }
 
-                // always contains . and ..
+                /*// always contains . and ..
                 if !dir.read_dir(0).await?.len() > 2 {
                     return Err(Errno::from(libc::ENOTEMPTY));
-                }
+                }*/
+
+                fs::remove_dir(dir.get_real_path().await).await?;
             }
 
-            Entry::File(_) => if is_dir {
-                return Err(Errno::from(libc::ENOTDIR));
+            Entry::File(file) => {
+                if is_dir {
+                    return Err(Errno::from(libc::ENOTDIR));
+                } else {
+                    fs::remove_file(file.get_real_path().await).await?;
+                }
             }
         }
 
@@ -248,6 +276,8 @@ impl Dir {
     }
 
     pub async fn add_child_from(&self, old_parent: &Self, old_name: &OsStr, new_name: &OsStr) -> Result<()> {
+        self.init_children_map().await?;
+
         let new_parent_inode = self.get_inode().await;
         let old_parent_inode = old_parent.get_inode().await;
 
@@ -255,6 +285,8 @@ impl Dir {
             let mut guard = self.0.write().await;
 
             let new_real_path = PathBuf::from(guard.real_path.clone()).apply(|path| path.push(new_name));
+
+            debug!("new real path {:?}", new_real_path);
 
             let children_map = guard.children.as_mut().expect("children map should be initialized");
 
@@ -267,17 +299,19 @@ impl Dir {
                 return Err(Errno::from(libc::EEXIST));
             }
 
-            let entry = children_map.remove(old_name).unwrap();
+            let entry = children_map.remove(old_name).expect("checked");
 
             match &entry {
                 Entry::Dir(child_dir) => child_dir.rename(&new_real_path).await?,
                 Entry::File(child_file) => child_file.rename(&new_real_path).await?
             }
 
-            children_map.insert(new_real_path.into_os_string(), entry);
+            children_map.insert(new_name.to_os_string(), entry);
 
             return Ok(());
         }
+
+        old_parent.init_children_map().await?;
 
         let mut old_parent = old_parent.0.write().await;
         let mut new_parent = self.0.write().await;
@@ -288,7 +322,10 @@ impl Dir {
         let new_children_map = new_parent.children.as_mut().expect("children map should be initialized");
 
         old_children_map.get(old_name).ok_or(Errno::from(libc::ENOENT))?;
-        new_children_map.get(new_name).ok_or(Errno::from(libc::EEXIST))?;
+
+        if new_children_map.get(new_name).is_some() {
+            return Err(Errno::from(libc::EEXIST));
+        }
 
         let entry = old_children_map.remove(old_name).unwrap();
 
@@ -303,7 +340,7 @@ impl Dir {
             }
         }
 
-        new_children_map.insert(new_real_path.into_os_string(), entry);
+        new_children_map.insert(new_name.to_os_string(), entry);
 
         Ok(())
     }
@@ -314,6 +351,8 @@ impl Dir {
         fs::rename(&guard.real_path, &new_real_path).await?;
 
         let new_real_path = new_real_path.as_ref();
+
+        debug!("rename dir from {:?} to {:?}", guard.real_path, new_real_path);
 
         guard.real_path = new_real_path.as_os_str().to_os_string();
         guard.name = new_real_path.file_name().expect("name should be valid").to_os_string();
@@ -343,13 +382,20 @@ impl Dir {
             return Ok(());
         }
 
+        debug!("children map not init");
+
         let mut children_map = BTreeMap::new();
 
         let mut dir_entries = fs::read_dir(&guard.real_path).await?;
 
         let parent_path = PathBuf::from(guard.real_path.clone());
         let inode_map = Arc::clone(&guard.inode_map);
+
+        debug!("locking inode map");
+
         let mut inode_map = inode_map.write().await;
+
+        debug!("lock inode map");
 
         while let Some(dir_entry) = dir_entries.next().await {
             let dir_entry = dir_entry?;
@@ -377,7 +423,24 @@ impl Dir {
 
         guard.children.replace(children_map);
 
+        debug!("children map init success");
+
         Ok(())
+    }
+
+    #[inline]
+    pub async fn get_name(&self) -> OsString {
+        self.0.read().await.name.to_os_string()
+    }
+
+    #[inline]
+    pub async fn get_real_path(&self) -> OsString {
+        self.0.read().await.real_path.to_os_string()
+    }
+
+    #[inline]
+    pub async fn get_parent_inode(&self) -> Inode {
+        self.0.read().await.parent
     }
 }
 
