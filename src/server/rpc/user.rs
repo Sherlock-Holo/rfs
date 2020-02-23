@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use async_std::sync::{Arc, Mutex, RwLock, Sender};
-use async_std::sync;
-use async_std::task;
+use async_std::sync::{Arc, Mutex, RwLock};
 use async_std::task::JoinHandle;
 use chrono::prelude::*;
 use fuse::FileAttr;
@@ -20,9 +18,6 @@ struct InnerUser {
     uuid: Uuid,
     file_handle_map: BTreeMap<u64, Arc<Mutex<FileHandle>>>,
     last_alive_time: DateTime<Local>,
-
-    // (unique, fh_id) => lock canceler
-    locking_file_handle: BTreeMap<(u64, u64), Sender<()>>,
 }
 
 pub struct User(RwLock<InnerUser>);
@@ -33,7 +28,6 @@ impl User {
             uuid,
             file_handle_map: BTreeMap::new(),
             last_alive_time: Local::now(),
-            locking_file_handle: BTreeMap::new(),
         }))
     }
 
@@ -97,29 +91,15 @@ impl User {
     }
 
     pub async fn set_lock(self: &Arc<Self>, fh_id: u64, unique: u64, share: bool) -> Result<JoinHandle<bool>> {
-        let mut guard = self.0.write().await;
+        let guard = self.0.read().await;
 
-        let file_handle = guard.file_handle_map.get(&fh_id).ok_or(Errno::from(libc::EBADF))?;
-        let file_handle = Arc::clone(file_handle);
+        let file_handle = guard.file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?;
 
-        let (sender, receiver) = sync::channel(1);
+        let lock_job = file_handle.lock().await.set_lock(unique, share).await?;
 
-        guard.locking_file_handle.insert((unique, fh_id), sender);
-
-        let user = Arc::clone(self);
-
-        Ok(task::spawn(async move {
-            let file_handle = file_handle.lock().await;
-
-            let lock_success = select! {
-                _ = receiver.recv().fuse() => false,
-                _ = file_handle.set_lock(share).fuse() => true,
-            };
-
-            user.0.write().await.locking_file_handle.remove(&(unique, fh_id));
-
-            lock_success
-        }))
+        Ok(lock_job)
     }
 
     pub async fn try_set_lock(&self, fh_id: u64, share: bool) -> Result<()> {
@@ -137,26 +117,29 @@ impl User {
         file_handle.try_set_lock(share)
     }
 
-    pub async fn release_lock(&self, fh_id: u64) {
-        let mut guard = self.0.write().await;
+    pub async fn release_lock(&self, fh_id: u64) -> Result<()> {
+        let guard = self.0.read().await;
 
-        let need_release_lock_keys: Vec<_> = guard.locking_file_handle
-            .keys()
-            .filter_map(|(unique, store_fh_id)| {
-                if *store_fh_id == fh_id {
-                    Some((*unique, *store_fh_id))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let file_handle = guard.file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?;
 
-        for key in need_release_lock_keys {
-            if let Some(lock_canceler) = guard.locking_file_handle.remove(&key) {
-                lock_canceler.send(()).await;
-            }
-        }
+        file_handle.lock().await.try_release_lock()?;
+
+        // drop(guard);
+
+        Ok(())
     }
 
-    // pub async fn interrupt_lock(&self, fh_id: u64)
+    pub async fn interrupt_lock(&self, fh_id: u64, unique: u64) -> Result<()> {
+        let guard = self.0.read().await;
+
+        let file_handle = guard.file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?;
+
+        file_handle.lock().await.interrupt_lock(unique).await;
+
+        Ok(())
+    }
 }

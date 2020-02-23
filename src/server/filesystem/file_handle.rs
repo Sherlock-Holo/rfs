@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -6,7 +7,14 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
+use async_std::sync::{Arc, Mutex, Sender};
+use async_std::sync;
+use async_std::task;
+use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
+use futures::future::FutureExt;
+use futures::pin_mut;
+use futures::select;
 use nix::fcntl;
 use nix::fcntl::FlockArg;
 
@@ -26,7 +34,11 @@ pub struct FileHandle {
     id: u64,
     inode: Inode,
     sys_file: SysFile,
-    kind: FileHandleKind, // avoid useless read/write syscall to improve performance
+
+    // avoid useless read/write syscall to improve performance
+    kind: FileHandleKind,
+
+    lock_queue: Arc<Mutex<BTreeMap<u64, Sender<()>>>>,
 }
 
 impl FileHandle {
@@ -36,6 +48,7 @@ impl FileHandle {
             inode,
             sys_file,
             kind,
+            lock_queue: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -115,7 +128,7 @@ impl FileHandle {
         self.get_attr().await
     }
 
-    pub async fn set_lock(&self, share: bool) -> Result<()> {
+    pub async fn set_lock(&self, unique: u64, share: bool) -> Result<JoinHandle<bool>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -124,11 +137,28 @@ impl FileHandle {
             FlockArg::LockExclusive
         };
 
-        async_std::task::spawn_blocking(move || {
-            fcntl::flock(raw_fd, flock_arg)
-        }).await?;
+        let lock_queue = Arc::clone(&self.lock_queue);
 
-        Ok(())
+        Ok(task::spawn(async move {
+            let (sender, receiver) = sync::channel(1);
+
+            lock_queue.lock().await.insert(unique, sender);
+
+            let lock_job = async_std::task::spawn_blocking(move || {
+                fcntl::flock(raw_fd, flock_arg)
+            });
+
+            pin_mut!(lock_job);
+
+            let lock_success = select! {
+                _ = receiver.recv().fuse() => false,
+                _ = lock_job.fuse() => true,
+            };
+
+            lock_queue.lock().await.remove(&unique);
+
+            lock_success
+        }))
     }
 
     pub fn try_set_lock(&self, share: bool) -> Result<()> {
@@ -163,8 +193,19 @@ impl FileHandle {
         Ok(())
     }
 
+    pub async fn interrupt_lock(&self, unique: u64) {
+        if let Some(lock_canceler) = self.lock_queue.lock().await.get(&unique) {
+            lock_canceler.send(()).await
+        }
+    }
+
+    // flush should release all lock
     pub async fn flush(&mut self) -> Result<()> {
         self.sys_file.flush().await?;
+
+        for (_, lock_canceler) in self.lock_queue.lock().await.iter() {
+            lock_canceler.send(()).await;
+        }
 
         Ok(())
     }
@@ -181,5 +222,13 @@ impl FileHandle {
 
     pub fn get_id(&self) -> u64 {
         self.id
+    }
+}
+
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        task::block_on(async {
+            self.flush().await;
+        })
     }
 }
