@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use async_std::sync::{Arc, Mutex, RwLock};
+use async_std::sync::{Arc, Mutex, RwLock, Sender};
 use async_std::task::JoinHandle;
 use chrono::prelude::*;
 use fuse::FileAttr;
@@ -18,9 +18,11 @@ struct InnerUser {
     uuid: Uuid,
     file_handle_map: BTreeMap<u64, Arc<Mutex<FileHandle>>>,
     last_alive_time: DateTime<Local>,
+    lock_queue: Arc<Mutex<BTreeMap<u64, Sender<()>>>>,
 }
 
 pub struct User(RwLock<InnerUser>);
+
 // TODO fix may block user lock
 impl User {
     pub fn new(uuid: Uuid) -> Self {
@@ -28,6 +30,7 @@ impl User {
             uuid,
             file_handle_map: BTreeMap::new(),
             last_alive_time: Local::now(),
+            lock_queue: Arc::new(Mutex::new(BTreeMap::new())),
         }))
     }
 
@@ -115,7 +118,11 @@ impl User {
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?;
 
-        let lock_job = file_handle.lock().await.set_lock(unique, share).await?;
+        let lock_job = file_handle
+            .lock()
+            .await
+            .set_lock(unique, share, Arc::clone(&guard.lock_queue))
+            .await?;
 
         Ok(lock_job)
     }
@@ -146,20 +153,21 @@ impl User {
 
         file_handle.lock().await.try_release_lock()?;
 
-        // drop(guard);
-
         Ok(())
     }
 
-    pub async fn interrupt_lock(&self, fh_id: u64, unique: u64) -> Result<()> {
-        let guard = self.0.read().await;
-
-        let file_handle = guard
-            .file_handle_map
-            .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?;
-
-        file_handle.lock().await.interrupt_lock(unique).await;
+    #[inline]
+    pub async fn interrupt_lock(&self, unique: u64) -> Result<()> {
+        self.0
+            .read()
+            .await
+            .lock_queue
+            .lock()
+            .await
+            .get(&unique)
+            .ok_or(Errno::from(libc::EBADF))?
+            .send(())
+            .await;
 
         Ok(())
     }

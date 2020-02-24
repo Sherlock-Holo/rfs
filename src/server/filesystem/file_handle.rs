@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -25,6 +24,8 @@ use crate::Result;
 use super::attr::SetAttr;
 use super::inode::Inode;
 
+type LockQueue = Arc<Mutex<BTreeMap<u64, Sender<()>>>>;
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
     ReadOnly,
@@ -40,7 +41,7 @@ pub struct FileHandle {
     // avoid useless read/write syscall to improve performance
     kind: FileHandleKind,
 
-    lock_queue: Arc<Mutex<BTreeMap<u64, Sender<()>>>>,
+    lock_queue: Option<LockQueue>,
 }
 
 impl FileHandle {
@@ -50,7 +51,7 @@ impl FileHandle {
             inode,
             sys_file,
             kind,
-            lock_queue: Arc::new(Mutex::new(BTreeMap::new())),
+            lock_queue: None,
         }
     }
 
@@ -131,7 +132,12 @@ impl FileHandle {
         self.get_attr().await
     }
 
-    pub async fn set_lock(&self, unique: u64, share: bool) -> Result<JoinHandle<bool>> {
+    pub async fn set_lock(
+        &mut self,
+        unique: u64,
+        share: bool,
+        lock_queue: LockQueue,
+    ) -> Result<JoinHandle<bool>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -140,7 +146,9 @@ impl FileHandle {
             FlockArg::LockExclusive
         };
 
-        let lock_queue = Arc::clone(&self.lock_queue);
+        if self.lock_queue.is_none() {
+            self.lock_queue.replace(Arc::clone(&lock_queue));
+        }
 
         Ok(task::spawn(async move {
             let (sender, receiver) = sync::channel(1);
@@ -192,17 +200,20 @@ impl FileHandle {
         Ok(())
     }
 
+    //TODO should I remove this method?
     pub async fn interrupt_lock(&self, unique: u64) {
         debug!("try to cancel unique {} lock", unique);
 
-        if let Some(lock_canceler) = self.lock_queue.lock().await.get(&unique) {
-            debug!("unique {} lock canceler found", unique);
+        if let Some(lock_queue) = self.lock_queue.as_ref() {
+            if let Some(lock_canceler) = lock_queue.lock().await.get(&unique) {
+                debug!("unique {} lock canceler found", unique);
 
-            lock_canceler.send(()).await;
+                lock_canceler.send(()).await;
 
-            debug!("lock cancel");
-        } else {
-            debug!("unique {} lock canceler not found", unique);
+                debug!("lock cancel");
+            } else {
+                debug!("unique {} lock canceler not found", unique);
+            }
         }
     }
 
@@ -210,8 +221,10 @@ impl FileHandle {
     pub async fn flush(&mut self) -> Result<()> {
         self.sys_file.flush().await?;
 
-        for (_, lock_canceler) in self.lock_queue.lock().await.iter() {
-            lock_canceler.send(()).await;
+        if let Some(lock_queue) = self.lock_queue.as_ref() {
+            for (_, lock_canceler) in lock_queue.lock().await.iter() {
+                lock_canceler.send(()).await;
+            }
         }
 
         Ok(())

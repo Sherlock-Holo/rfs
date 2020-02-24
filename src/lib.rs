@@ -4,12 +4,12 @@ use log::LevelFilter;
 
 use errno::Errno;
 
+mod client;
 mod errno;
 mod helper;
 mod path;
-mod server;
-mod client;
 pub mod pb;
+mod server;
 
 pub type Result<T> = std::result::Result<T, Errno>;
 

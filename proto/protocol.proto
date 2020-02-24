@@ -84,10 +84,9 @@ message CreateFileRequest {
 }
 
 message CreateFileResponse {
-    oneof result {
-        uint64 fileHandleId = 1;
-        Error error = 2;
-    }
+    uint64 fileHandleId = 1;
+    Attr attr = 2;
+    Error error = 3;
 }
 
 message UnlinkRequest {
@@ -256,8 +255,7 @@ message ReleaseLockResponse {
 // now only handle set lock interrupt
 message InterruptRequest {
     Header head = 1;
-    uint64 fileHandleId = 2;
-    uint64 unique = 3;
+    uint64 unique = 2;
 }
 
 message InterruptResponse {

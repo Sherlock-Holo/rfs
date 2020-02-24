@@ -4,7 +4,10 @@ use std::time::{Duration, SystemTime};
 
 use async_std::path::Path;
 use async_std::task;
-use fuse::{Filesystem as FuseFilesystem, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request};
+use fuse::{
+    Filesystem as FuseFilesystem, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
+};
 use libc::c_int;
 use log::{debug, error, info};
 use tokio::net::UnixStream;
@@ -50,9 +53,8 @@ impl Filesystem {
         let uds_path: &'static str = string_to_static_str(uds_path);
 
         let channel = Endpoint::try_from("lttp://[::]:50051")?
-            .connect_with_connector(service_fn(move |_: Uri| {
-                UnixStream::connect(uds_path)
-            })).await?;
+            .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(uds_path)))
+            .await?;
 
         Ok(Filesystem {
             uuid: None,
@@ -60,11 +62,15 @@ impl Filesystem {
         })
     }
 
-    pub async fn new_net(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
+    pub async fn new_net(
+        uri: Uri,
+        tls_cfg: ClientTlsConfig,
+    ) -> Result<Self, tonic::transport::Error> {
         let channel = Channel::builder(uri)
             .tls_config(tls_cfg)
             .tcp_keepalive(Some(Duration::from_secs(5)))
-            .connect().await?;
+            .connect()
+            .await?;
 
         Ok(Filesystem {
             uuid: None,
@@ -90,7 +96,7 @@ impl FuseFilesystem for Filesystem {
 
                     let uuid: Uuid = match resp.uuid.parse() {
                         Err(_) => return Err(libc::EINVAL),
-                        Ok(uuid) => uuid
+                        Ok(uuid) => uuid,
                     };
 
                     self.uuid.replace(uuid);
@@ -102,12 +108,14 @@ impl FuseFilesystem for Filesystem {
     }
 
     fn destroy(&mut self, _req: &Request) {
-        let uuid = self.uuid.as_ref().expect("uuid should initialize").to_string();
+        let uuid = self
+            .uuid
+            .as_ref()
+            .expect("uuid should initialize")
+            .to_string();
 
         task::block_on(async {
-            let req = TonicRequest::new(LogoutRequest {
-                uuid
-            });
+            let req = TonicRequest::new(LogoutRequest { uuid });
 
             if let Err(err) = self.rpc_client.logout(req).await {
                 error!("logout failed {}", err)
@@ -122,7 +130,7 @@ impl FuseFilesystem for Filesystem {
                 return;
             }
 
-            Some(name) => name.to_string()
+            Some(name) => name.to_string(),
         };
 
         let header = self.get_rpc_header();
@@ -167,7 +175,7 @@ impl FuseFilesystem for Filesystem {
                 lookup_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.entry(&Duration::new(0, 0), &attr, 0)
+                        Ok(attr) => reply.entry(&Duration::new(0, 0), &attr, 0),
                     }
                 }
             }
@@ -216,7 +224,7 @@ impl FuseFilesystem for Filesystem {
                 get_attr_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.attr(&Duration::new(0, 0), &attr)
+                        Ok(attr) => reply.attr(&Duration::new(0, 0), &attr),
                     }
                 }
             }
@@ -244,9 +252,7 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let fh = fh.filter(|fh| {
-            *fh > 0
-        });
+        let fh = fh.filter(|fh| *fh > 0);
 
         let rpc_req = TonicRequest::new(SetAttrRequest {
             head: header,
@@ -262,10 +268,14 @@ impl FuseFilesystem for Filesystem {
                 name: String::new(),
                 mode: if let Some(mode) = mode {
                     mode as i32
-                } else { -1 },
+                } else {
+                    -1
+                },
                 size: if let Some(size) = size {
                     size as i64
-                } else { -1 },
+                } else {
+                    -1
+                },
                 r#type: 0,
                 access_time: None,
                 modify_time: None,
@@ -303,7 +313,7 @@ impl FuseFilesystem for Filesystem {
                 set_attr_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.attr(&Duration::new(0, 0), &attr)
+                        Ok(attr) => reply.attr(&Duration::new(0, 0), &attr),
                     }
                 }
             }
@@ -317,7 +327,7 @@ impl FuseFilesystem for Filesystem {
                 return;
             }
 
-            Some(name) => name.to_string()
+            Some(name) => name.to_string(),
         };
 
         let header = self.get_rpc_header();
@@ -361,7 +371,7 @@ impl FuseFilesystem for Filesystem {
                 mkdir_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.entry(&Duration::new(0, 0), &attr, 0)
+                        Ok(attr) => reply.entry(&Duration::new(0, 0), &attr, 0),
                     }
                 }
             }
@@ -375,7 +385,7 @@ impl FuseFilesystem for Filesystem {
                 return;
             }
 
-            Some(name) => name.to_string()
+            Some(name) => name.to_string(),
         };
 
         let header = self.get_rpc_header();
@@ -397,11 +407,13 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(error) = resp.into_inner().error {
-                    reply.error(error.errno as c_int);
-                    return;
-                } else {
-                    reply.ok()
+                Ok(resp) => {
+                    if let Some(error) = resp.into_inner().error {
+                        reply.error(error.errno as c_int);
+                        return;
+                    } else {
+                        reply.ok()
+                    }
                 }
             };
         });
@@ -414,7 +426,7 @@ impl FuseFilesystem for Filesystem {
                 return;
             }
 
-            Some(name) => name.to_string()
+            Some(name) => name.to_string(),
         };
 
         let header = self.get_rpc_header();
@@ -436,11 +448,13 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(error) = resp.into_inner().error {
-                    reply.error(error.errno as c_int);
-                    return;
-                } else {
-                    reply.ok()
+                Ok(resp) => {
+                    if let Some(error) = resp.into_inner().error {
+                        reply.error(error.errno as c_int);
+                        return;
+                    } else {
+                        reply.ok()
+                    }
                 }
             };
         });
@@ -461,7 +475,7 @@ impl FuseFilesystem for Filesystem {
                 return;
             }
 
-            Some(name) => name.to_string()
+            Some(name) => name.to_string(),
         };
 
         let new_name = match new_name.to_str() {
@@ -470,7 +484,7 @@ impl FuseFilesystem for Filesystem {
                 return;
             }
 
-            Some(new_name) => new_name.to_string()
+            Some(new_name) => new_name.to_string(),
         };
 
         let header = self.get_rpc_header();
@@ -494,11 +508,13 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(error) = resp.into_inner().error {
-                    reply.error(error.errno as c_int);
-                    return;
-                } else {
-                    reply.ok()
+                Ok(resp) => {
+                    if let Some(error) = resp.into_inner().error {
+                        reply.error(error.errno as c_int);
+                        return;
+                    } else {
+                        reply.ok()
+                    }
                 }
             }
         });
@@ -524,27 +540,35 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(result) = resp.into_inner().result {
-                    result
-                } else {
-                    error!("open result is None");
-                    reply.error(libc::EIO);
+                Ok(resp) => {
+                    if let Some(result) = resp.into_inner().result {
+                        result
+                    } else {
+                        error!("open result is None");
+                        reply.error(libc::EIO);
 
-                    return;
+                        return;
+                    }
                 }
             };
 
             match result {
                 open_file_response::Result::Error(err) => reply.error(err.errno as i32),
 
-                open_file_response::Result::FileHandleId(fh_id) => {
-                    reply.opened(fh_id, flags)
-                }
+                open_file_response::Result::FileHandleId(fh_id) => reply.opened(fh_id, flags),
             }
         });
     }
 
-    fn read(&mut self, _req: &Request, _ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyData) {
+    fn read(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        reply: ReplyData,
+    ) {
         let header = self.get_rpc_header();
 
         let mut client = self.rpc_client.clone();
@@ -565,22 +589,22 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(result) = resp.into_inner().result {
-                    result
-                } else {
-                    error!("open result is None");
-                    reply.error(libc::EIO);
+                Ok(resp) => {
+                    if let Some(result) = resp.into_inner().result {
+                        result
+                    } else {
+                        error!("open result is None");
+                        reply.error(libc::EIO);
 
-                    return;
+                        return;
+                    }
                 }
             };
 
             match result {
                 read_file_response::Result::Error(err) => reply.error(err.errno as i32),
 
-                read_file_response::Result::Data(data) => {
-                    reply.data(&data)
-                }
+                read_file_response::Result::Data(data) => reply.data(&data),
             }
         });
     }
@@ -615,22 +639,22 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(result) = resp.into_inner().result {
-                    result
-                } else {
-                    error!("open result is None");
-                    reply.error(libc::EIO);
+                Ok(resp) => {
+                    if let Some(result) = resp.into_inner().result {
+                        result
+                    } else {
+                        error!("open result is None");
+                        reply.error(libc::EIO);
 
-                    return;
+                        return;
+                    }
                 }
             };
 
             match result {
                 write_file_response::Result::Error(err) => reply.error(err.errno as i32),
 
-                write_file_response::Result::Written(written) => {
-                    reply.written(written as u32)
-                }
+                write_file_response::Result::Written(written) => reply.written(written as u32),
             }
         });
     }
@@ -654,10 +678,12 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(err) = resp.into_inner().error {
-                    reply.error(err.errno as c_int)
-                } else {
-                    reply.ok()
+                Ok(resp) => {
+                    if let Some(err) = resp.into_inner().error {
+                        reply.error(err.errno as c_int)
+                    } else {
+                        reply.ok()
+                    }
                 }
             }
         });
@@ -691,10 +717,12 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(err) = resp.into_inner().error {
-                    reply.error(err.errno as c_int)
-                } else {
-                    reply.ok()
+                Ok(resp) => {
+                    if let Some(err) = resp.into_inner().error {
+                        reply.error(err.errno as c_int)
+                    } else {
+                        reply.ok()
+                    }
                 }
             }
         });
@@ -719,16 +747,25 @@ impl FuseFilesystem for Filesystem {
                     return;
                 }
 
-                Ok(resp) => if let Some(err) = resp.into_inner().error {
-                    reply.error(err.errno as c_int)
-                } else {
-                    reply.ok()
+                Ok(resp) => {
+                    if let Some(err) = resp.into_inner().error {
+                        reply.error(err.errno as c_int)
+                    } else {
+                        reply.ok()
+                    }
                 }
             }
         });
     }
 
-    fn readdir(&mut self, _req: &Request, inode: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        inode: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         let header = self.get_rpc_header();
 
         let mut client = self.rpc_client.clone();
@@ -739,7 +776,8 @@ impl FuseFilesystem for Filesystem {
         });
 
         task::spawn(async move {
-            let dir_entries: Vec<read_dir_response::DirEntry> = match client.read_dir(rpc_req).await {
+            let dir_entries: Vec<read_dir_response::DirEntry> = match client.read_dir(rpc_req).await
+            {
                 Err(err) => {
                     error!("read_dir rpc has error {}", err);
                     reply.error(libc::EIO);
@@ -764,20 +802,18 @@ impl FuseFilesystem for Filesystem {
                 .enumerate()
                 .skip(offset as usize)
                 .map(|(index, dir_entry)| {
-                    {
-                        let dir = EntryType::Dir as i32;
-                        let file = EntryType::File as i32;
+                    let dir = EntryType::Dir as i32;
+                    let file = EntryType::File as i32;
 
-                        let kind = if dir_entry.r#type == dir {
-                            Some(FileType::Directory)
-                        } else if dir_entry.r#type == file {
-                            Some(FileType::RegularFile)
-                        } else {
-                            None
-                        };
+                    let kind = if dir_entry.r#type == dir {
+                        Some(FileType::Directory)
+                    } else if dir_entry.r#type == file {
+                        Some(FileType::RegularFile)
+                    } else {
+                        None
+                    };
 
-                        (dir_entry.inode, index + 1, kind, dir_entry.name)
-                    }
+                    (dir_entry.inode, index + 1, kind, dir_entry.name)
                 })
             {
                 let kind = match kind {
@@ -786,7 +822,7 @@ impl FuseFilesystem for Filesystem {
                         reply.error(libc::EIO);
                         return;
                     }
-                    Some(kind) => kind
+                    Some(kind) => kind,
                 };
 
                 if reply.add(inode, index as i64, kind, name) {
@@ -805,11 +841,203 @@ impl FuseFilesystem for Filesystem {
 
     fn create(
         &mut self,
-        _req: &Request,
+        req: &Request,
         parent: u64,
         name: &OsStr,
         mode: u32,
         flags: u32,
         reply: ReplyCreate,
-    ) {}
+    ) {
+        let name = match name.to_str() {
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+
+            Some(name) => name.to_string(),
+        };
+
+        let header = self.get_rpc_header();
+
+        let mut client = self.rpc_client.clone();
+
+        let rpc_req = TonicRequest::new(CreateFileRequest {
+            head: header,
+            inode: parent,
+            name,
+            mode,
+            flags,
+        });
+
+        let uid = req.uid();
+        let gid = req.gid();
+
+        task::spawn(async move {
+            let (fh_id, attr) = match client.create_file(rpc_req).await {
+                Err(err) => {
+                    error!("create_file rpc has error {}", err);
+                    reply.error(libc::EIO);
+
+                    return;
+                }
+
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+
+                    if let Some(error) = resp.error {
+                        reply.error(error.errno as c_int);
+                        return;
+                    }
+
+                    if resp.attr.is_none() {
+                        error!("create_file attr is None");
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    (resp.file_handle_id, resp.attr.unwrap())
+                }
+            };
+
+            match proto_attr_into_fuse_attr(attr, uid, gid) {
+                Err(err) => reply.error(err.into()),
+                Ok(attr) => reply.created(&Duration::new(0, 0), &attr, 0, fh_id, flags),
+            }
+        });
+    }
+
+    fn getlk(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        fh: u64,
+        _lock_owner: u64,
+        _start: u64,
+        _end: u64,
+        typ: u32,
+        _pid: u32,
+        reply: ReplyLock,
+    ) {
+        // TODO implement next version
+        reply.error(libc::ENOSYS)
+    }
+
+    fn setlk(
+        &mut self,
+        req: &Request,
+        _ino: u64,
+        fh: u64,
+        _lock_owner: u64,
+        _start: u64,
+        _end: u64,
+        typ: u32,
+        _pid: u32,
+        sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        let header = self.get_rpc_header();
+
+        let mut client = self.rpc_client.clone();
+
+        if typ as i32 == libc::F_UNLCK {
+            let rpc_req = TonicRequest::new(ReleaseLockRequest {
+                head: header,
+                file_handle_id: fh,
+                block: false,
+            });
+
+            task::spawn(async move {
+                match client.release_lock(rpc_req).await {
+                    Err(err) => {
+                        error!("release_lock rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(error) = resp.into_inner().error {
+                            reply.error(error.errno as c_int);
+                            return;
+                        } else {
+                            reply.ok()
+                        }
+                    }
+                }
+            });
+
+            return;
+        }
+
+        let lock_kind = {
+            match typ as i32 {
+                libc::F_RDLCK => LockType::ReadLock,
+                libc::F_WRLCK => LockType::WriteLock,
+
+                _ => {
+                    reply.error(libc::EINVAL);
+                    return;
+                }
+            }
+        };
+
+        let rpc_req = TonicRequest::new(SetLockRequest {
+            head: header,
+            file_handle_id: fh,
+            unique: req.unique(),
+            lock_kind: lock_kind.into(),
+            block: sleep,
+        });
+
+        task::spawn(async move {
+            match client.set_lock(rpc_req).await {
+                Err(err) => {
+                    error!("set_lock rpc has error {}", err);
+                    reply.error(libc::EIO);
+
+                    return;
+                }
+
+                Ok(resp) => {
+                    if let Some(error) = resp.into_inner().error {
+                        reply.error(error.errno as c_int);
+                        return;
+                    } else {
+                        reply.ok()
+                    }
+                }
+            }
+        });
+    }
+
+    fn interrupt(&mut self, _req: &Request, unique: u64, reply: ReplyEmpty) {
+        let header = self.get_rpc_header();
+
+        let mut client = self.rpc_client.clone();
+
+        let rpc_req = TonicRequest::new(InterruptRequest {
+            head: header,
+            unique,
+        });
+
+        task::spawn(async move {
+            match client.interrupt(rpc_req).await {
+                Err(err) => {
+                    error!("interrupt rpc has error {}", err);
+                    reply.error(libc::EIO);
+
+                    return;
+                }
+
+                Ok(resp) => {
+                    if let Some(err) = resp.into_inner().error {
+                        reply.error(err.errno as c_int)
+                    } else {
+                        reply.ok()
+                    }
+                }
+            }
+        });
+    }
 }

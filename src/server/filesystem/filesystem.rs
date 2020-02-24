@@ -200,7 +200,7 @@ impl Filesystem {
         name: &OsStr,
         mode: u32,
         flags: u32,
-    ) -> Result<FileHandle> {
+    ) -> Result<(FileHandle, FileAttr)> {
         let name = name.clean()?;
 
         let entry = self
@@ -220,18 +220,25 @@ impl Filesystem {
 
         debug!("file created");
 
-        file.open(
-            self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
-            flags,
-        )
-            .await
+        let file_handle = file
+            .open(
+                self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
+                flags,
+            )
+            .await?;
+
+        let attr = file_handle.get_attr().await?;
+
+        Ok((file_handle, attr))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
+    use async_std::sync::Mutex;
     use async_std::task::sleep;
     use futures::future::FutureExt;
     use futures::select;
@@ -297,7 +304,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
             .await
             .unwrap();
@@ -795,7 +802,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let mut file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
@@ -817,7 +824,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let mut file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
@@ -845,7 +852,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let mut file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
@@ -888,14 +895,19 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_job = file_handle.set_lock(1, true).await.unwrap();
+        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let lock_job = file_handle
+            .set_lock(1, true, Arc::clone(&lock_queue))
+            .await
+            .unwrap();
 
         let lock_job = select! {
             result = lock_job.fuse() => result,
@@ -904,7 +916,7 @@ mod tests {
 
         assert!(lock_job);
 
-        let lock_job = file_handle2.set_lock(2, true).await.unwrap();
+        let lock_job = file_handle2.set_lock(2, true, lock_queue).await.unwrap();
 
         let lock_job = select! {
             result = lock_job.fuse() => result,
@@ -924,14 +936,19 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_job = file_handle.set_lock(1, true).await.unwrap();
+        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let lock_job = file_handle
+            .set_lock(1, true, Arc::clone(&lock_queue))
+            .await
+            .unwrap();
 
         let lock_job = select! {
             result = lock_job.fuse() => result,
@@ -940,7 +957,7 @@ mod tests {
 
         assert!(lock_job);
 
-        let lock_job = file_handle2.set_lock(2, false).await.unwrap();
+        let lock_job = file_handle2.set_lock(2, false, lock_queue).await.unwrap();
 
         select! {
             result = lock_job.fuse() => panic!("set not share lock success"),
@@ -958,7 +975,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
@@ -979,7 +996,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
@@ -1004,14 +1021,19 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_job = file_handle.set_lock(1, false).await.unwrap();
+        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let lock_job = file_handle
+            .set_lock(1, false, Arc::clone(&lock_queue))
+            .await
+            .unwrap();
 
         let lock_job = select! {
             result = lock_job.fuse() => result,
@@ -1020,7 +1042,10 @@ mod tests {
 
         assert!(lock_job);
 
-        let lock_job = file_handle2.set_lock(2, false).await.unwrap();
+        let lock_job = file_handle2
+            .set_lock(2, false, Arc::clone(&lock_queue))
+            .await
+            .unwrap();
 
         select! {
             result = lock_job.fuse() => panic!("set exclusive lock should failed"),
@@ -1028,7 +1053,7 @@ mod tests {
         }
         ;
 
-        let lock_job = file_handle2.set_lock(3, true).await.unwrap();
+        let lock_job = file_handle2.set_lock(3, true, lock_queue).await.unwrap();
 
         select! {
             result = lock_job.fuse() => panic!("set share lock should failed"),
@@ -1046,7 +1071,7 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
@@ -1074,14 +1099,16 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_job = file_handle.set_lock(1, true).await.unwrap();
+        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let lock_job = file_handle.set_lock(1, true, lock_queue).await.unwrap();
 
         assert!(lock_job.await);
         assert_eq!(file_handle.release_lock().await, Ok(()));
@@ -1099,14 +1126,16 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_job = file_handle.set_lock(1, false).await.unwrap();
+        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let lock_job = file_handle.set_lock(1, false, lock_queue).await.unwrap();
 
         assert!(lock_job.await);
         assert_eq!(file_handle.release_lock().await, Ok(()));
@@ -1124,18 +1153,23 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem
+        let (mut file_handle, _) = filesystem
             .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
             .await
             .unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_job = file_handle.set_lock(1, false).await.unwrap();
+        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let lock_job = file_handle
+            .set_lock(1, false, Arc::clone(&lock_queue))
+            .await
+            .unwrap();
 
         assert!(lock_job.await);
 
-        let lock_job = file_handle2.set_lock(2, false).await.unwrap();
+        let lock_job = file_handle2.set_lock(2, false, lock_queue).await.unwrap();
 
         file_handle2.interrupt_lock(2).await;
 

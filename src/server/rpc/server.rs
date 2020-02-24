@@ -4,15 +4,15 @@ use std::ffi::OsStr;
 use async_std::sync::{Arc, RwLock};
 use chrono::prelude::*;
 use fuse::FileType;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use tonic::{Code, Request, Status};
 use tonic::Response;
 use uuid::Uuid;
 
 use crate::errno::Errno;
 use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
-use crate::pb::*;
 use crate::pb;
+use crate::pb::*;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 
@@ -128,9 +128,10 @@ impl Rfs for Server {
             })),
 
             Ok(attr) => Ok(Response::new(MkdirResponse {
-                result: Some(pb::mkdir_response::Result::Attr(
-                    fuse_attr_into_proto_attr(attr, &request.name),
-                )),
+                result: Some(pb::mkdir_response::Result::Attr(fuse_attr_into_proto_attr(
+                    attr,
+                    &request.name,
+                ))),
             })),
         }
     }
@@ -143,7 +144,7 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        let file_handle = match self
+        let (file_handle, attr) = match self
             .filesystem
             .create_file(
                 request.inode,
@@ -155,7 +156,9 @@ impl Rfs for Server {
         {
             Err(errno) => {
                 return Ok(Response::new(CreateFileResponse {
-                    result: Some(pb::create_file_response::Result::Error(errno.into())),
+                    file_handle_id: 0,
+                    attr: None,
+                    error: Some(errno.into()),
                 }));
             }
 
@@ -167,7 +170,9 @@ impl Rfs for Server {
         user.add_file_handle(file_handle).await;
 
         Ok(Response::new(CreateFileResponse {
-            result: Some(pb::create_file_response::Result::FileHandleId(fh_id)),
+            file_handle_id: fh_id,
+            attr: Some(fuse_attr_into_proto_attr(attr, &request.name)),
+            error: None,
         }))
     }
 
@@ -348,7 +353,13 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        use
+        match user.flush(request.file_handle_id).await {
+            Err(errno) => Ok(Response::new(FlushResponse {
+                error: Some(errno.into()),
+            })),
+
+            Ok(_) => Ok(Response::new(FlushResponse { error: None })),
+        }
     }
 
     async fn set_lock(
@@ -430,10 +441,7 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        if let Err(err) = user
-            .interrupt_lock(request.file_handle_id, request.unique)
-            .await
-        {
+        if let Err(err) = user.interrupt_lock(request.unique).await {
             Ok(Response::new(InterruptResponse {
                 error: Some(err.into()),
             }))

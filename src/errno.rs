@@ -70,6 +70,8 @@ impl From<c_int> for Errno {
 
 impl From<Errno> for PbError {
     fn from(err: Errno) -> Self {
-        PbError { errno: err.0 as u32 }
+        PbError {
+            errno: err.0 as u32,
+        }
     }
 }
