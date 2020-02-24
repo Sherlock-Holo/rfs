@@ -8,6 +8,8 @@ mod errno;
 mod helper;
 mod path;
 mod server;
+mod client;
+pub mod pb;
 
 pub type Result<T> = std::result::Result<T, Errno>;
 

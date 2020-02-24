@@ -7,7 +7,7 @@ use std::os::raw::c_int;
 use nix::Error as NixError;
 use thiserror::Error;
 
-use crate::server::{PbErrKind, PbError};
+use crate::pb::Error as PbError;
 
 #[derive(Error)]
 pub struct Errno(pub c_int, Backtrace);
@@ -70,8 +70,6 @@ impl From<c_int> for Errno {
 
 impl From<Errno> for PbError {
     fn from(err: Errno) -> Self {
-        PbError {
-            err: Some(PbErrKind::Errno(err.0 as u32)),
-        }
+        PbError { errno: err.0 as u32 }
     }
 }

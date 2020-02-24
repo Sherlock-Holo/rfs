@@ -21,7 +21,7 @@ struct InnerUser {
 }
 
 pub struct User(RwLock<InnerUser>);
-
+// TODO fix may block user lock
 impl User {
     pub fn new(uuid: Uuid) -> Self {
         Self(RwLock::new(InnerUser {
@@ -81,6 +81,14 @@ impl User {
     pub async fn sync_file(&self, fh_id: u64) -> Result<()> {
         if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
             file_handle.lock().await.fsync(false).await
+        } else {
+            Err(Errno::from(libc::EBADF))
+        }
+    }
+
+    pub async fn flush(&self, fh_id: u64) -> Result<()> {
+        if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
+            file_handle.lock().await.flush().await
         } else {
             Err(Errno::from(libc::EBADF))
         }

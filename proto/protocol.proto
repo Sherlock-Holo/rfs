@@ -16,10 +16,7 @@ enum LockType {
 }
 
 message Error {
-    oneof err {
-        uint32 errno = 1;
-        string msg = 2;
-    }
+    uint32 errno = 1;
 }
 
 message Attr {
@@ -152,7 +149,7 @@ message AllocateResponse {
 message ReadFileRequest {
     Header head = 1;
     uint64 fileHandleId = 2;
-    uint64 offset = 3;
+    int64 offset = 3;
     uint64 size = 4;
 }
 
@@ -194,6 +191,15 @@ message SyncFileRequest {
 }
 
 message SyncFileResponse {
+    Error error = 1;
+}
+
+message FlushRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+}
+
+message FlushResponse {
     Error error = 1;
 }
 
@@ -332,6 +338,9 @@ service Rfs {
     }
 
     rpc SyncFile (SyncFileRequest) returns (SyncFileResponse) {
+    }
+
+    rpc Flush (FlushRequest) returns (FlushResponse) {
     }
 
     rpc SetLock (SetLockRequest) returns (SetLockResponse) {

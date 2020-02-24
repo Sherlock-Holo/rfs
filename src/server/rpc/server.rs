@@ -9,21 +9,16 @@ use tonic::{Code, Request, Status};
 use tonic::Response;
 use uuid::Uuid;
 
-use pb::*;
-use pb::EntryType;
-use pb::read_dir_response::DirEntry;
-use pb::rfs_server::Rfs;
-
 use crate::errno::Errno;
-use crate::helper::{convert_fuse_attr_to_proto_attr, convert_proto_time_to_system_time};
+use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
+use crate::pb::*;
+use crate::pb;
+use crate::pb::read_dir_response::DirEntry;
+use crate::pb::rfs_server::Rfs;
 
 use super::super::filesystem::Filesystem;
 use super::super::filesystem::SetAttr;
 use super::user::User;
-
-pub mod pb {
-    tonic::include_proto!("proto");
-}
 
 type Result<T> = std::result::Result<T, Status>;
 
@@ -112,7 +107,7 @@ impl Rfs for Server {
 
             Ok(attr) => Ok(Response::new(LookupResponse {
                 result: Some(pb::lookup_response::Result::Attr(
-                    convert_fuse_attr_to_proto_attr(attr, &request.name),
+                    fuse_attr_into_proto_attr(attr, &request.name),
                 )),
             })),
         }
@@ -134,7 +129,7 @@ impl Rfs for Server {
 
             Ok(attr) => Ok(Response::new(MkdirResponse {
                 result: Some(pb::mkdir_response::Result::Attr(
-                    convert_fuse_attr_to_proto_attr(attr, &request.name),
+                    fuse_attr_into_proto_attr(attr, &request.name),
                 )),
             })),
         }
@@ -271,7 +266,7 @@ impl Rfs for Server {
         let user = self.get_user(request.head).await?;
 
         let data = match user
-            .read_file(request.file_handle_id, request.offset as i64, request.size)
+            .read_file(request.file_handle_id, request.offset, request.size)
             .await
         {
             Err(errno) => {
@@ -346,6 +341,14 @@ impl Rfs for Server {
 
             Ok(_) => Ok(Response::new(SyncFileResponse { error: None })),
         }
+    }
+
+    async fn flush(&self, request: Request<FlushRequest>) -> Result<Response<FlushResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        use
     }
 
     async fn set_lock(
@@ -454,7 +457,7 @@ impl Rfs for Server {
 
             Ok(attr) => Ok(Response::new(GetAttrResponse {
                 result: Some(pb::get_attr_response::Result::Attr(
-                    convert_fuse_attr_to_proto_attr(attr, ""),
+                    fuse_attr_into_proto_attr(attr, ""),
                 )),
             })),
         }
@@ -490,17 +493,17 @@ impl Rfs for Server {
                 None
             },
             atime: if let Some(atime) = attr.access_time {
-                Some(convert_proto_time_to_system_time(atime))
+                Some(convert_proto_time_to_system_time(Some(atime)))
             } else {
                 None
             },
             mtime: if let Some(mtime) = attr.modify_time {
-                Some(convert_proto_time_to_system_time(mtime))
+                Some(convert_proto_time_to_system_time(Some(mtime)))
             } else {
                 None
             },
             ctime: if let Some(ctime) = attr.change_time {
-                Some(convert_proto_time_to_system_time(ctime))
+                Some(convert_proto_time_to_system_time(Some(ctime)))
             } else {
                 None
             },
@@ -547,7 +550,7 @@ impl Rfs for Server {
 
             Ok(attr) => Ok(Response::new(SetAttrResponse {
                 result: Some(pb::set_attr_response::Result::Attr(
-                    convert_fuse_attr_to_proto_attr(attr, ""), // here the name should not important
+                    fuse_attr_into_proto_attr(attr, ""), // here the name should not important
                 )),
             })),
         }
