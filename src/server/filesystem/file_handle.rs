@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
+use std::ops::Deref;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
@@ -8,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
 use async_std::sync;
-use async_std::sync::{Arc, Mutex, Sender};
+use async_std::sync::{Arc, Mutex, RwLock, Sender};
 use async_std::task;
 use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
@@ -33,6 +34,13 @@ pub enum FileHandleKind {
     ReadWrite,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum LockKind {
+    NoLock,
+    Share,
+    Exclusive,
+}
+
 pub struct FileHandle {
     id: u64,
     inode: Inode,
@@ -42,6 +50,9 @@ pub struct FileHandle {
     kind: FileHandleKind,
 
     lock_queue: Option<LockQueue>,
+
+    /// record file handle is locked or not
+    lock_kind: Arc<RwLock<LockKind>>,
 }
 
 impl FileHandle {
@@ -52,6 +63,7 @@ impl FileHandle {
             sys_file,
             kind,
             lock_queue: None,
+            lock_kind: Arc::new(RwLock::new(LockKind::NoLock)),
         }
     }
 
@@ -150,6 +162,8 @@ impl FileHandle {
             self.lock_queue.replace(Arc::clone(&lock_queue));
         }
 
+        let lock_kind = Arc::clone(&self.lock_kind);
+
         Ok(task::spawn(async move {
             let (sender, receiver) = sync::channel(1);
 
@@ -164,13 +178,23 @@ impl FileHandle {
                 _ = lock_job.fuse() => true,
             };
 
+            if lock_success {
+                let mut lock_kind = lock_kind.write().await;
+
+                *lock_kind = if share {
+                    LockKind::Exclusive
+                } else {
+                    LockKind::Share
+                };
+            }
+
             lock_queue.lock().await.remove(&unique);
 
             lock_success
         }))
     }
 
-    pub fn try_set_lock(&self, share: bool) -> Result<()> {
+    pub async fn try_set_lock(&self, share: bool) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -181,6 +205,10 @@ impl FileHandle {
 
         fcntl::flock(raw_fd, flock_arg)?;
 
+        let mut lock_kind = self.lock_kind.write().await;
+
+        *lock_kind = LockKind::NoLock;
+
         Ok(())
     }
 
@@ -189,13 +217,21 @@ impl FileHandle {
 
         async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, FlockArg::Unlock)).await?;
 
+        let mut lock_kind = self.lock_kind.write().await;
+
+        *lock_kind = LockKind::NoLock;
+
         Ok(())
     }
 
-    pub fn try_release_lock(&self) -> Result<()> {
+    pub async fn try_release_lock(&self) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         fcntl::flock(raw_fd, FlockArg::UnlockNonblock)?;
+
+        let mut lock_kind = self.lock_kind.write().await;
+
+        *lock_kind = LockKind::NoLock;
 
         Ok(())
     }
@@ -227,6 +263,10 @@ impl FileHandle {
             }
         }
 
+        let mut lock_kind = self.lock_kind.write().await;
+
+        *lock_kind = LockKind::NoLock;
+
         Ok(())
     }
 
@@ -246,6 +286,11 @@ impl FileHandle {
 
     pub fn get_file_handle_kind(&self) -> FileHandleKind {
         self.kind
+    }
+
+    #[inline]
+    pub async fn get_lock_kind(&self) -> LockKind {
+        self.lock_kind.read().await.deref().clone()
     }
 }
 

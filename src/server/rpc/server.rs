@@ -17,6 +17,7 @@ use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 
 use super::super::filesystem::Filesystem;
+use super::super::filesystem::LockKind;
 use super::super::filesystem::SetAttr;
 use super::user::User;
 
@@ -447,6 +448,33 @@ impl Rfs for Server {
             }))
         } else {
             Ok(Response::new(InterruptResponse { error: None }))
+        }
+    }
+
+    async fn get_lock(
+        &self,
+        request: Request<GetLockRequest>,
+    ) -> Result<Response<GetLockResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        match user.get_lock_kind(request.file_handle_id).await {
+            Err(err) => Ok(Response::new(GetLockResponse {
+                result: Some(get_lock_response::Result::Error(err.into())),
+            })),
+
+            Ok(kind) => {
+                let kind = match kind {
+                    LockKind::NoLock => LockType::NoLock,
+                    LockKind::Share => LockType::ReadLock,
+                    LockKind::Exclusive => LockType::WriteLock,
+                };
+
+                Ok(Response::new(GetLockResponse {
+                    result: Some(get_lock_response::Result::LockType(kind.into())),
+                }))
+            }
         }
     }
 

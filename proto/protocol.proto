@@ -11,8 +11,9 @@ enum EntryType {
 }
 
 enum LockType {
-    ReadLock = 0;
-    WriteLock = 1;
+    NoLock = 0;
+    ReadLock = 1;
+    WriteLock = 2;
 }
 
 message Error {
@@ -295,6 +296,18 @@ message LogoutRequest {
 message LogoutResponse {
 }
 
+message GetLockRequest {
+    Header head = 1;
+    uint64 fileHandleId = 2;
+}
+
+message GetLockResponse {
+    oneof result {
+        LockType lockType = 1;
+        Error error = 2;
+    }
+}
+
 // no acl, no link
 service Rfs {
     // dir
@@ -348,6 +361,9 @@ service Rfs {
     }
 
     rpc Interrupt (InterruptRequest) returns (InterruptResponse) {
+    }
+
+    rpc GetLock (GetLockRequest) returns (GetLockResponse) {
     }
 
     // normal

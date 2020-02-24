@@ -20,7 +20,6 @@ use uuid::Uuid;
 
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::*;
-use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_client::RfsClient;
 
 pub struct Filesystem {
@@ -52,7 +51,7 @@ impl Filesystem {
 
         let uds_path: &'static str = string_to_static_str(uds_path);
 
-        let channel = Endpoint::try_from("lttp://[::]:50051")?
+        let channel = Endpoint::try_from("http://[::]:50051")?
             .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(uds_path)))
             .await?;
 
@@ -62,10 +61,7 @@ impl Filesystem {
         })
     }
 
-    pub async fn new_net(
-        uri: Uri,
-        tls_cfg: ClientTlsConfig,
-    ) -> Result<Self, tonic::transport::Error> {
+    pub async fn new(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
         let channel = Channel::builder(uri)
             .tls_config(tls_cfg)
             .tcp_keepalive(Some(Duration::from_secs(5)))

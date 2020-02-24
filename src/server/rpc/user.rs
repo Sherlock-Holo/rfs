@@ -12,6 +12,7 @@ use crate::errno::Errno;
 use crate::Result;
 
 use super::super::filesystem::FileHandle;
+use super::super::filesystem::LockKind;
 use super::super::filesystem::SetAttr;
 
 struct InnerUser {
@@ -140,7 +141,7 @@ impl User {
             default => return Err(Errno::from(libc::EWOULDBLOCK)),
         };
 
-        file_handle.try_set_lock(share)
+        file_handle.try_set_lock(share).await
     }
 
     pub async fn release_lock(&self, fh_id: u64) -> Result<()> {
@@ -151,7 +152,7 @@ impl User {
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?;
 
-        file_handle.lock().await.try_release_lock()?;
+        file_handle.lock().await.try_release_lock().await?;
 
         Ok(())
     }
@@ -170,5 +171,20 @@ impl User {
             .await;
 
         Ok(())
+    }
+
+    #[inline]
+    pub async fn get_lock_kind(&self, fh_id: u64) -> Result<LockKind> {
+        Ok(self
+            .0
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .lock()
+            .await
+            .get_lock_kind()
+            .await)
     }
 }

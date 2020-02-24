@@ -5,6 +5,7 @@ use nix::unistd;
 
 pub use attr::SetAttr;
 pub use file_handle::FileHandle;
+pub use file_handle::LockKind;
 pub use filesystem::Filesystem;
 
 use crate::Result;
