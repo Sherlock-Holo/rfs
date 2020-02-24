@@ -38,7 +38,11 @@ impl User {
 
     #[inline]
     pub async fn add_file_handle(&self, file_handle: FileHandle) {
-        self.0.write().await.file_handle_map.insert(file_handle.get_id(), Arc::new(Mutex::new(file_handle)));
+        self.0
+            .write()
+            .await
+            .file_handle_map
+            .insert(file_handle.get_id(), Arc::new(Mutex::new(file_handle)));
     }
 
     pub async fn read_file(&self, fh_id: u64, offset: i64, size: u64) -> Result<Vec<u8>> {
@@ -90,10 +94,16 @@ impl User {
         }
     }
 
-    pub async fn set_lock(self: &Arc<Self>, fh_id: u64, unique: u64, share: bool) -> Result<JoinHandle<bool>> {
+    pub async fn set_lock(
+        self: &Arc<Self>,
+        fh_id: u64,
+        unique: u64,
+        share: bool,
+    ) -> Result<JoinHandle<bool>> {
         let guard = self.0.read().await;
 
-        let file_handle = guard.file_handle_map
+        let file_handle = guard
+            .file_handle_map
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?;
 
@@ -105,14 +115,15 @@ impl User {
     pub async fn try_set_lock(&self, fh_id: u64, share: bool) -> Result<()> {
         let guard = self.0.read().await;
 
-        let file_handle = guard.file_handle_map
+        let file_handle = guard
+            .file_handle_map
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?;
 
         let file_handle = select! {
-                file_handle = file_handle.lock().fuse() => file_handle,
-                default => return Err(Errno::from(libc::EWOULDBLOCK)),
-            };
+            file_handle = file_handle.lock().fuse() => file_handle,
+            default => return Err(Errno::from(libc::EWOULDBLOCK)),
+        };
 
         file_handle.try_set_lock(share)
     }
@@ -120,7 +131,8 @@ impl User {
     pub async fn release_lock(&self, fh_id: u64) -> Result<()> {
         let guard = self.0.read().await;
 
-        let file_handle = guard.file_handle_map
+        let file_handle = guard
+            .file_handle_map
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?;
 
@@ -134,7 +146,8 @@ impl User {
     pub async fn interrupt_lock(&self, fh_id: u64, unique: u64) -> Result<()> {
         let guard = self.0.read().await;
 
-        let file_handle = guard.file_handle_map
+        let file_handle = guard
+            .file_handle_map
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?;
 

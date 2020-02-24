@@ -9,13 +9,13 @@ pub use filesystem::Filesystem;
 
 use crate::Result;
 
+mod attr;
 mod dir;
 mod entry;
 mod file;
-mod inode;
 mod file_handle;
-mod attr;
 mod filesystem;
+mod inode;
 
 pub fn chroot<P: NixPath>(new_root: P) -> Result<()> {
     unistd::chroot(&new_root)?;

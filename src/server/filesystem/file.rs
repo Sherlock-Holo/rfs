@@ -29,7 +29,12 @@ struct InnerFile {
 pub struct File(RwLock<InnerFile>);
 
 impl File {
-    pub async fn from_exist<P: AsRef<Path>>(parent: Inode, real_path: P, inode_gen: &AtomicU64, inode_map: &mut InodeMap) -> Result<Arc<Self>> {
+    pub async fn from_exist<P: AsRef<Path>>(
+        parent: Inode,
+        real_path: P,
+        inode_gen: &AtomicU64,
+        inode_map: &mut InodeMap,
+    ) -> Result<Arc<Self>> {
         fs::metadata(&real_path).await?;
 
         let real_path = real_path.as_ref().to_path_buf();
@@ -40,7 +45,10 @@ impl File {
 
         let file = Arc::new(File(RwLock::new(InnerFile {
             inode,
-            name: real_path.file_name().expect("name should be valid").to_os_string(),
+            name: real_path
+                .file_name()
+                .expect("name should be valid")
+                .to_os_string(),
             real_path: real_path.as_os_str().to_os_string(),
             parent,
         })));
@@ -62,7 +70,8 @@ impl File {
             kind: FileType::RegularFile,
             atime: metadata.accessed()?,
             mtime: metadata.modified()?,
-            ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
+            ctime: UNIX_EPOCH
+                + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
             perm: (metadata.permissions().mode() ^ libc::S_IFREG) as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),
@@ -107,7 +116,10 @@ impl File {
         let new_real_path = new_real_path.as_ref();
 
         guard.real_path = new_real_path.as_os_str().to_os_string();
-        guard.name = new_real_path.file_name().expect("name should be valid").to_os_string();
+        guard.name = new_real_path
+            .file_name()
+            .expect("name should be valid")
+            .to_os_string();
 
         Ok(())
     }

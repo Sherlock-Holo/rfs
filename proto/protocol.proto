@@ -276,13 +276,13 @@ message RegisterResponse {
     string uuid = 1;
 }
 
-message LoginRequest {
+/*message LoginRequest {
     string uuid = 1;
 }
 
 message LoginResponse {
     bool exist = 1;
-}
+}*/
 
 message LogoutRequest {
     string uuid = 1;
@@ -356,8 +356,8 @@ service Rfs {
     rpc Register (RegisterRequest) returns (RegisterResponse) {
     }
 
-    rpc Login (LoginRequest) returns (LoginResponse) {
-    }
+    /*rpc Login (LoginRequest) returns (LoginResponse) {
+    }*/
 
     rpc Logout (LogoutRequest) returns (LogoutResponse) {
     }

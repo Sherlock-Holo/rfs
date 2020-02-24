@@ -36,7 +36,10 @@ impl Filesystem {
     pub async fn lookup(&self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
         let name = name.clean()?;
 
-        let entry = self.inode_map.read().await
+        let entry = self
+            .inode_map
+            .read()
+            .await
             .get(&parent)
             .ok_or(Errno::from(libc::ENOENT))?
             .clone();
@@ -50,7 +53,25 @@ impl Filesystem {
 
     #[inline]
     pub async fn get_attr(&self, inode: Inode) -> Result<FileAttr> {
-        self.inode_map.read().await.get(&inode).ok_or(Errno::from(libc::ENOENT))?.get_attr().await
+        self.inode_map
+            .read()
+            .await
+            .get(&inode)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .get_attr()
+            .await
+    }
+
+    #[inline]
+    pub async fn get_name(&self, inode: Inode) -> Result<OsString> {
+        Ok(self
+            .inode_map
+            .read()
+            .await
+            .get(&inode)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .get_name()
+            .await)
     }
 
     pub async fn set_dir_attr(&self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
@@ -66,18 +87,35 @@ impl Filesystem {
     pub async fn create_dir(&self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
         let name = name.clean()?;
 
-        let entry = self.inode_map.read().await.get(&parent).ok_or(Errno::from(libc::ENOENT))?.clone();
+        let entry = self
+            .inode_map
+            .read()
+            .await
+            .get(&parent)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .clone();
 
         match entry {
             Entry::File(_) => Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => dir.create_dir(OsStr::new(&name), mode).await?.get_attr().await
+            Entry::Dir(dir) => {
+                dir.create_dir(OsStr::new(&name), mode)
+                    .await?
+                    .get_attr()
+                    .await
+            }
         }
     }
 
     pub async fn remove_entry(&self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
         let name = name.clean()?;
 
-        let entry = self.inode_map.read().await.get(&parent).ok_or(Errno::from(libc::ENOENT))?.clone();
+        let entry = self
+            .inode_map
+            .read()
+            .await
+            .get(&parent)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .clone();
 
         if let Entry::Dir(dir) = entry {
             dir.remove_entry(OsStr::new(&name), is_dir).await?;
@@ -88,7 +126,13 @@ impl Filesystem {
         Ok(())
     }
 
-    pub async fn rename(&self, old_parent: Inode, old_name: &OsStr, new_parent: Inode, new_name: &OsStr) -> Result<()> {
+    pub async fn rename(
+        &self,
+        old_parent: Inode,
+        old_name: &OsStr,
+        new_parent: Inode,
+        new_name: &OsStr,
+    ) -> Result<()> {
         let old_name = old_name.clean()?;
         let new_name = new_name.clean()?;
 
@@ -96,33 +140,52 @@ impl Filesystem {
 
         let old_parent = match guard.get(&old_parent).ok_or(Errno::from(libc::ENOENT))? {
             Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => Arc::clone(dir)
+            Entry::Dir(dir) => Arc::clone(dir),
         };
 
         let new_parent = match guard.get(&new_parent).ok_or(Errno::from(libc::ENOENT))? {
             Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => Arc::clone(dir)
+            Entry::Dir(dir) => Arc::clone(dir),
         };
 
         // release inode map lock
         drop(guard);
 
-        new_parent.add_child_from(&old_parent, OsStr::new(&old_name), OsStr::new(&new_name)).await
+        new_parent
+            .add_child_from(&old_parent, OsStr::new(&old_name), OsStr::new(&new_name))
+            .await
     }
 
     pub async fn open(&self, inode: Inode, flags: u32) -> Result<FileHandle> {
-        if let Entry::File(file) = self.inode_map.read().await
+        if let Entry::File(file) = self
+            .inode_map
+            .read()
+            .await
             .get(&inode)
             .ok_or(Errno::from(libc::ENOENT))?
         {
-            file.open(self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed), flags).await
+            file.open(
+                self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
+                flags,
+            )
+                .await
         } else {
             Err(Errno::from(libc::EISDIR))
         }
     }
 
-    pub async fn read_dir(&self, inode: Inode, offset: i64) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
-        let entry = self.inode_map.read().await.get(&inode).ok_or(Errno::from(libc::ENOENT))?.clone();
+    pub async fn read_dir(
+        &self,
+        inode: Inode,
+        offset: i64,
+    ) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
+        let entry = self
+            .inode_map
+            .read()
+            .await
+            .get(&inode)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .clone();
 
         if let Entry::Dir(dir) = entry {
             dir.read_dir(offset).await
@@ -131,21 +194,37 @@ impl Filesystem {
         }
     }
 
-    pub async fn create_file(&self, parent: Inode, name: &OsStr, mode: u32, flags: u32) -> Result<FileHandle> {
+    pub async fn create_file(
+        &self,
+        parent: Inode,
+        name: &OsStr,
+        mode: u32,
+        flags: u32,
+    ) -> Result<FileHandle> {
         let name = name.clean()?;
 
-        let entry = self.inode_map.read().await.get(&parent).ok_or(Errno::from(libc::ENOENT))?.clone();
+        let entry = self
+            .inode_map
+            .read()
+            .await
+            .get(&parent)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .clone();
 
         let dir = match entry {
             Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => dir
+            Entry::Dir(dir) => dir,
         };
 
         let file = dir.create_file(OsStr::new(&name), mode).await?;
 
         debug!("file created");
 
-        file.open(self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed), flags).await
+        file.open(
+            self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
+            flags,
+        )
+            .await
     }
 }
 
@@ -198,7 +277,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let dir_attr = filesystem.create_dir(1, OsStr::new("test"), 0o755).await.unwrap();
+        let dir_attr = filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
 
         assert_eq!(dir_attr.ino, 2);
         assert_eq!(dir_attr.kind, FileType::Directory);
@@ -215,7 +297,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
+            .await
+            .unwrap();
 
         assert_eq!(file_handle.get_id(), 1);
 
@@ -224,6 +309,42 @@ mod tests {
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
+    }
+
+    #[async_std::test]
+    async fn get_dir_name() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        chroot(tmp_dir.path().to_path_buf()).unwrap();
+
+        let filesystem = Filesystem::new().await.unwrap();
+
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o644)
+            .await
+            .unwrap();
+
+        assert_eq!(filesystem.get_name(2).await, Ok(OsString::from("test")));
+    }
+
+    #[async_std::test]
+    async fn get_file_name() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        chroot(tmp_dir.path().to_path_buf()).unwrap();
+
+        let filesystem = Filesystem::new().await.unwrap();
+
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
+            .await
+            .unwrap();
+
+        assert_eq!(filesystem.get_name(2).await, Ok(OsString::from("test")));
     }
 
     #[async_std::test]
@@ -236,7 +357,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("test"), 0o755).await.unwrap();
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
 
         let attr = filesystem.lookup(1, OsStr::new("test")).await.unwrap();
 
@@ -255,7 +379,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32).await.unwrap();
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
+            .await
+            .unwrap();
 
         let attr = filesystem.lookup(1, OsStr::new("test")).await.unwrap();
 
@@ -274,7 +401,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("test"), 0o755).await.unwrap();
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
 
         let attr = filesystem.get_attr(2).await.unwrap();
 
@@ -293,7 +423,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32).await.unwrap();
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
+            .await
+            .unwrap();
 
         let attr = filesystem.get_attr(2).await.unwrap();
 
@@ -312,7 +445,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("test"), 0o755).await.unwrap();
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
 
         let set_attr = SetAttr {
             ctime: None,
@@ -344,13 +480,22 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("test"), 0o755).await.unwrap();
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
 
         debug!("dir created");
 
-        filesystem.remove_entry(1, OsStr::new("test"), true).await.unwrap();
+        filesystem
+            .remove_entry(1, OsStr::new("test"), true)
+            .await
+            .unwrap();
 
-        assert_eq!(filesystem.lookup(1, OsStr::new("test")).await, Err(Errno::from(libc::ENOENT)));
+        assert_eq!(
+            filesystem.lookup(1, OsStr::new("test")).await,
+            Err(Errno::from(libc::ENOENT))
+        );
     }
 
     #[async_std::test]
@@ -363,11 +508,20 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32).await.unwrap();
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
+            .await
+            .unwrap();
 
-        filesystem.remove_entry(1, OsStr::new("test"), false).await.unwrap();
+        filesystem
+            .remove_entry(1, OsStr::new("test"), false)
+            .await
+            .unwrap();
 
-        assert_eq!(filesystem.lookup(1, OsStr::new("test")).await, Err(Errno::from(libc::ENOENT)));
+        assert_eq!(
+            filesystem.lookup(1, OsStr::new("test")).await,
+            Err(Errno::from(libc::ENOENT))
+        );
     }
 
     #[async_std::test]
@@ -380,9 +534,15 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("test"), 0o755).await.unwrap();
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
 
-        filesystem.rename(1, OsStr::new("test"), 1, OsStr::new("new-test")).await.unwrap();
+        filesystem
+            .rename(1, OsStr::new("test"), 1, OsStr::new("new-test"))
+            .await
+            .unwrap();
 
         let attr = filesystem.lookup(1, OsStr::new("new-test")).await.unwrap();
 
@@ -401,9 +561,15 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
-        filesystem.rename(1, OsStr::new("test"), 1, OsStr::new("new-test")).await.unwrap();
+        filesystem
+            .rename(1, OsStr::new("test"), 1, OsStr::new("new-test"))
+            .await
+            .unwrap();
 
         let attr = filesystem.lookup(1, OsStr::new("new-test")).await.unwrap();
 
@@ -422,12 +588,24 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("old"), 0o755).await.unwrap(); // inode 2
-        filesystem.create_dir(1, OsStr::new("new"), 0o755).await.unwrap(); // inode 3
+        filesystem
+            .create_dir(1, OsStr::new("old"), 0o755)
+            .await
+            .unwrap(); // inode 2
+        filesystem
+            .create_dir(1, OsStr::new("new"), 0o755)
+            .await
+            .unwrap(); // inode 3
 
-        filesystem.create_dir(2, OsStr::new("test"), 0o755).await.unwrap(); // inode 4
+        filesystem
+            .create_dir(2, OsStr::new("test"), 0o755)
+            .await
+            .unwrap(); // inode 4
 
-        filesystem.rename(2, OsStr::new("test"), 3, OsStr::new("test")).await.unwrap();
+        filesystem
+            .rename(2, OsStr::new("test"), 3, OsStr::new("test"))
+            .await
+            .unwrap();
 
         let attr = filesystem.lookup(3, OsStr::new("test")).await.unwrap();
 
@@ -446,12 +624,24 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("old"), 0o755).await.unwrap(); // inode 2
-        filesystem.create_dir(1, OsStr::new("new"), 0o755).await.unwrap(); // inode 3
+        filesystem
+            .create_dir(1, OsStr::new("old"), 0o755)
+            .await
+            .unwrap(); // inode 2
+        filesystem
+            .create_dir(1, OsStr::new("new"), 0o755)
+            .await
+            .unwrap(); // inode 3
 
-        filesystem.create_file(2, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap(); // inode 4
+        filesystem
+            .create_file(2, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap(); // inode 4
 
-        filesystem.rename(2, OsStr::new("test"), 3, OsStr::new("test")).await.unwrap();
+        filesystem
+            .rename(2, OsStr::new("test"), 3, OsStr::new("test"))
+            .await
+            .unwrap();
 
         let attr = filesystem.lookup(3, OsStr::new("test")).await.unwrap();
 
@@ -470,8 +660,14 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_dir(1, OsStr::new("test-1"), 0o755).await.unwrap(); // inode 2
-        filesystem.create_dir(1, OsStr::new("test-2"), 0o755).await.unwrap(); // inode 3
+        filesystem
+            .create_dir(1, OsStr::new("test-1"), 0o755)
+            .await
+            .unwrap(); // inode 2
+        filesystem
+            .create_dir(1, OsStr::new("test-2"), 0o755)
+            .await
+            .unwrap(); // inode 3
 
         let child_info = filesystem.read_dir(1, 0).await.unwrap();
 
@@ -512,12 +708,18 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32).await.unwrap(); // file handle id 1 used
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
+            .await
+            .unwrap(); // file handle id 1 used
 
         let file_handle = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
-        assert_eq!(file_handle.get_file_handle_kind(), FileHandleKind::ReadWrite);
+        assert_eq!(
+            file_handle.get_file_handle_kind(),
+            FileHandleKind::ReadWrite
+        );
 
         let attr = file_handle.get_attr().await.unwrap();
 
@@ -536,7 +738,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap(); // file handle id 1 used
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap(); // file handle id 1 used
 
         let file_handle = filesystem.open(2, libc::O_RDONLY as u32).await.unwrap();
 
@@ -560,12 +765,18 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap(); // file handle id 1 used
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap(); // file handle id 1 used
 
         let file_handle = filesystem.open(2, libc::O_WRONLY as u32).await.unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
-        assert_eq!(file_handle.get_file_handle_kind(), FileHandleKind::WriteOnly);
+        assert_eq!(
+            file_handle.get_file_handle_kind(),
+            FileHandleKind::WriteOnly
+        );
 
         let attr = file_handle.get_attr().await.unwrap();
 
@@ -584,7 +795,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let mut file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let written = file_handle.write(b"test", 0).await.unwrap();
         file_handle.flush().await.unwrap();
@@ -603,7 +817,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let mut file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let read = file_handle.read(&mut vec![0; 0], 0).await.unwrap();
         assert_eq!(read, 0);
@@ -628,7 +845,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let mut file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let mut file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         file_handle.write(b"test", 0).await.unwrap();
         file_handle.flush().await.unwrap();
@@ -668,7 +888,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
@@ -701,7 +924,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
@@ -732,7 +958,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
@@ -750,13 +979,19 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
         assert_eq!(file_handle.try_set_lock(true), Ok(()));
 
-        assert_eq!(file_handle2.try_set_lock(false), Err(Errno::from(libc::EWOULDBLOCK)))
+        assert_eq!(
+            file_handle2.try_set_lock(false),
+            Err(Errno::from(libc::EWOULDBLOCK))
+        )
     }
 
     #[async_std::test]
@@ -769,7 +1004,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
@@ -808,13 +1046,22 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
         assert_eq!(file_handle.try_set_lock(false), Ok(()));
-        assert_eq!(file_handle2.try_set_lock(true), Err(Errno::from(libc::EWOULDBLOCK)));
-        assert_eq!(file_handle2.try_set_lock(false), Err(Errno::from(libc::EWOULDBLOCK)));
+        assert_eq!(
+            file_handle2.try_set_lock(true),
+            Err(Errno::from(libc::EWOULDBLOCK))
+        );
+        assert_eq!(
+            file_handle2.try_set_lock(false),
+            Err(Errno::from(libc::EWOULDBLOCK))
+        );
     }
 
     #[async_std::test]
@@ -827,7 +1074,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
@@ -849,7 +1099,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
@@ -871,7 +1124,10 @@ mod tests {
 
         let filesystem = Filesystem::new().await.unwrap();
 
-        let file_handle = filesystem.create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32).await.unwrap();
+        let file_handle = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 

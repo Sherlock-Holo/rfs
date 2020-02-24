@@ -6,7 +6,8 @@ use crate::server::{PbAttr, PbEntryType};
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-        where F: FnOnce(&mut Self),
+        where
+            F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -16,7 +17,8 @@ pub trait Apply: Sized {
 impl<T> Apply for T {}
 
 fn convert_system_time_to_proto_time(sys_time: SystemTime) -> Option<prost_types::Timestamp> {
-    sys_time.duration_since(UNIX_EPOCH)
+    sys_time
+        .duration_since(UNIX_EPOCH)
         .map_or(None, |duration| {
             Some(prost_types::Timestamp {
                 seconds: duration.as_secs() as i64,
@@ -37,7 +39,7 @@ pub fn convert_fuse_attr_to_proto_attr(fuse_attr: FileAttr, name: &str) -> PbAtt
         r#type: match fuse_attr.kind {
             FileType::Directory => PbEntryType::Dir.into(),
             FileType::RegularFile => PbEntryType::File.into(),
-            _ => unreachable!()
+            _ => unreachable!(),
         },
         access_time: convert_system_time_to_proto_time(fuse_attr.atime),
         modify_time: convert_system_time_to_proto_time(fuse_attr.mtime),

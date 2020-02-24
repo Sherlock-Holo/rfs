@@ -1,6 +1,6 @@
 use std::backtrace::{Backtrace, BacktraceStatus};
-use std::fmt::{Debug, Display, Formatter};
 use std::fmt;
+use std::fmt::{Debug, Display, Formatter};
 use std::io::Error as IoError;
 use std::os::raw::c_int;
 
@@ -48,7 +48,9 @@ impl From<NixError> for Errno {
     fn from(err: NixError) -> Self {
         match err {
             NixError::Sys(errno) => Errno(errno as libc::c_int, Backtrace::capture()),
-            NixError::InvalidPath | NixError::InvalidUtf8 => Errno(libc::EINVAL, Backtrace::capture()),
+            NixError::InvalidPath | NixError::InvalidUtf8 => {
+                Errno(libc::EINVAL, Backtrace::capture())
+            }
             NixError::UnsupportedOperation => Errno(libc::ENOTSUP, Backtrace::capture()),
         }
     }
@@ -69,7 +71,7 @@ impl From<c_int> for Errno {
 impl From<Errno> for PbError {
     fn from(err: Errno) -> Self {
         PbError {
-            err: Some(PbErrKind::Errno(err.0 as u32))
+            err: Some(PbErrKind::Errno(err.0 as u32)),
         }
     }
 }

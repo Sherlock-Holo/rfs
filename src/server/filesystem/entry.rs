@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::sync::Arc;
 
 use fuse::FileAttr;
@@ -18,7 +19,7 @@ impl Clone for Entry {
     fn clone(&self) -> Self {
         match self {
             Entry::Dir(dir) => Entry::Dir(Arc::clone(dir)),
-            Entry::File(file) => Entry::File(Arc::clone(file))
+            Entry::File(file) => Entry::File(Arc::clone(file)),
         }
     }
 }
@@ -27,14 +28,21 @@ impl Entry {
     pub async fn get_attr(&self) -> Result<FileAttr> {
         match self {
             Entry::Dir(dir) => dir.get_attr().await,
-            Entry::File(file) => file.get_attr().await
+            Entry::File(file) => file.get_attr().await,
         }
     }
 
     pub async fn get_inode(&self) -> Inode {
         match self {
             Entry::Dir(dir) => dir.get_inode().await,
-            Entry::File(file) => file.get_inode().await
+            Entry::File(file) => file.get_inode().await,
+        }
+    }
+
+    pub async fn get_name(&self) -> OsString {
+        match self {
+            Entry::Dir(dir) => dir.get_name().await,
+            Entry::File(file) => file.get_name().await,
         }
     }
 }

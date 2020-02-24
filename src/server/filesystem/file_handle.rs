@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -7,8 +8,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
-use async_std::sync::{Arc, Mutex, Sender};
 use async_std::sync;
+use async_std::sync::{Arc, Mutex, Sender};
 use async_std::task;
 use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
@@ -99,7 +100,8 @@ impl FileHandle {
             kind: FileType::RegularFile,
             atime: metadata.accessed()?,
             mtime: metadata.modified()?,
-            ctime: UNIX_EPOCH + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
+            ctime: UNIX_EPOCH
+                + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
             perm: (metadata.permissions().mode() ^ libc::S_IFREG) as u16,
             uid: metadata.uid(),
             gid: metadata.gid(),
@@ -147,9 +149,7 @@ impl FileHandle {
 
             debug!("save unique {} lock canceler", unique);
 
-            let lock_job = async_std::task::spawn_blocking(move || {
-                fcntl::flock(raw_fd, flock_arg)
-            });
+            let lock_job = async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
 
             let lock_success = select! {
                 _ = receiver.recv().fuse() => false,
@@ -179,9 +179,7 @@ impl FileHandle {
     pub async fn release_lock(&self) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
-        async_std::task::spawn_blocking(move || {
-            fcntl::flock(raw_fd, FlockArg::Unlock)
-        }).await?;
+        async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, FlockArg::Unlock)).await?;
 
         Ok(())
     }
@@ -229,7 +227,6 @@ impl FileHandle {
         Ok(())
     }
 
-    #[inline]
     pub fn get_id(&self) -> u64 {
         self.id
     }
