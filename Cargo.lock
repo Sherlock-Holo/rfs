@@ -290,7 +290,7 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 [[package]]
 name = "fuse"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#7387b0bff4a0951e5790582aa7ceacc9ee1eeb14"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#3a2b5ff654ca6d13084ed37f15bbea3282bcd308"
 dependencies = [
  "fuse-abi",
  "fuse-sys",
@@ -302,12 +302,12 @@ dependencies = [
 [[package]]
 name = "fuse-abi"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#7387b0bff4a0951e5790582aa7ceacc9ee1eeb14"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#3a2b5ff654ca6d13084ed37f15bbea3282bcd308"
 
 [[package]]
 name = "fuse-sys"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#7387b0bff4a0951e5790582aa7ceacc9ee1eeb14"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#3a2b5ff654ca6d13084ed37f15bbea3282bcd308"
 dependencies = [
  "pkg-config",
 ]
