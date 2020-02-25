@@ -18,8 +18,8 @@ pub enum Entry {
 impl Clone for Entry {
     fn clone(&self) -> Self {
         match self {
-            Entry::Dir(dir) => Entry::Dir(Arc::clone(dir)),
-            Entry::File(file) => Entry::File(Arc::clone(file)),
+            Entry::Dir(dir) => Entry::Dir(dir.clone()),
+            Entry::File(file) => Entry::File(file.clone()),
         }
     }
 }
@@ -49,7 +49,7 @@ impl Entry {
 
 impl From<&Arc<Dir>> for Entry {
     fn from(dir: &Arc<Dir>) -> Self {
-        Entry::Dir(Arc::clone(dir))
+        Entry::Dir(dir.clone())
     }
 }
 
@@ -61,7 +61,7 @@ impl From<Arc<Dir>> for Entry {
 
 impl From<&Arc<File>> for Entry {
     fn from(file: &Arc<File>) -> Self {
-        Entry::File(Arc::clone(file))
+        Entry::File(file.clone())
     }
 }
 

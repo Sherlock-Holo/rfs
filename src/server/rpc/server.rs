@@ -49,7 +49,7 @@ impl Server {
             Status::new(Code::InvalidArgument, "user not found")
         })?;
 
-        Ok(Arc::clone(user))
+        Ok(user.clone())
     }
 }
 

@@ -72,7 +72,7 @@ impl Dir {
             parent,
             children: None,
             inode_gen,
-            inode_map: Arc::clone(&inode_map),
+            inode_map: inode_map.clone(),
         })));
 
         inode_map.write().await.insert(inode, Entry::from(&dir));
@@ -191,8 +191,8 @@ impl Dir {
         let mut guard = self.0.write().await;
 
         let parent_path = PathBuf::from(guard.real_path.clone());
-        let inode_map = Arc::clone(&guard.inode_map);
-        let inode_gen = Arc::clone(&guard.inode_gen);
+        let inode_map = guard.inode_map.clone();
+        let inode_gen = guard.inode_gen.clone();
         let parent_inode = guard.parent;
 
         let children_map = &mut guard
@@ -242,10 +242,10 @@ impl Dir {
         debug!("guard acquired");
 
         let parent_path = PathBuf::from(guard.real_path.clone());
-        let inode_map = Arc::clone(&guard.inode_map);
+        let inode_map = guard.inode_map.clone();
         let parent_inode = guard.parent;
 
-        let inode_gen = Arc::clone(&guard.inode_gen);
+        let inode_gen = guard.inode_gen.clone();
 
         let children_map = guard
             .children
@@ -291,7 +291,7 @@ impl Dir {
 
         let mut guard = self.0.write().await;
 
-        let inode_map = Arc::clone(&guard.inode_map);
+        let inode_map = guard.inode_map.clone();
         let mut inode_map = inode_map.write().await;
 
         let children_map = guard
@@ -467,7 +467,7 @@ impl Dir {
         let mut dir_entries = fs::read_dir(&guard.real_path).await?;
 
         let parent_path = PathBuf::from(guard.real_path.clone());
-        let inode_map = Arc::clone(&guard.inode_map);
+        let inode_map = guard.inode_map.clone();
 
         debug!("locking inode map");
 
@@ -486,8 +486,8 @@ impl Dir {
                     Dir::from_exist(
                         guard.parent,
                         &dir_entry_real_path,
-                        Arc::clone(&guard.inode_gen),
-                        Arc::clone(&guard.inode_map),
+                        guard.inode_gen.clone(),
+                        guard.inode_map.clone(),
                     )
                         .await?,
                 )

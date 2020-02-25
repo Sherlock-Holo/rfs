@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use async_std::sync::{Arc, Mutex, RwLock, Sender};
+use async_std::sync::{Arc, Mutex, RwLock};
 use async_std::task::JoinHandle;
 use chrono::prelude::*;
 use fuse::FileAttr;

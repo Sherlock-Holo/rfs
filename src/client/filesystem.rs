@@ -724,7 +724,7 @@ impl FuseFilesystem for Filesystem {
         });
     }
 
-    fn fsync(&mut self, _req: &Request, inode: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
+    fn fsync(&mut self, _req: &Request, _inode: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
         let mut client = self.rpc_client.clone();
@@ -911,7 +911,7 @@ impl FuseFilesystem for Filesystem {
         _lock_owner: u64,
         start: u64,
         end: u64,
-        typ: u32,
+        _typ: u32,
         pid: u32,
         reply: ReplyLock,
     ) {

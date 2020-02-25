@@ -148,7 +148,7 @@ impl FileHandle {
         &mut self,
         unique: u64,
         share: bool,
-        lock_queue: LockTable,
+        lock_table: LockTable,
     ) -> Result<JoinHandle<bool>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
@@ -159,15 +159,15 @@ impl FileHandle {
         };
 
         if self.lock_queue.is_none() {
-            self.lock_queue.replace(Arc::clone(&lock_queue));
+            self.lock_queue.replace(lock_table.clone());
         }
 
-        let lock_kind = Arc::clone(&self.lock_kind);
+        let lock_kind = self.lock_kind.clone();
 
         let (sender, receiver) = sync::channel(1);
 
         // save lock canceler at first, ensure when return JoinHandle, lock canceler is usable
-        lock_queue.lock().await.insert(unique, sender);
+        lock_table.lock().await.insert(unique, sender);
 
         debug!("save unique {} lock canceler", unique);
 
@@ -189,7 +189,7 @@ impl FileHandle {
                 };
             }
 
-            lock_queue.lock().await.remove(&unique);
+            lock_table.lock().await.remove(&unique);
 
             lock_success
         }))

@@ -25,7 +25,7 @@ impl Filesystem {
         let inode_map = Arc::new(RwLock::new(InodeMap::new()));
         let inode_gen = Arc::new(AtomicU64::new(1));
 
-        let _root = Dir::from_exist(1, "/", Arc::clone(&inode_gen), Arc::clone(&inode_map)).await?;
+        let _root = Dir::from_exist(1, "/", inode_gen.clone(), inode_map.clone()).await?;
 
         Ok(Self {
             inode_map,
@@ -140,12 +140,12 @@ impl Filesystem {
 
         let old_parent = match guard.get(&old_parent).ok_or(Errno::from(libc::ENOENT))? {
             Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => Arc::clone(dir),
+            Entry::Dir(dir) => dir.clone(),
         };
 
         let new_parent = match guard.get(&new_parent).ok_or(Errno::from(libc::ENOENT))? {
             Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => Arc::clone(dir),
+            Entry::Dir(dir) => dir.clone(),
         };
 
         // release inode map lock
@@ -902,10 +902,10 @@ mod tests {
 
         let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+        let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
         let lock_job = file_handle
-            .set_lock(1, true, Arc::clone(&lock_queue))
+            .set_lock(1, true, lock_table.clone())
             .await
             .unwrap();
 
@@ -916,7 +916,7 @@ mod tests {
 
         assert!(lock_job);
 
-        let lock_job = file_handle2.set_lock(2, true, lock_queue).await.unwrap();
+        let lock_job = file_handle2.set_lock(2, true, lock_table).await.unwrap();
 
         let lock_job = select! {
             result = lock_job.fuse() => result,
@@ -943,10 +943,10 @@ mod tests {
 
         let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+        let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
         let lock_job = file_handle
-            .set_lock(1, true, Arc::clone(&lock_queue))
+            .set_lock(1, true, lock_table.clone())
             .await
             .unwrap();
 
@@ -957,7 +957,7 @@ mod tests {
 
         assert!(lock_job);
 
-        let lock_job = file_handle2.set_lock(2, false, lock_queue).await.unwrap();
+        let lock_job = file_handle2.set_lock(2, false, lock_table).await.unwrap();
 
         select! {
             result = lock_job.fuse() => panic!("set not share lock success"),
@@ -1028,10 +1028,10 @@ mod tests {
 
         let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+        let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
         let lock_job = file_handle
-            .set_lock(1, false, Arc::clone(&lock_queue))
+            .set_lock(1, false, lock_table.clone())
             .await
             .unwrap();
 
@@ -1043,7 +1043,7 @@ mod tests {
         assert!(lock_job);
 
         let lock_job = file_handle2
-            .set_lock(2, false, Arc::clone(&lock_queue))
+            .set_lock(2, false, lock_table.clone())
             .await
             .unwrap();
 
@@ -1053,7 +1053,7 @@ mod tests {
         }
         ;
 
-        let lock_job = file_handle2.set_lock(3, true, lock_queue).await.unwrap();
+        let lock_job = file_handle2.set_lock(3, true, lock_table).await.unwrap();
 
         select! {
             result = lock_job.fuse() => panic!("set share lock should failed"),
@@ -1160,21 +1160,21 @@ mod tests {
 
         let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
+        let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
         let lock_job = file_handle
-            .set_lock(1, false, Arc::clone(&lock_queue))
+            .set_lock(1, false, lock_table.clone())
             .await
             .unwrap();
 
         assert!(lock_job.await);
 
         let lock_job = file_handle2
-            .set_lock(2, false, Arc::clone(&lock_queue))
+            .set_lock(2, false, lock_table.clone())
             .await
             .unwrap();
 
-        lock_queue.lock().await.get(&2).unwrap().send(()).await;
+        lock_table.lock().await.get(&2).unwrap().send(()).await;
 
         debug!("interrupt sent");
 
