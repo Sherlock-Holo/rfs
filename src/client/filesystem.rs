@@ -909,14 +909,63 @@ impl FuseFilesystem for Filesystem {
         _ino: u64,
         fh: u64,
         _lock_owner: u64,
-        _start: u64,
-        _end: u64,
+        start: u64,
+        end: u64,
         typ: u32,
-        _pid: u32,
+        pid: u32,
         reply: ReplyLock,
     ) {
-        // TODO implement next version
-        reply.error(libc::ENOSYS)
+        let header = self.get_rpc_header();
+
+        let mut client = self.rpc_client.clone();
+
+        let rpc_req = TonicRequest::new(GetLockRequest {
+            head: header,
+            file_handle_id: fh,
+        });
+
+        task::spawn(async move {
+            let result = match client.get_lock(rpc_req).await {
+                Err(err) => {
+                    error!("get_lock rpc has error {}", err);
+                    reply.error(libc::EIO);
+
+                    return;
+                }
+
+                Ok(resp) => {
+                    if let Some(result) = resp.into_inner().result {
+                        result
+                    } else {
+                        error!("get_lock result is None");
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+                }
+            };
+
+            match result {
+                get_lock_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                get_lock_response::Result::LockType(lock_type) => {
+                    let lock_type = match lock_type {
+                        n if n == LockType::ReadLock as i32 => libc::F_RDLCK,
+                        n if n == LockType::WriteLock as i32 => libc::F_WRLCK,
+                        n if n == LockType::NoLock as i32 => libc::F_UNLCK, // TODO is it right way?
+                        _ => {
+                            error!("unknown lock type {}", lock_type);
+
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+                    };
+
+                    reply.locked(start, end, lock_type as u32, pid);
+                }
+            }
+        });
     }
 
     fn setlk(
