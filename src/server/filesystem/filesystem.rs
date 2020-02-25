@@ -245,7 +245,7 @@ mod tests {
     use tempfile;
 
     use crate::log_init;
-    use crate::server::filesystem::chroot;
+    use crate::server::filesystem::{chroot, LockKind};
     use crate::server::filesystem::file_handle::FileHandleKind;
 
     use super::*;
@@ -1179,5 +1179,49 @@ mod tests {
         debug!("interrupt sent");
 
         assert!(!lock_job.await)
+    }
+
+    #[async_std::test]
+    async fn get_lock_kind() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        chroot(tmp_dir.path().to_path_buf()).unwrap();
+
+        let filesystem = Filesystem::new().await.unwrap();
+
+        let (mut file_handle, _) = filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
+
+        assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
+
+        let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
+
+        file_handle
+            .set_lock(1, false, lock_table.clone())
+            .await
+            .unwrap()
+            .await;
+
+        assert_eq!(file_handle.get_lock_kind().await, LockKind::Exclusive);
+
+        file_handle.release_lock().await.unwrap();
+
+        assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
+
+        file_handle
+            .set_lock(1, true, lock_table.clone())
+            .await
+            .unwrap()
+            .await;
+
+        assert_eq!(file_handle.get_lock_kind().await, LockKind::Share);
+
+        file_handle.release_lock().await.unwrap();
+
+        assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
     }
 }

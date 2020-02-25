@@ -183,9 +183,9 @@ impl FileHandle {
                 let mut lock_kind = lock_kind.write().await;
 
                 *lock_kind = if share {
-                    LockKind::Exclusive
-                } else {
                     LockKind::Share
+                } else {
+                    LockKind::Exclusive
                 };
             }
 
@@ -208,7 +208,11 @@ impl FileHandle {
 
         let mut lock_kind = self.lock_kind.write().await;
 
-        *lock_kind = LockKind::NoLock;
+        *lock_kind = if share {
+            LockKind::Share
+        } else {
+            LockKind::Exclusive
+        };
 
         Ok(())
     }
