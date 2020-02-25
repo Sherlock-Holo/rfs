@@ -982,8 +982,8 @@ mod tests {
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        assert_eq!(file_handle.try_set_lock(true), Ok(()));
-        assert_eq!(file_handle2.try_set_lock(true), Ok(()));
+        assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
+        assert_eq!(file_handle2.try_set_lock(true).await, Ok(()));
     }
 
     #[async_std::test]
@@ -1003,10 +1003,10 @@ mod tests {
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        assert_eq!(file_handle.try_set_lock(true), Ok(()));
+        assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
 
         assert_eq!(
-            file_handle2.try_set_lock(false),
+            file_handle2.try_set_lock(false).await,
             Err(Errno::from(libc::EWOULDBLOCK))
         )
     }
@@ -1078,13 +1078,13 @@ mod tests {
 
         let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
 
-        assert_eq!(file_handle.try_set_lock(false), Ok(()));
+        assert_eq!(file_handle.try_set_lock(false).await, Ok(()));
         assert_eq!(
-            file_handle2.try_set_lock(true),
+            file_handle2.try_set_lock(true).await,
             Err(Errno::from(libc::EWOULDBLOCK))
         );
         assert_eq!(
-            file_handle2.try_set_lock(false),
+            file_handle2.try_set_lock(false).await,
             Err(Errno::from(libc::EWOULDBLOCK))
         );
     }
@@ -1113,7 +1113,7 @@ mod tests {
         assert!(lock_job.await);
         assert_eq!(file_handle.release_lock().await, Ok(()));
 
-        assert_eq!(file_handle2.try_set_lock(false), Ok(()));
+        assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
     #[async_std::test]
@@ -1140,7 +1140,7 @@ mod tests {
         assert!(lock_job.await);
         assert_eq!(file_handle.release_lock().await, Ok(()));
 
-        assert_eq!(file_handle2.try_set_lock(false), Ok(()));
+        assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
     #[async_std::test]
@@ -1169,9 +1169,12 @@ mod tests {
 
         assert!(lock_job.await);
 
-        let lock_job = file_handle2.set_lock(2, false, lock_queue).await.unwrap();
+        let lock_job = file_handle2
+            .set_lock(2, false, Arc::clone(&lock_queue))
+            .await
+            .unwrap();
 
-        file_handle2.interrupt_lock(2).await;
+        lock_queue.lock().await.get(&2).unwrap().send(()).await;
 
         debug!("interrupt sent");
 

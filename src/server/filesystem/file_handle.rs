@@ -25,7 +25,7 @@ use crate::Result;
 use super::attr::SetAttr;
 use super::inode::Inode;
 
-type LockQueue = Arc<Mutex<BTreeMap<u64, Sender<()>>>>;
+pub type LockTable = Arc<Mutex<BTreeMap<u64, Sender<()>>>>;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
@@ -49,7 +49,7 @@ pub struct FileHandle {
     // avoid useless read/write syscall to improve performance
     kind: FileHandleKind,
 
-    lock_queue: Option<LockQueue>,
+    lock_queue: Option<LockTable>,
 
     /// record file handle is locked or not
     lock_kind: Arc<RwLock<LockKind>>,
@@ -148,7 +148,7 @@ impl FileHandle {
         &mut self,
         unique: u64,
         share: bool,
-        lock_queue: LockQueue,
+        lock_queue: LockTable,
     ) -> Result<JoinHandle<bool>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
@@ -164,13 +164,14 @@ impl FileHandle {
 
         let lock_kind = Arc::clone(&self.lock_kind);
 
+        let (sender, receiver) = sync::channel(1);
+
+        // save lock canceler at first, ensure when return JoinHandle, lock canceler is usable
+        lock_queue.lock().await.insert(unique, sender);
+
+        debug!("save unique {} lock canceler", unique);
+
         Ok(task::spawn(async move {
-            let (sender, receiver) = sync::channel(1);
-
-            lock_queue.lock().await.insert(unique, sender);
-
-            debug!("save unique {} lock canceler", unique);
-
             let lock_job = async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
 
             let lock_success = select! {
@@ -234,23 +235,6 @@ impl FileHandle {
         *lock_kind = LockKind::NoLock;
 
         Ok(())
-    }
-
-    //TODO should I remove this method?
-    pub async fn interrupt_lock(&self, unique: u64) {
-        debug!("try to cancel unique {} lock", unique);
-
-        if let Some(lock_queue) = self.lock_queue.as_ref() {
-            if let Some(lock_canceler) = lock_queue.lock().await.get(&unique) {
-                debug!("unique {} lock canceler found", unique);
-
-                lock_canceler.send(()).await;
-
-                debug!("lock cancel");
-            } else {
-                debug!("unique {} lock canceler not found", unique);
-            }
-        }
     }
 
     // flush should release all lock
