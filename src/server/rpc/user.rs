@@ -13,25 +13,25 @@ use crate::Result;
 
 use super::super::filesystem::FileHandle;
 use super::super::filesystem::LockKind;
+use super::super::filesystem::LockTable;
 use super::super::filesystem::SetAttr;
 
 struct InnerUser {
     uuid: Uuid,
     file_handle_map: BTreeMap<u64, Arc<Mutex<FileHandle>>>,
     last_alive_time: DateTime<Local>,
-    lock_queue: Arc<Mutex<BTreeMap<u64, Sender<()>>>>,
+    lock_table: LockTable,
 }
 
 pub struct User(RwLock<InnerUser>);
 
-// TODO fix may block user lock
 impl User {
     pub fn new(uuid: Uuid) -> Self {
         Self(RwLock::new(InnerUser {
             uuid,
             file_handle_map: BTreeMap::new(),
             last_alive_time: Local::now(),
-            lock_queue: Arc::new(Mutex::new(BTreeMap::new())),
+            lock_table: Arc::new(Mutex::new(BTreeMap::new())),
         }))
     }
 
@@ -50,31 +50,45 @@ impl User {
     }
 
     pub async fn read_file(&self, fh_id: u64, offset: i64, size: u64) -> Result<Vec<u8>> {
-        if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
-            let mut buf = vec![0; size as usize - offset as usize];
+        let file_handle = self
+            .0
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
 
-            let n = file_handle.lock().await.read(&mut buf, offset).await?;
+        let mut buf = vec![0; size as usize - offset as usize];
 
-            buf.truncate(n);
+        let n = file_handle.lock().await.read(&mut buf, offset).await?;
 
-            Ok(buf)
-        } else {
-            Err(Errno::from(libc::EBADF))
-        }
+        buf.truncate(n);
+
+        Ok(buf)
     }
 
     pub async fn write_file(&self, fh_id: u64, offset: i64, data: &[u8]) -> Result<usize> {
-        if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
-            file_handle.lock().await.write(data, offset).await
-        } else {
-            Err(Errno::from(libc::EBADF))
-        }
+        let file_handle = self
+            .0
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
+
+        let written = file_handle.lock().await.write(data, offset).await?;
+
+        Ok(written)
     }
 
     pub async fn close_file(&self, fh_id: u64) -> Result<()> {
         let mut guard = self.0.write().await;
 
         if let Some(file_handle) = guard.file_handle_map.remove(&fh_id) {
+            drop(guard); // release lock as soon as possible
+
             // before close file handle, flush data which may still in kernel buffer
             file_handle.lock().await.flush().await
         } else {
@@ -83,27 +97,48 @@ impl User {
     }
 
     pub async fn sync_file(&self, fh_id: u64) -> Result<()> {
-        if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
-            file_handle.lock().await.fsync(false).await
-        } else {
-            Err(Errno::from(libc::EBADF))
-        }
+        let file_handle = self
+            .0
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
+
+        file_handle.lock().await.fsync(false).await?;
+
+        Ok(())
     }
 
     pub async fn flush(&self, fh_id: u64) -> Result<()> {
-        if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
-            file_handle.lock().await.flush().await
-        } else {
-            Err(Errno::from(libc::EBADF))
-        }
+        let file_handle = self
+            .0
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
+
+        file_handle.lock().await.flush().await?;
+
+        Ok(())
     }
 
     pub async fn set_file_attr(&self, fh_id: u64, set_attr: SetAttr) -> Result<FileAttr> {
-        if let Some(file_handle) = self.0.read().await.file_handle_map.get(&fh_id) {
-            file_handle.lock().await.set_attr(set_attr).await
-        } else {
-            Err(Errno::from(libc::EBADF))
-        }
+        let file_handle = self
+            .0
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
+
+        let attr = file_handle.lock().await.set_attr(set_attr).await?;
+
+        Ok(attr)
     }
 
     pub async fn set_lock(
@@ -114,27 +149,34 @@ impl User {
     ) -> Result<JoinHandle<bool>> {
         let guard = self.0.read().await;
 
+        let lock_table = guard.lock_table.clone();
+
         let file_handle = guard
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?;
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
+
+        drop(guard); // release lock as soon as possible
 
         let lock_job = file_handle
             .lock()
             .await
-            .set_lock(unique, share, Arc::clone(&guard.lock_queue))
+            .set_lock(unique, share, lock_table)
             .await?;
 
         Ok(lock_job)
     }
 
     pub async fn try_set_lock(&self, fh_id: u64, share: bool) -> Result<()> {
-        let guard = self.0.read().await;
-
-        let file_handle = guard
+        let file_handle = self
+            .0
+            .read()
+            .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?;
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
 
         let file_handle = select! {
             file_handle = file_handle.lock().fuse() => file_handle,
@@ -145,12 +187,14 @@ impl User {
     }
 
     pub async fn release_lock(&self, fh_id: u64) -> Result<()> {
-        let guard = self.0.read().await;
-
-        let file_handle = guard
+        let file_handle = self
+            .0
+            .read()
+            .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?;
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
 
         file_handle.lock().await.try_release_lock().await?;
 
@@ -162,7 +206,7 @@ impl User {
         self.0
             .read()
             .await
-            .lock_queue
+            .lock_table
             .lock()
             .await
             .get(&unique)
@@ -175,16 +219,17 @@ impl User {
 
     #[inline]
     pub async fn get_lock_kind(&self, fh_id: u64) -> Result<LockKind> {
-        Ok(self
+        let file_handle = self
             .0
             .read()
             .await
             .file_handle_map
             .get(&fh_id)
             .ok_or(Errno::from(libc::EBADF))?
-            .lock()
-            .await
-            .get_lock_kind()
-            .await)
+            .clone();
+
+        let lock_kind = file_handle.lock().await.get_lock_kind().await;
+
+        Ok(lock_kind)
     }
 }
