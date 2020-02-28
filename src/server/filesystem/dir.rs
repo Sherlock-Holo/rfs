@@ -58,10 +58,12 @@ impl Dir {
 
         let inode = inode_gen.fetch_add(1, Ordering::Relaxed);
 
+        debug!("new dir inode generated");
+
         let dir = Arc::new(Dir(RwLock::new(InnerDir {
             inode,
             name: if real_path == Path::new("/") {
-                real_path.as_os_str().to_os_string()
+                OsString::from("/")
             } else {
                 real_path
                     .file_name()
@@ -75,12 +77,16 @@ impl Dir {
             inode_map: inode_map.clone(),
         })));
 
+        debug!("Dir created");
+
         inode_map.write().await.insert(inode, Entry::from(&dir));
+
+        debug!("inode map wrote");
 
         Ok(dir)
     }
 
-    pub async fn get_attr(self: &Arc<Self>) -> Result<FileAttr> {
+    pub async fn get_attr(&self) -> Result<FileAttr> {
         let guard = self.0.read().await;
 
         let metadata = fs::metadata(&guard.real_path).await?;
@@ -103,7 +109,7 @@ impl Dir {
         })
     }
 
-    pub async fn set_attr(self: &Arc<Self>, set_attr: SetAttr) -> Result<FileAttr> {
+    pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
         {
             let write_guard = self.0.write().await;
 
@@ -438,12 +444,12 @@ impl Dir {
         Ok(())
     }
 
-    #[inline]
+    //#[inline]
     pub async fn set_new_parent(&self, new_parent: Inode) {
         self.0.write().await.parent = new_parent
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_inode(&self) -> Inode {
         self.0.read().await.inode
     }
@@ -469,12 +475,6 @@ impl Dir {
         let parent_path = PathBuf::from(guard.real_path.clone());
         let inode_map = guard.inode_map.clone();
 
-        debug!("locking inode map");
-
-        let mut inode_map = inode_map.write().await;
-
-        debug!("lock inode map");
-
         while let Some(dir_entry) = dir_entries.next().await {
             let dir_entry = dir_entry?;
 
@@ -497,13 +497,17 @@ impl Dir {
                         guard.parent,
                         &dir_entry_real_path,
                         &guard.inode_gen,
-                        &mut inode_map,
+                        inode_map.write().await.deref_mut(),
                     )
                         .await?,
                 )
             };
 
-            children_map.insert(dir_entry_real_path.into_os_string(), child);
+            children_map.insert(dir_entry.file_name(), child);
+        }
+
+        for (name, _entry) in children_map.iter() {
+            debug!("name is {:?}", name);
         }
 
         guard.children.replace(children_map);
@@ -513,17 +517,17 @@ impl Dir {
         Ok(())
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_name(&self) -> OsString {
         self.0.read().await.name.to_os_string()
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_real_path(&self) -> OsString {
         self.0.read().await.real_path.to_os_string()
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_parent_inode(&self) -> Inode {
         self.0.read().await.parent
     }

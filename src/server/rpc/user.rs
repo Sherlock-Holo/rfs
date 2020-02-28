@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use async_std::sync::{Arc, Mutex, RwLock};
 use async_std::task::JoinHandle;
 use chrono::prelude::*;
-use fuse::FileAttr;
 use futures::future::FutureExt;
 use futures::select;
+use log::debug;
 use uuid::Uuid;
 
 use crate::errno::Errno;
@@ -14,7 +14,6 @@ use crate::Result;
 use super::super::filesystem::FileHandle;
 use super::super::filesystem::LockKind;
 use super::super::filesystem::LockTable;
-use super::super::filesystem::SetAttr;
 
 struct InnerUser {
     uuid: Uuid,
@@ -35,12 +34,12 @@ impl User {
         }))
     }
 
-    #[inline]
+    //#[inline]
     pub async fn update_last_alive_time(&self, now: DateTime<Local>) {
         self.0.write().await.last_alive_time = now;
     }
 
-    #[inline]
+    //#[inline]
     pub async fn add_file_handle(&self, file_handle: FileHandle) {
         self.0
             .write()
@@ -126,7 +125,7 @@ impl User {
         Ok(())
     }
 
-    pub async fn set_file_attr(&self, fh_id: u64, set_attr: SetAttr) -> Result<FileAttr> {
+    /*pub async fn set_file_attr(&self, fh_id: u64, set_attr: SetAttr) -> Result<FileAttr> {
         let file_handle = self
             .0
             .read()
@@ -139,14 +138,14 @@ impl User {
         let attr = file_handle.lock().await.set_attr(set_attr).await?;
 
         Ok(attr)
-    }
+    }*/
 
     pub async fn set_lock(
         self: &Arc<Self>,
         fh_id: u64,
         unique: u64,
         share: bool,
-    ) -> Result<JoinHandle<bool>> {
+    ) -> Result<JoinHandle<Result<bool>>> {
         let guard = self.0.read().await;
 
         let lock_table = guard.lock_table.clone();
@@ -201,8 +200,10 @@ impl User {
         Ok(())
     }
 
-    #[inline]
+    //#[inline]
     pub async fn interrupt_lock(&self, unique: u64) -> Result<()> {
+        debug!("interrupt unique {} lock", unique);
+
         self.0
             .read()
             .await
@@ -217,7 +218,7 @@ impl User {
         Ok(())
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_lock_kind(&self, fh_id: u64) -> Result<LockKind> {
         let file_handle = self
             .0

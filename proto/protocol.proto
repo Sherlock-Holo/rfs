@@ -217,11 +217,8 @@ message GetAttrResponse {
 
 message SetAttrRequest {
     Header head = 1;
-    oneof handle {
-        uint64 inode = 2;
-        uint64 file_handler = 3;
-    }
-    Attr attr = 4;
+    uint64 inode = 2;
+    Attr attr = 3;
 }
 
 message SetAttrResponse {

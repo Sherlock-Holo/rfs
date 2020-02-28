@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::net::SocketAddr;
 
+use async_std::fs;
+use async_std::path::Path;
 use async_std::sync::{Arc, RwLock};
 use chrono::prelude::*;
 use fuse::FileType;
+use futures::stream::TryStreamExt;
+use futures::try_join;
 use log::{debug, info, warn};
+use tokio::net::UnixListener;
 use tonic::{Code, Request, Status};
 use tonic::Response;
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tonic::transport::Server as TonicServer;
 use uuid::Uuid;
 
 use crate::errno::Errno;
@@ -15,20 +23,75 @@ use crate::pb;
 use crate::pb::*;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
+use crate::pb::rfs_server::RfsServer;
 
 use super::super::filesystem::Filesystem;
 use super::super::filesystem::LockKind;
 use super::super::filesystem::SetAttr;
 use super::user::User;
+use super::wrapper;
 
 type Result<T> = std::result::Result<T, Status>;
 
 pub struct Server {
     users: RwLock<BTreeMap<Uuid, Arc<User>>>,
-    filesystem: Filesystem,
+    filesystem: Arc<Filesystem>,
 }
 
 impl Server {
+    /// new a Server will chroot and listen rpc server and uds server
+    pub async fn run<P: AsRef<Path>>(
+        root_path: P,
+        cert_path: P,
+        key_path: P,
+        client_ca_path: P,
+        uds_path: P,
+        listen_path: SocketAddr,
+    ) -> anyhow::Result<()> {
+        let cert = fs::read(cert_path).await?;
+        let key = fs::read(key_path).await?;
+        let client_ca = fs::read(client_ca_path).await?;
+
+        let server_identity = Identity::from_pem(cert, key);
+
+        info!("server identity loaded");
+
+        let client_ca = Certificate::from_pem(client_ca);
+
+        info!("client ca loaded");
+
+        let tls_config = ServerTlsConfig::new()
+            .identity(server_identity)
+            .client_ca_root(client_ca);
+
+        let mut unix_listener = UnixListener::bind(uds_path.as_ref())?;
+
+        let fs = Arc::new(Filesystem::new(root_path.as_ref()).await?);
+
+        let rpc_server = Self {
+            users: RwLock::new(BTreeMap::new()),
+            filesystem: fs.clone(),
+        };
+
+        let nds_server = Self {
+            users: RwLock::new(BTreeMap::new()),
+            filesystem: fs,
+        };
+
+        let rpc_serve = TonicServer::builder()
+            .tls_config(tls_config)
+            .add_service(RfsServer::new(rpc_server))
+            .serve(listen_path);
+
+        let uds_serve = TonicServer::builder()
+            .add_service(RfsServer::new(nds_server))
+            .serve_with_incoming(unix_listener.incoming().map_ok(wrapper::UnixStream));
+
+        try_join!(rpc_serve, uds_serve)?;
+
+        Ok(())
+    }
+
     async fn get_user(&self, header: Option<Header>) -> Result<Arc<User>> {
         let uuid: Uuid = if let Some(header) = header {
             if let Ok(uuid) = header.uuid.parse() {
@@ -399,12 +462,20 @@ impl Rfs for Server {
                 Ok(lock_job) => lock_job,
             };
 
-            return if lock_job.await {
-                Ok(Response::new(SetLockResponse { error: None }))
-            } else {
-                Ok(Response::new(SetLockResponse {
-                    error: Some(Errno::from(libc::EINTR).into()),
-                }))
+            return match lock_job.await {
+                Err(err) => Ok(Response::new(SetLockResponse {
+                    error: Some(err.into()),
+                })),
+
+                Ok(lock_success) => {
+                    if lock_success {
+                        Ok(Response::new(SetLockResponse { error: None }))
+                    } else {
+                        Ok(Response::new(SetLockResponse {
+                            error: Some(Errno::from(libc::EINTR).into()),
+                        }))
+                    }
+                }
             };
         }
 
@@ -505,7 +576,7 @@ impl Rfs for Server {
     ) -> Result<Response<SetAttrResponse>> {
         let request = request.into_inner();
 
-        let user = self.get_user(request.head).await?;
+        self.get_user(request.head).await?;
 
         let attr = if let Some(attr) = request.attr {
             attr
@@ -523,7 +594,7 @@ impl Rfs for Server {
             } else {
                 None
             },
-            size: if attr.size > 0 {
+            size: if attr.size >= 0 {
                 Some(attr.size as u64)
             } else {
                 None
@@ -545,41 +616,7 @@ impl Rfs for Server {
             },
         };
 
-        if request.handle.is_none() {
-            return Err(Status::new(Code::InvalidArgument, "miss handle"));
-        }
-
-        let handle = request.handle.unwrap();
-
-        let result = match handle {
-            pb::set_attr_request::Handle::Inode(inode) => {
-                let kind = match self.filesystem.get_attr(inode).await {
-                    Err(errno) => {
-                        return Ok(Response::new(SetAttrResponse {
-                            result: Some(pb::set_attr_response::Result::Error(errno.into())),
-                        }));
-                    }
-
-                    Ok(attr) => attr.kind,
-                };
-
-                if let FileType::RegularFile = kind {
-                    return Ok(Response::new(SetAttrResponse {
-                        result: Some(pb::set_attr_response::Result::Error(
-                            Errno::from(libc::ENOTDIR).into(),
-                        )),
-                    }));
-                }
-
-                self.filesystem.set_dir_attr(inode, set_attr).await
-            }
-
-            pb::set_attr_request::Handle::FileHandler(fh_id) => {
-                user.set_file_attr(fh_id, set_attr).await
-            }
-        };
-
-        match result {
+        match self.filesystem.set_attr(request.inode, set_attr).await {
             Err(errno) => Ok(Response::new(SetAttrResponse {
                 result: Some(pb::set_attr_response::Result::Error(errno.into())),
             })),

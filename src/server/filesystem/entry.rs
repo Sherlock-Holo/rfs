@@ -8,6 +8,7 @@ use crate::Result;
 use super::dir::Dir;
 use super::file::File;
 use super::inode::Inode;
+use super::SetAttr;
 
 #[derive(Debug)]
 pub enum Entry {
@@ -29,6 +30,13 @@ impl Entry {
         match self {
             Entry::Dir(dir) => dir.get_attr().await,
             Entry::File(file) => file.get_attr().await,
+        }
+    }
+
+    pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
+        match self {
+            Entry::Dir(dir) => dir.set_attr(set_attr).await,
+            Entry::File(file) => file.set_attr(set_attr).await,
         }
     }
 

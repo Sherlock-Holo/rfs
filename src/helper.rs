@@ -8,8 +8,8 @@ use crate::Result;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-        where
-            F: FnOnce(&mut Self),
+    where
+        F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -29,7 +29,7 @@ fn convert_system_time_to_proto_time(sys_time: SystemTime) -> Option<prost_types
         })
 }
 
-#[inline]
+//#[inline]
 pub fn convert_proto_time_to_system_time(proto_time: Option<prost_types::Timestamp>) -> SystemTime {
     if let Some(proto_time) = proto_time {
         UNIX_EPOCH + Duration::new(proto_time.seconds as u64, proto_time.nanos as u32)
@@ -56,6 +56,19 @@ pub fn fuse_attr_into_proto_attr(fuse_attr: FileAttr, name: &str) -> PbAttr {
 }
 
 pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Result<FileAttr> {
+    let kind = {
+        let dir = PbEntryType::Dir as i32;
+        let file = PbEntryType::File as i32;
+
+        if proto_attr.r#type == dir {
+            FileType::Directory
+        } else if proto_attr.r#type == file {
+            FileType::RegularFile
+        } else {
+            return Err(Errno::from(libc::EIO));
+        }
+    };
+
     Ok(FileAttr {
         uid,
         gid,
@@ -65,26 +78,19 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
         atime: convert_proto_time_to_system_time(proto_attr.access_time),
         mtime: convert_proto_time_to_system_time(proto_attr.modify_time),
         ctime: convert_proto_time_to_system_time(proto_attr.change_time),
-        kind: {
-            let dir = PbEntryType::Dir as i32;
-            let file = PbEntryType::File as i32;
-
-            if proto_attr.r#type == dir {
-                FileType::Directory
-            } else if proto_attr.r#type == file {
-                FileType::RegularFile
-            } else {
-                return Err(Errno::from(libc::EIO));
-            }
-        },
+        kind,
         perm: proto_attr.mode as u16,
         rdev: 0,
-        nlink: 0,
+        nlink: match kind {
+            FileType::Directory => 2,
+            FileType::RegularFile => 0,
+            _ => unreachable!(), // don't support other type
+        },
         flags: 0,
     })
 }
 
-#[inline]
+//#[inline]
 fn get_blocks(size: u64) -> u64 {
     const BLOCK_SIZE: u64 = 512;
 

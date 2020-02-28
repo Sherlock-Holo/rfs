@@ -1,15 +1,21 @@
 use std::convert::TryFrom;
 use std::ffi::OsStr;
+use std::fmt::{self, Debug, Display};
+use std::io;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use async_std::path::Path;
+use anyhow::Result;
+use async_std::fs;
 use async_std::task;
 use fuse::{
     Filesystem as FuseFilesystem, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
 use libc::c_int;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use serde::export::Formatter;
 use tokio::net::UnixStream;
 use tonic::Request as TonicRequest;
 use tonic::transport::{Channel, Uri};
@@ -18,13 +24,40 @@ use tonic::transport::Endpoint;
 use tower::service_fn;
 use uuid::Uuid;
 
+use lazy_static::lazy_static;
+
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::*;
 use crate::pb::rfs_client::RfsClient;
 
+lazy_static! {
+    static ref TTL: Duration = Duration::new(1, 0);
+}
+
+enum ClientKind {
+    Rpc,
+    Uds,
+}
+
+impl Debug for ClientKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ClientKind::Rpc => f.write_str("rpc"),
+            ClientKind::Uds => f.write_str("uds"),
+        }
+    }
+}
+
+impl Display for ClientKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+
 pub struct Filesystem {
     uuid: Option<Uuid>,
     rpc_client: RfsClient<Channel>,
+    client_kind: ClientKind,
 }
 
 impl Filesystem {
@@ -40,8 +73,27 @@ impl Filesystem {
 }
 
 impl Filesystem {
-    pub async fn new_uds<P: AsRef<Path>>(uds_path: P) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new_uds<P: AsRef<Path>>(uds_path: P) -> Result<Self> {
         let uds_path = uds_path.as_ref().to_path_buf();
+
+        // check if uds inits or not
+        loop {
+            if let Err(err) = fs::metadata(&uds_path).await {
+                if let ErrorKind::NotFound = err.kind() {
+                    info!("waiting for uds creating");
+
+                    task::sleep(Duration::from_secs(1)).await;
+
+                    continue;
+                } else {
+                    return Err(err.into());
+                };
+            }
+
+            break;
+        }
+
+        debug!("uds connected");
 
         let uds_path = uds_path.to_str().expect("invalid unix path").to_string();
 
@@ -58,6 +110,7 @@ impl Filesystem {
         Ok(Filesystem {
             uuid: None,
             rpc_client: RfsClient::new(channel),
+            client_kind: ClientKind::Uds,
         })
     }
 
@@ -71,7 +124,21 @@ impl Filesystem {
         Ok(Filesystem {
             uuid: None,
             rpc_client: RfsClient::new(channel),
+            client_kind: ClientKind::Rpc,
         })
+    }
+
+    pub fn mount<P: AsRef<Path>>(self, mount_point: P) -> io::Result<()> {
+        let opts = vec![
+            "-o".to_string(),
+            format!("fsname=rfs-{:?}", self.client_kind),
+            "-o".to_string(),
+            "nonempty".to_string(),
+        ];
+
+        let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
+
+        fuse::mount(self, mount_point, &opts)
     }
 }
 
@@ -171,7 +238,7 @@ impl FuseFilesystem for Filesystem {
                 lookup_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.entry(&Duration::new(0, 0), &attr, 0),
+                        Ok(attr) => reply.entry(&TTL, &attr, 0),
                     }
                 }
             }
@@ -220,7 +287,7 @@ impl FuseFilesystem for Filesystem {
                 get_attr_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.attr(&Duration::new(0, 0), &attr),
+                        Ok(attr) => reply.attr(&TTL, &attr),
                     }
                 }
             }
@@ -237,7 +304,7 @@ impl FuseFilesystem for Filesystem {
         size: Option<u64>,
         _atime: Option<SystemTime>,
         _mtime: Option<SystemTime>,
-        fh: Option<u64>,
+        _fh: Option<u64>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
@@ -248,17 +315,9 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let fh = fh.filter(|fh| *fh > 0);
-
         let rpc_req = TonicRequest::new(SetAttrRequest {
             head: header,
-            handle: {
-                if let Some(fh) = fh {
-                    Some(set_attr_request::Handle::FileHandler(fh))
-                } else {
-                    Some(set_attr_request::Handle::Inode(inode))
-                }
-            },
+            inode,
             attr: Some(Attr {
                 inode,
                 name: String::new(),
@@ -304,12 +363,16 @@ impl FuseFilesystem for Filesystem {
             };
 
             match result {
-                set_attr_response::Result::Error(err) => reply.error(err.errno as i32),
+                set_attr_response::Result::Error(err) => {
+                    error!("setattr failed errno {}", err.errno);
+
+                    reply.error(err.errno as i32)
+                }
 
                 set_attr_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.attr(&Duration::new(0, 0), &attr),
+                        Ok(attr) => reply.attr(&TTL, &attr),
                     }
                 }
             }
@@ -367,7 +430,7 @@ impl FuseFilesystem for Filesystem {
                 mkdir_response::Result::Attr(attr) => {
                     match proto_attr_into_fuse_attr(attr, uid, gid) {
                         Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.entry(&Duration::new(0, 0), &attr, 0),
+                        Ok(attr) => reply.entry(&TTL, &attr, 0),
                     }
                 }
             }
@@ -526,6 +589,8 @@ impl FuseFilesystem for Filesystem {
             inode,
             flags,
         });
+
+        debug!("client open inode {} flags {}", inode, flags);
 
         task::spawn(async move {
             let result = match client.open_file(rpc_req).await {
@@ -762,6 +827,8 @@ impl FuseFilesystem for Filesystem {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
+        debug!("readdir inode {}, offset {}", inode, offset);
+
         let header = self.get_rpc_header();
 
         let mut client = self.rpc_client.clone();
@@ -793,6 +860,8 @@ impl FuseFilesystem for Filesystem {
                 }
             };
 
+            debug!("got readdir result");
+
             for (inode, index, kind, name) in dir_entries
                 .into_iter()
                 .enumerate()
@@ -806,6 +875,8 @@ impl FuseFilesystem for Filesystem {
                     } else if dir_entry.r#type == file {
                         Some(FileType::RegularFile)
                     } else {
+                        error!("unexpect file type {}", dir_entry.r#type);
+
                         None
                     };
 
@@ -814,6 +885,11 @@ impl FuseFilesystem for Filesystem {
             {
                 let kind = match kind {
                     None => {
+                        error!(
+                            "unexpect file type in inode {}, index {}, name {}",
+                            inode, index, name
+                        );
+
                         // we got unknown entry type, it should not happened
                         reply.error(libc::EIO);
                         return;
@@ -821,12 +897,19 @@ impl FuseFilesystem for Filesystem {
                     Some(kind) => kind,
                 };
 
+                debug!(
+                    "file type {:?}, inode {}, index {}, name {}",
+                    kind, inode, index, name
+                );
+
                 if reply.add(inode, index as i64, kind, name) {
                     break;
                 }
             }
 
-            reply.ok()
+            reply.ok();
+
+            debug!("readdir success")
         });
     }
 
@@ -898,7 +981,7 @@ impl FuseFilesystem for Filesystem {
 
             match proto_attr_into_fuse_attr(attr, uid, gid) {
                 Err(err) => reply.error(err.into()),
-                Ok(attr) => reply.created(&Duration::new(0, 0), &attr, 0, fh_id, flags),
+                Ok(attr) => reply.created(&TTL, &attr, 0, fh_id, flags),
             }
         });
     }
@@ -1027,10 +1110,12 @@ impl FuseFilesystem for Filesystem {
             }
         };
 
+        let unique = req.unique();
+
         let rpc_req = TonicRequest::new(SetLockRequest {
             head: header,
             file_handle_id: fh,
-            unique: req.unique(),
+            unique,
             lock_kind: lock_kind.into(),
             block: sleep,
         });
@@ -1046,8 +1131,12 @@ impl FuseFilesystem for Filesystem {
 
                 Ok(resp) => {
                     if let Some(error) = resp.into_inner().error {
-                        reply.error(error.errno as c_int);
-                        return;
+                        warn!(
+                            "set lock failed, uiqueue {} errno is {}",
+                            unique, error.errno
+                        );
+
+                        reply.error(error.errno as c_int)
                     } else {
                         reply.ok()
                     }
@@ -1065,6 +1154,8 @@ impl FuseFilesystem for Filesystem {
             head: header,
             unique,
         });
+
+        debug!("interrupt unique {}", unique);
 
         task::spawn(async move {
             match client.interrupt(rpc_req).await {

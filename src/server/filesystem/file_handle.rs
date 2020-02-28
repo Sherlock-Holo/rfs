@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::ops::Deref;
+use std::os::raw::c_int;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
@@ -14,8 +15,9 @@ use async_std::task;
 use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
 use futures::future::FutureExt;
+use futures::pin_mut;
 use futures::select;
-use log::debug;
+use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::FlockArg;
 
@@ -149,7 +151,7 @@ impl FileHandle {
         unique: u64,
         share: bool,
         lock_table: LockTable,
-    ) -> Result<JoinHandle<bool>> {
+    ) -> Result<JoinHandle<Result<bool>>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -173,10 +175,47 @@ impl FileHandle {
 
         Ok(task::spawn(async move {
             let lock_job = async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
+            let lock_job = lock_job.fuse();
 
-            let lock_success = select! {
-                _ = receiver.recv().fuse() => false,
-                _ = lock_job.fuse() => true,
+            pin_mut!(lock_job);
+
+            let cancel_future = receiver.recv().fuse();
+
+            pin_mut!(cancel_future);
+
+            let lock_success = loop {
+                let result = select! {
+                    _ = cancel_future => None,
+                    result = lock_job => Some(result)
+                };
+
+                if result.is_none() {
+                    debug!("lock cancel");
+
+                    break false;
+                }
+
+                if let Err(err) = result.unwrap() {
+                    error!("nix lock failed, error is {}", err);
+
+                    match err.clone().as_errno() {
+                        Some(errno) => {
+                            if errno as c_int == libc::EINTR {
+                                debug!("nix lock is interrupted, retry it");
+
+                                continue;
+                            } else {
+                                return Err(Errno::from(errno as c_int));
+                            }
+                        }
+
+                        None => {
+                            return Err(Errno::from(err));
+                        }
+                    }
+                } else {
+                    break true;
+                }
             };
 
             if lock_success {
@@ -187,11 +226,13 @@ impl FileHandle {
                 } else {
                     LockKind::Exclusive
                 };
+
+                debug!("unique {} set lock success", unique);
             }
 
             lock_table.lock().await.remove(&unique);
 
-            lock_success
+            Ok(lock_success)
         }))
     }
 
@@ -245,15 +286,7 @@ impl FileHandle {
     pub async fn flush(&mut self) -> Result<()> {
         self.sys_file.flush().await?;
 
-        if let Some(lock_queue) = self.lock_queue.as_ref() {
-            for (_, lock_canceler) in lock_queue.lock().await.iter() {
-                lock_canceler.send(()).await;
-            }
-        }
-
-        let mut lock_kind = self.lock_kind.write().await;
-
-        *lock_kind = LockKind::NoLock;
+        self.try_release_lock().await?;
 
         Ok(())
     }
@@ -276,7 +309,7 @@ impl FileHandle {
         self.kind
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_lock_kind(&self) -> LockKind {
         self.lock_kind.read().await.deref().clone()
     }

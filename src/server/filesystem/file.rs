@@ -9,9 +9,10 @@ use async_std::fs;
 use async_std::path::Path;
 use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
-use log::debug;
+use log::{debug, error};
 
 use crate::Result;
+use crate::server::filesystem::SetAttr;
 
 use super::entry::Entry;
 use super::file_handle::{FileHandle, FileHandleKind};
@@ -81,8 +82,57 @@ impl File {
         })
     }
 
+    pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
+        {
+            let guard = self.0.read().await;
+
+            debug!("set inode {} attr {:?}", guard.inode, set_attr);
+
+            let truncate = if let Some(size) = set_attr.size {
+                size == 0
+            } else {
+                false
+            };
+
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(truncate)
+                .open(&guard.real_path)
+                .await?;
+
+            if let Some(mode) = set_attr.mode {
+                let metadata = file.metadata().await?;
+
+                let mut permissions = metadata.permissions();
+
+                permissions.set_mode(mode);
+
+                file.set_permissions(permissions).await?;
+
+                debug!("set inode {} permission success", guard.inode);
+            }
+
+            if let Some(size) = set_attr.size {
+                if size > 0 {
+                    if let Err(err) = file.set_len(size).await {
+                        error!("set inode {} size {} failed", guard.inode, size);
+
+                        return Err(err.into());
+                    }
+
+                    debug!("set inode {} size success", guard.inode);
+                }
+            }
+        }
+
+        self.get_attr().await
+    }
+
     pub async fn open(&self, fh_id: u64, flags: u32) -> Result<FileHandle> {
         let guard = self.0.read().await;
+
+        debug!("server open {:?} flags {}", guard.name, flags);
 
         let mut options = fs::OpenOptions::new();
 
@@ -102,6 +152,12 @@ impl File {
 
             FileHandleKind::ReadOnly
         };
+
+        if flags & libc::O_TRUNC as u32 > 0 {
+            debug!("open {:?} flags have truncate", guard.name);
+
+            options.truncate(true);
+        }
 
         let sys_file = options.open(&guard.real_path).await?;
 
@@ -124,27 +180,27 @@ impl File {
         Ok(())
     }
 
-    #[inline]
+    //#[inline]
     pub async fn set_new_parent(&self, new_parent: Inode) {
         self.0.write().await.parent = new_parent
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_inode(&self) -> Inode {
         self.0.read().await.inode
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_name(&self) -> OsString {
         self.0.read().await.name.to_os_string()
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_real_path(&self) -> OsString {
         self.0.read().await.real_path.to_os_string()
     }
 
-    #[inline]
+    //#[inline]
     pub async fn get_parent_inode(&self) -> Inode {
         self.0.read().await.parent
     }

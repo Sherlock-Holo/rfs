@@ -1,2 +1,2 @@
-mod filesystem;
-mod rpc;
+pub mod filesystem;
+pub mod rpc;

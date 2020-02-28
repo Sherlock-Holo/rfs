@@ -1,0 +1,6 @@
+root_path: /tmp/test
+listen_addr: "127.0.0.1:9876"
+cert_path: cert.pem
+key_path: key.pem
+ca_path: ca.pem
+debug: true

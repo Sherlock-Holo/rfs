@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+#[derive(Debug, Copy, Clone)]
 pub struct SetAttr {
     pub mode: Option<u32>,
     pub uid: Option<u32>,

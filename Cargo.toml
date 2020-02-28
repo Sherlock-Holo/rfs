@@ -8,6 +8,9 @@ build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = [".", "rfs-client", "rfs-server"]
+
 [dependencies]
 log = "0.4"
 pretty_env_logger = "0.4"
@@ -23,6 +26,8 @@ uuid = { version = "0.8", features = ["serde", "v4"] }
 chrono = "0.4"
 thiserror = "1.0"
 tower = "0.3"
+anyhow = "1.0"
+lazy_static = "1.4"
 
 [dependencies.fuse]
 branch = "master"
@@ -31,7 +36,7 @@ features = ["posix-lock"]
 
 [dependencies.tokio]
 version = "0.2"
-features = ["rt-threaded", "uds"]
+features = ["uds", "stream"]
 
 [dependencies.async-std]
 version = "1.5"
