@@ -7,8 +7,6 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use async_std::fs;
-use async_std::task;
 use fuse::{
     Filesystem as FuseFilesystem, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
@@ -17,7 +15,9 @@ use libc::c_int;
 use log::{debug, error, info, warn};
 use nix::unistd;
 use serde::export::Formatter;
+use tokio::fs;
 use tokio::net::UnixStream;
+use tokio::task;
 use tonic::Request as TonicRequest;
 use tonic::transport::{Channel, Uri};
 use tonic::transport::ClientTlsConfig;
@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use lazy_static::lazy_static;
 
+use crate::block_on;
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::*;
 use crate::pb::rfs_client::RfsClient;
@@ -82,8 +83,6 @@ impl Filesystem {
             if let Err(err) = fs::metadata(&uds_path).await {
                 if let ErrorKind::NotFound = err.kind() {
                     info!("waiting for uds creating");
-
-                    task::sleep(Duration::from_secs(1)).await;
 
                     continue;
                 } else {
@@ -153,7 +152,7 @@ impl Filesystem {
 
 impl FuseFilesystem for Filesystem {
     fn init(&mut self, _req: &Request) -> Result<(), libc::c_int> {
-        async_std::task::block_on(async {
+        block_on(async {
             let req = TonicRequest::new(RegisterRequest {});
 
             match self.rpc_client.register(req).await {
@@ -186,7 +185,7 @@ impl FuseFilesystem for Filesystem {
             .expect("uuid should initialize")
             .to_string();
 
-        task::block_on(async {
+        block_on(async {
             let req = TonicRequest::new(LogoutRequest { uuid });
 
             if let Err(err) = self.rpc_client.logout(req).await {

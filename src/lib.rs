@@ -5,6 +5,7 @@ use log::LevelFilter;
 pub use client::Filesystem;
 use errno::Errno;
 pub use helper::Apply;
+pub use helper::block_on;
 pub use server::rpc::Server;
 
 mod client;

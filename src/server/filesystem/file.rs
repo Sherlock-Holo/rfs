@@ -1,15 +1,15 @@
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
-use async_std::fs;
-use async_std::path::Path;
-use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
 use log::{debug, error};
+use tokio::fs;
+use tokio::sync::RwLock;
 
 use crate::Result;
 use crate::server::filesystem::SetAttr;
@@ -94,7 +94,7 @@ impl File {
                 false
             };
 
-            let file = fs::OpenOptions::new()
+            let mut file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .truncate(truncate)

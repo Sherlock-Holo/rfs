@@ -1,22 +1,20 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::ops::DerefMut;
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
-use async_std::fs;
-use async_std::fs::{DirBuilder, OpenOptions};
-use async_std::path::{Path, PathBuf};
-use async_std::stream;
-use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
 use futures::stream::StreamExt;
 use log::debug;
+use tokio::fs;
+use tokio::fs::OpenOptions;
+use tokio::stream;
+use tokio::sync::RwLock;
 
 use crate::errno::Errno;
 use crate::helper::Apply;
@@ -156,18 +154,17 @@ impl Dir {
             .as_ref()
             .expect("children map should be initialized");
 
-        let prefix_children = stream::from_iter(vec![
+        let prefix_children = stream::iter(vec![
             (guard.inode, FileType::Directory, OsString::from(".")),
             (guard.parent, FileType::Directory, OsString::from("..")),
         ]);
 
-        let children =
-            stream::from_iter(children_map.iter()).filter_map(|(name, child)| async move {
-                match child.get_attr().await {
-                    Err(_err) => None, // ignore error child
-                    Ok(attr) => Some((attr.ino, attr.kind, name.to_os_string())),
-                }
-            });
+        let children = stream::iter(children_map.iter()).filter_map(|(name, child)| async move {
+            match child.get_attr().await {
+                Err(_err) => None, // ignore error child
+                Ok(attr) => Some((attr.ino, attr.kind, name.to_os_string())),
+            }
+        });
 
         Ok(prefix_children
             .chain(children)
@@ -212,8 +209,12 @@ impl Dir {
 
         let new_dir_path = PathBuf::from(parent_path).apply(|path| path.push(name));
 
-        // fs::create_dir(&new_dir_path).await?;
-        DirBuilder::new().mode(mode).create(&new_dir_path).await?;
+        fs::create_dir(&new_dir_path).await?;
+
+        let mut perm = fs::metadata(&new_dir_path).await?.permissions();
+        perm.set_mode(mode);
+
+        fs::set_permissions(&new_dir_path, perm).await?;
 
         let dir = Dir::from_exist(parent_inode, &new_dir_path, inode_gen, inode_map).await?;
         let dir = Entry::from(dir);
@@ -268,12 +269,19 @@ impl Dir {
 
         debug!("new file path {:?}", new_file_path);
 
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .create_new(true)
             .write(true)
-            .mode(mode)
             .open(&new_file_path)
             .await?;
+
+        let perm = file
+            .metadata()
+            .await?
+            .permissions()
+            .apply(|perm| perm.set_mode(mode));
+
+        file.set_permissions(perm).await?;
 
         debug!("created real file {:?}", new_file_path);
 

@@ -1,15 +1,21 @@
+use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse::{FileAttr, FileType};
+use futures::executor;
 
 use crate::errno::Errno;
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
 use crate::Result;
 
+/*lazy_static! {
+    static ref RUNTIME: Runtime = Runtime::new().unwrap();
+}*/
+
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(&mut Self),
+        where
+            F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -88,6 +94,17 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
         },
         flags: 0,
     })
+}
+
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    /*let mut rt = Builder::new()
+        .basic_scheduler()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(future)*/
+    executor::block_on(future)
 }
 
 //#[inline]

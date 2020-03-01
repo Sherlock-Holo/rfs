@@ -5,28 +5,26 @@ use std::os::raw::c_int;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use async_std::fs::File as SysFile;
-use async_std::prelude::*;
-use async_std::sync;
-use async_std::sync::{Arc, Mutex, RwLock, Sender};
-use async_std::task;
-use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
-use futures::future::FutureExt;
-use futures::pin_mut;
-use futures::select;
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::FlockArg;
+use tokio::fs::File as SysFile;
+use tokio::prelude::*;
+use tokio::select;
+use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::task;
+use tokio::task::JoinHandle;
 
+use crate::{block_on, Result};
 use crate::errno::Errno;
-use crate::Result;
 
 use super::inode::Inode;
 
-pub type LockTable = Arc<Mutex<BTreeMap<u64, Sender<()>>>>;
+pub type LockTable = Arc<Mutex<BTreeMap<u64, Arc<Notify>>>>;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
@@ -50,7 +48,7 @@ pub struct FileHandle {
     // avoid useless read/write syscall to improve performance
     kind: FileHandleKind,
 
-    lock_queue: Option<LockTable>,
+    lock_table: Option<LockTable>,
 
     /// record file handle is locked or not
     lock_kind: Arc<RwLock<LockKind>>,
@@ -63,7 +61,7 @@ impl FileHandle {
             inode,
             sys_file,
             kind,
-            lock_queue: None,
+            lock_table: None,
             lock_kind: Arc::new(RwLock::new(LockKind::NoLock)),
         }
     }
@@ -159,42 +157,38 @@ impl FileHandle {
             FlockArg::LockExclusive
         };
 
-        if self.lock_queue.is_none() {
-            self.lock_queue.replace(lock_table.clone());
+        if self.lock_table.is_none() {
+            self.lock_table.replace(lock_table.clone());
         }
 
         let lock_kind = self.lock_kind.clone();
 
-        let (sender, receiver) = sync::channel(1);
+        let lock_canceler = Arc::new(Notify::new());
 
         // save lock canceler at first, ensure when return JoinHandle, lock canceler is usable
-        lock_table.lock().await.insert(unique, sender);
+        lock_table
+            .lock()
+            .await
+            .insert(unique, lock_canceler.clone());
 
         debug!("save unique {} lock canceler", unique);
 
         Ok(task::spawn(async move {
-            let lock_job = async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
-            let lock_job = lock_job.fuse();
-
-            pin_mut!(lock_job);
-
-            let cancel_future = receiver.recv().fuse();
-
-            pin_mut!(cancel_future);
-
             let lock_success = loop {
+                let lock_job = task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
+
                 let result = select! {
-                    _ = cancel_future => None,
-                    result = lock_job => Some(result)
+                    _ = lock_canceler.notified() => break false,
+                    result = lock_job => {
+                        if result.is_err() {
+                            break false
+                        }
+
+                        result.unwrap()
+                    }
                 };
 
-                if result.is_none() {
-                    debug!("lock cancel");
-
-                    break false;
-                }
-
-                if let Err(err) = result.unwrap() {
+                if let Err(err) = result {
                     error!("nix lock failed, error is {}", err);
 
                     match err.clone().as_errno() {
@@ -316,7 +310,7 @@ impl FileHandle {
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        task::block_on(async {
+        block_on(async {
             let _ = self.flush().await;
         })
     }
