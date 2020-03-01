@@ -15,6 +15,7 @@ use fuse::{
 };
 use libc::c_int;
 use log::{debug, error, info, warn};
+use nix::unistd;
 use serde::export::Formatter;
 use tokio::net::UnixStream;
 use tonic::Request as TonicRequest;
@@ -129,12 +130,20 @@ impl Filesystem {
     }
 
     pub fn mount<P: AsRef<Path>>(self, mount_point: P) -> io::Result<()> {
-        let opts = vec![
-            "-o".to_string(),
+        let uid = unistd::getuid();
+        let gid = unistd::getgid();
+
+        let opts: Vec<_> = vec![
             format!("fsname=rfs-{:?}", self.client_kind),
-            "-o".to_string(),
             "nonempty".to_string(),
-        ];
+            "auto_cache".to_string(),
+            format!("uid={}", uid),
+            format!("gid={}", gid),
+        ]
+            .into_iter()
+            .map(|opt| vec!["-o".to_string(), opt])
+            .flatten()
+            .collect();
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 

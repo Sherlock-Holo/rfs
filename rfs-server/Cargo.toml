@@ -26,4 +26,4 @@ features = ["attributes"]
 
 [dependencies.tokio]
 version = "0.2"
-features = ["rt-core", "rt-threaded", "signal"]
+features = ["rt-threaded", "signal"]

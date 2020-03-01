@@ -24,7 +24,6 @@ use nix::fcntl::FlockArg;
 use crate::errno::Errno;
 use crate::Result;
 
-use super::attr::SetAttr;
 use super::inode::Inode;
 
 pub type LockTable = Arc<Mutex<BTreeMap<u64, Sender<()>>>>;
@@ -126,7 +125,7 @@ impl FileHandle {
         })
     }
 
-    pub async fn set_attr(&mut self, set_attr: SetAttr) -> Result<FileAttr> {
+    /*pub async fn set_attr(&mut self, set_attr: SetAttr) -> Result<FileAttr> {
         if let FileHandleKind::ReadOnly = self.kind {
             return Err(Errno::from(libc::EBADF));
         }
@@ -144,7 +143,7 @@ impl FileHandle {
         }
 
         self.get_attr().await
-    }
+    }*/
 
     pub async fn set_lock(
         &mut self,
@@ -258,7 +257,7 @@ impl FileHandle {
         Ok(())
     }
 
-    pub async fn release_lock(&self) -> Result<()> {
+    /*pub async fn release_lock(&self) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         async_std::task::spawn_blocking(move || fcntl::flock(raw_fd, FlockArg::Unlock)).await?;
@@ -268,7 +267,7 @@ impl FileHandle {
         *lock_kind = LockKind::NoLock;
 
         Ok(())
-    }
+    }*/
 
     pub async fn try_release_lock(&self) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
