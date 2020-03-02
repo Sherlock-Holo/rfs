@@ -13,10 +13,14 @@ use fuse::{
 };
 use libc::c_int;
 use log::{debug, error, info, warn};
+use nix::mount;
+use nix::mount::MntFlags;
 use nix::unistd;
 use serde::export::Formatter;
 use tokio::fs;
 use tokio::net::UnixStream;
+use tokio::signal::unix;
+use tokio::signal::unix::SignalKind;
 use tokio::task;
 use tonic::Request as TonicRequest;
 use tonic::transport::{Channel, Uri};
@@ -60,18 +64,6 @@ pub struct Filesystem {
     uuid: Option<Uuid>,
     rpc_client: RfsClient<Channel>,
     client_kind: ClientKind,
-}
-
-impl Filesystem {
-    fn get_rpc_header(&self) -> Option<Header> {
-        if let Some(uuid) = self.uuid {
-            Some(Header {
-                uuid: uuid.to_hyphenated().to_string(),
-            })
-        } else {
-            None
-        }
-    }
 }
 
 impl Filesystem {
@@ -146,7 +138,27 @@ impl Filesystem {
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 
+        let mut stop_signal = unix::signal(SignalKind::interrupt())?;
+
+        let unmount_point = mount_point.as_ref().to_path_buf();
+
+        task::spawn(async move {
+            stop_signal.recv().await;
+
+            let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
+        });
+
         fuse::mount(self, mount_point, &opts)
+    }
+
+    fn get_rpc_header(&self) -> Option<Header> {
+        if let Some(uuid) = self.uuid {
+            Some(Header {
+                uuid: uuid.to_hyphenated().to_string(),
+            })
+        } else {
+            None
+        }
     }
 }
 

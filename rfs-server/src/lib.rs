@@ -66,9 +66,9 @@ pub async fn run() -> Result<()> {
 
         let cfg: Config = serde_yaml::from_slice(&cfg_data)?;
 
-        let mut signal_stream = unix::signal(SignalKind::hangup())?;
+        let mut initialize_signal = unix::signal(SignalKind::hangup())?;
 
-        if let None = signal_stream.recv().await {
+        if let None = initialize_signal.recv().await {
             return Err(format_err!("should receive a SIGHUP signal"));
         }
 
@@ -166,13 +166,22 @@ pub async fn run() -> Result<()> {
     let uds_client_job =
         task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"));
 
+    let mut stop_signal = unix::signal(SignalKind::interrupt())?;
+
     select! {
         result = serve => {
+            signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
+
             result?;
             Ok(())
         },
         result = uds_client_job => {
             result??;
+            Ok(())
+        }
+        _ = stop_signal.recv() => {
+            signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
+
             Ok(())
         }
     }
