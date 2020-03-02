@@ -5,10 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fuse::{FileAttr, FileType};
-use futures::StreamExt;
 use log::{debug, info};
 use nix::{sched, unistd};
-use tokio::fs;
 use tokio::sync::RwLock;
 
 use crate::errno::Errno;
@@ -72,26 +70,7 @@ impl Filesystem {
             })
             .await;*/
 
-        env::set_current_dir(&root)?;
-
-        unistd::chroot(".")?;
-
-        info!("chroot {:?} success", root.as_ref());
-
-        env::set_current_dir("/")?;
-
-        sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)?;
-
-        fs::read_dir("/")
-            .await?
-            .for_each(|child| {
-                let child = child.unwrap();
-
-                info!("child {:?} in /", child.path());
-
-                futures::future::ready(())
-            })
-            .await;
+        Self::chroot(&root).await?;
 
         let inode_map = Arc::new(RwLock::new(InodeMap::new()));
         let inode_gen = Arc::new(AtomicU64::new(1));
@@ -102,6 +81,20 @@ impl Filesystem {
             inode_map,
             file_handle_id_gen: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    async fn chroot<P: AsRef<Path>>(root: P) -> Result<()> {
+        env::set_current_dir(&root)?;
+
+        unistd::chroot(".")?;
+
+        info!("chroot {:?} success", root.as_ref());
+
+        env::set_current_dir("/")?;
+
+        sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)?;
+
+        Ok(())
     }
 
     pub async fn lookup(&self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
