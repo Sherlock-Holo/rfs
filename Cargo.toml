@@ -52,3 +52,4 @@ tempfile = "3.1"
 
 [build-dependencies]
 tonic-build = "0.1"
+rustversion = "1.0"
