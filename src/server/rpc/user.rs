@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use async_std::sync::{Arc, Mutex, RwLock};
-use async_std::task::JoinHandle;
 use chrono::prelude::*;
-use futures::future::FutureExt;
-use futures::select;
 use log::debug;
+use tokio::select;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::errno::Errno;
@@ -178,8 +178,8 @@ impl User {
             .clone();
 
         let file_handle = select! {
-            file_handle = file_handle.lock().fuse() => file_handle,
-            default => return Err(Errno::from(libc::EWOULDBLOCK)),
+            file_handle = file_handle.lock() => file_handle,
+            else => return Err(Errno::from(libc::EWOULDBLOCK)),
         };
 
         file_handle.try_set_lock(share).await
@@ -204,7 +204,8 @@ impl User {
     pub async fn interrupt_lock(&self, unique: u64) -> Result<()> {
         debug!("interrupt unique {} lock", unique);
 
-        self.0
+        Ok(self
+            .0
             .read()
             .await
             .lock_table
@@ -212,10 +213,7 @@ impl User {
             .await
             .get(&unique)
             .ok_or(Errno::from(libc::EBADF))?
-            .send(())
-            .await;
-
-        Ok(())
+            .notify())
     }
 
     //#[inline]

@@ -1,6 +1,8 @@
+use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse::{FileAttr, FileType};
+use futures::executor;
 
 use crate::errno::Errno;
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
@@ -8,8 +10,8 @@ use crate::Result;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(&mut Self),
+        where
+            F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -29,7 +31,7 @@ fn convert_system_time_to_proto_time(sys_time: SystemTime) -> Option<prost_types
         })
 }
 
-//#[inline]
+#[inline]
 pub fn convert_proto_time_to_system_time(proto_time: Option<prost_types::Timestamp>) -> SystemTime {
     if let Some(proto_time) = proto_time {
         UNIX_EPOCH + Duration::new(proto_time.seconds as u64, proto_time.nanos as u32)
@@ -90,7 +92,11 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
     })
 }
 
-//#[inline]
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    executor::block_on(future)
+}
+
+#[inline]
 fn get_blocks(size: u64) -> u64 {
     const BLOCK_SIZE: u64 = 512;
 

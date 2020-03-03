@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
 
-use async_std::fs;
-use async_std::path::Path;
-use async_std::sync::{Arc, RwLock};
 use chrono::prelude::*;
 use fuse::FileType;
 use futures::stream::TryStreamExt;
 use futures::try_join;
 use log::{debug, info, warn};
+use tokio::fs;
 use tokio::net::UnixListener;
+use tokio::sync::RwLock;
 use tonic::{Code, Request, Status};
 use tonic::Response;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
@@ -462,20 +463,12 @@ impl Rfs for Server {
                 Ok(lock_job) => lock_job,
             };
 
-            return match lock_job.await {
-                Err(err) => Ok(Response::new(SetLockResponse {
-                    error: Some(err.into()),
-                })),
-
-                Ok(lock_success) => {
-                    if lock_success {
-                        Ok(Response::new(SetLockResponse { error: None }))
-                    } else {
-                        Ok(Response::new(SetLockResponse {
-                            error: Some(Errno::from(libc::EINTR).into()),
-                        }))
-                    }
-                }
+            return if let Ok(Ok(true)) = lock_job.await {
+                Ok(Response::new(SetLockResponse { error: None }))
+            } else {
+                Ok(Response::new(SetLockResponse {
+                    error: Some(Errno::from(libc::EINTR).into()),
+                }))
             };
         }
 

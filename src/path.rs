@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
+use std::path::Path;
 
-use async_std::path::Path;
 use path_clean::clean as original_clean;
 
 use crate::errno::Errno;

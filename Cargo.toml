@@ -29,6 +29,9 @@ tower = "0.3"
 anyhow = "1.0"
 lazy_static = "1.4"
 
+[profile.release]
+lto = true
+
 [dependencies.fuse]
 branch = "master"
 git = "https://github.com/Sherlock-Holo/fuse-rs"
@@ -36,14 +39,20 @@ features = ["posix-lock"]
 
 [dependencies.tokio]
 version = "0.2"
-features = ["uds", "stream"]
-
-[dependencies.async-std]
-version = "1.5"
-features = ["attributes", "unstable"]
+features = [
+"uds",
+"stream",
+"blocking",
+"fs",
+"signal",
+"io-util",
+"sync",
+"macros"
+]
 
 [dev-dependencies]
 tempfile = "3.1"
 
 [build-dependencies]
 tonic-build = "0.1"
+rustversion = "1.0"
