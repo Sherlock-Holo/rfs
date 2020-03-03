@@ -8,3 +8,14 @@ edition = "2018"
 
 [dependencies]
 rfs = { path = ".." }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.8"
+structopt = "0.3"
+anyhow = "1.0"
+log = "0.4"
+tonic = { version = "0.1", features = ["tls"] }
+
+[dependencies.tokio]
+version = "0.2"
+features = ["rt-threaded", "fs", "macros", "blocking"]

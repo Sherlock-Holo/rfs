@@ -29,6 +29,9 @@ tower = "0.3"
 anyhow = "1.0"
 lazy_static = "1.4"
 
+[profile.release]
+lto = true
+
 [dependencies.fuse]
 branch = "master"
 git = "https://github.com/Sherlock-Holo/fuse-rs"

@@ -107,11 +107,15 @@ impl Filesystem {
     }
 
     pub async fn new(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
+        info!("connecting server");
+
         let channel = Channel::builder(uri)
             .tls_config(tls_cfg)
             .tcp_keepalive(Some(Duration::from_secs(5)))
             .connect()
             .await?;
+
+        info!("server connected");
 
         Ok(Filesystem {
             uuid: None,
