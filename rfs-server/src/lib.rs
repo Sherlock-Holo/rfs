@@ -12,7 +12,8 @@ use nix::mount::MntFlags;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use rand::distributions::Alphanumeric;
-use rand::Rng;
+use rand::prelude::*;
+use rand::rngs::OsRng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
@@ -111,7 +112,7 @@ pub async fn run() -> Result<()> {
 
     debug!("uds dir created");
 
-    let uds_name = rand::thread_rng()
+    let uds_name = OsRng {}
         .sample_iter(&Alphanumeric)
         .take(10)
         .collect::<String>()
