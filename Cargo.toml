@@ -17,7 +17,7 @@ pretty_env_logger = "0.4"
 nix = "0.17"
 libc = "0.2"
 path-clean = "0.1"
-futures = "0.3"
+futures-util = "0.3"
 tonic = { version = "0.1", features = ["transport", "tls"] }
 prost = "0.6"
 prost-types = "0.6"
@@ -28,6 +28,7 @@ thiserror = "1.0"
 tower = "0.3"
 anyhow = "1.0"
 lazy_static = "1.4"
+async-notify = "0.1"
 
 [profile.release]
 lto = true
@@ -37,18 +38,13 @@ branch = "master"
 git = "https://github.com/Sherlock-Holo/fuse-rs"
 features = ["posix-lock"]
 
+[dependencies.async-std]
+version = "1.5"
+features = ["attributes"]
+
 [dependencies.tokio]
 version = "0.2"
-features = [
-"uds",
-"stream",
-"blocking",
-"fs",
-"signal",
-"io-util",
-"sync",
-"macros"
-]
+features = ["signal", "stream"]
 
 [dev-dependencies]
 tempfile = "3.1"

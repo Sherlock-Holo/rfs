@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use async_std::sync::{Mutex, RwLock};
+use async_std::task::JoinHandle;
 use chrono::prelude::*;
+use futures_util::future::FutureExt;
+use futures_util::select;
 use log::debug;
-use tokio::select;
-use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::errno::Errno;
@@ -178,8 +179,8 @@ impl User {
             .clone();
 
         let file_handle = select! {
-            file_handle = file_handle.lock() => file_handle,
-            else => return Err(Errno::from(libc::EWOULDBLOCK)),
+            file_handle = file_handle.lock().fuse() => file_handle,
+            default => return Err(Errno::from(libc::EWOULDBLOCK)),
         };
 
         file_handle.try_set_lock(share).await

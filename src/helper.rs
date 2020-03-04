@@ -1,8 +1,14 @@
-use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
+use async_std::net::Shutdown;
+use async_std::prelude::*;
 use fuse::{FileAttr, FileType};
-use futures::executor;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tonic::transport::server::Connected;
 
 use crate::errno::Errno;
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
@@ -10,8 +16,8 @@ use crate::Result;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-        where
-            F: FnOnce(&mut Self),
+    where
+        F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -19,6 +25,43 @@ pub trait Apply: Sized {
 }
 
 impl<T> Apply for T {}
+
+#[derive(Debug)]
+pub struct UnixStream(pub async_std::os::unix::net::UnixStream);
+
+impl Connected for UnixStream {}
+
+impl AsyncRead for UnixStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for UnixStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if let Err(err) = self.0.shutdown(Shutdown::Both) {
+            Poll::Ready(Err(err))
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
 
 fn convert_system_time_to_proto_time(sys_time: SystemTime) -> Option<prost_types::Timestamp> {
     sys_time
@@ -90,10 +133,6 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
         },
         flags: 0,
     })
-}
-
-pub fn block_on<F: Future>(future: F) -> F::Output {
-    executor::block_on(future)
 }
 
 #[inline]

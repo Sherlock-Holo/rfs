@@ -1,13 +1,13 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
+use async_std::path::Path;
+use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
 use log::{debug, info};
 use nix::{sched, unistd};
-use tokio::sync::RwLock;
 
 use crate::errno::Errno;
 use crate::path::PathClean;
@@ -84,7 +84,7 @@ impl Filesystem {
     }
 
     async fn chroot<P: AsRef<Path>>(root: P) -> Result<()> {
-        env::set_current_dir(&root)?;
+        env::set_current_dir(root.as_ref().to_path_buf())?;
 
         unistd::chroot(".")?;
 
@@ -237,7 +237,7 @@ impl Filesystem {
                 self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
                 flags,
             )
-                .await
+            .await
         } else {
             Err(Errno::from(libc::EISDIR))
         }
@@ -308,11 +308,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
+    use async_std::fs;
+    use async_std::future::timeout;
+    use async_std::sync::Mutex;
+    use async_std::task;
     use tempfile;
-    use tokio::fs;
-    use tokio::sync::Mutex;
-    use tokio::task;
-    use tokio::time;
 
     use crate::log_init;
     use crate::server::filesystem::file_handle::FileHandleKind;
@@ -320,7 +320,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[async_std::test]
     async fn init_filesystem() {
         log_init(true);
 
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(root_dir.get_parent_inode().await, 1);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn create_dir() {
         log_init(true);
 
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(dir_attr.perm, 0o755);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn create_file() {
         log_init(true);
 
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn get_dir_name() {
         log_init(true);
 
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(filesystem.get_name(2).await, Ok(OsString::from("test")));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn get_file_name() {
         log_init(true);
 
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(filesystem.get_name(2).await, Ok(OsString::from("test")));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn lookup_dir() {
         log_init(true);
 
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn lookup_file() {
         log_init(true);
 
@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn get_attr_dir() {
         log_init(true);
 
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn get_attr_file() {
         log_init(true);
 
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn set_dir_attr() {
         log_init(true);
 
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(attr.perm, 0o700);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn remove_dir() {
         log_init(true);
 
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn remove_file() {
         log_init(true);
 
@@ -577,7 +577,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn rename_dir() {
         log_init(true);
 
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn rename_file() {
         log_init(true);
 
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn move_dir() {
         log_init(true);
 
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn move_file() {
         log_init(true);
 
@@ -695,7 +695,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn read_dir() {
         log_init(true);
 
@@ -741,7 +741,7 @@ mod tests {
         assert!(*name == OsString::from("test-1") || *name == OsString::from("test-2"));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn read_dir_deeply() {
         log_init(true);
 
@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(*name, OsString::from("test-2"));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn open_file_rw() {
         log_init(true);
 
@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn open_file_ro() {
         log_init(true);
 
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn open_file_wo() {
         log_init(true);
 
@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn write_file() {
         log_init(true);
 
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(file_handle.get_attr().await.unwrap().size, 4)
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn read_file() {
         log_init(true);
 
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(&b"test"[..], &buf[..])
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn set_attr_file() {
         log_init(true);
 
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(&b"te"[..], &buf[..read])
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn set_share_lock_success() {
         log_init(true);
 
@@ -969,26 +969,24 @@ mod tests {
             .await
             .unwrap();
 
-        let lock_job = time::timeout(Duration::from_secs(2), lock_job)
+        let lock_job = timeout(Duration::from_secs(2), lock_job)
             .await
             .expect("set share lock failed")
-            .unwrap()
             .unwrap();
 
         assert!(lock_job);
 
         let lock_job = file_handle2.set_lock(2, true, lock_table).await.unwrap();
 
-        let lock_job = time::timeout(Duration::from_secs(2), lock_job)
+        let lock_job = timeout(Duration::from_secs(2), lock_job)
             .await
             .expect("set another share lock failed")
-            .unwrap()
             .unwrap();
 
         assert!(lock_job);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn set_share_lock_failed() {
         log_init(true);
 
@@ -1010,25 +1008,21 @@ mod tests {
             .await
             .unwrap();
 
-        let lock_job = time::timeout(Duration::from_secs(2), lock_job)
+        let lock_job = timeout(Duration::from_secs(2), lock_job)
             .await
             .expect("set share lock failed")
-            .unwrap()
             .unwrap();
 
         assert!(lock_job);
 
         let lock_job = file_handle2.set_lock(2, false, lock_table).await.unwrap();
 
-        if time::timeout(Duration::from_secs(1), lock_job)
-            .await
-            .is_ok()
-        {
+        if timeout(Duration::from_secs(1), lock_job).await.is_ok() {
             panic!("set not share lock success")
         }
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn try_set_share_lock_success() {
         log_init(true);
 
@@ -1047,7 +1041,7 @@ mod tests {
         assert_eq!(file_handle2.try_set_lock(true).await, Ok(()));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn try_set_share_lock_failed() {
         log_init(true);
 
@@ -1070,7 +1064,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn set_exclusive_lock() {
         log_init(true);
 
@@ -1092,10 +1086,9 @@ mod tests {
             .await
             .unwrap();
 
-        let lock_job = time::timeout(Duration::from_secs(2), lock_job)
+        let lock_job = timeout(Duration::from_secs(2), lock_job)
             .await
             .expect("set exclusive lock failed")
-            .unwrap()
             .unwrap();
 
         assert!(lock_job);
@@ -1105,24 +1098,18 @@ mod tests {
             .await
             .unwrap();
 
-        if time::timeout(Duration::from_secs(1), lock_job)
-            .await
-            .is_ok()
-        {
+        if timeout(Duration::from_secs(1), lock_job).await.is_ok() {
             panic!("set exclusive lock should failed");
         }
 
         let lock_job = file_handle2.set_lock(3, true, lock_table).await.unwrap();
 
-        if time::timeout(Duration::from_secs(1), lock_job)
-            .await
-            .is_ok()
-        {
+        if timeout(Duration::from_secs(1), lock_job).await.is_ok() {
             panic!("set share lock should failed");
         }
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn try_set_exclusive_lock() {
         log_init(true);
 
@@ -1148,7 +1135,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn release_share_lock() {
         log_init(true);
 
@@ -1167,13 +1154,13 @@ mod tests {
 
         let lock_job = file_handle.set_lock(1, true, lock_queue).await.unwrap();
 
-        assert!(lock_job.await.unwrap().unwrap());
+        assert!(lock_job.await.unwrap());
         assert_eq!(file_handle.try_release_lock().await, Ok(()));
 
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn release_exclusive_lock() {
         log_init(true);
 
@@ -1192,13 +1179,13 @@ mod tests {
 
         let lock_job = file_handle.set_lock(1, false, lock_queue).await.unwrap();
 
-        assert!(lock_job.await.unwrap().unwrap());
+        assert!(lock_job.await.unwrap());
         assert_eq!(file_handle.try_release_lock().await, Ok(()));
 
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn interrupt_lock() {
         log_init(true);
 
@@ -1220,7 +1207,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(lock_job.await.unwrap().unwrap());
+        assert!(lock_job.await.unwrap());
 
         let lock_job = file_handle2
             .set_lock(2, false, lock_table.clone())
@@ -1231,10 +1218,10 @@ mod tests {
 
         debug!("interrupt sent");
 
-        assert!(!lock_job.await.unwrap().unwrap())
+        assert!(!lock_job.await.unwrap())
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn wait_exclusive_lock() {
         log_init(true);
 
@@ -1256,13 +1243,12 @@ mod tests {
                 .set_lock(1, false, lock_table.clone())
                 .await
                 .unwrap()
-                .await
-                .unwrap(),
+                .await,
             Ok(true),
         );
 
         task::spawn(async move {
-            time::delay_for(Duration::from_secs(1)).await;
+            task::sleep(Duration::from_secs(1)).await;
 
             file_handle.try_release_lock().await.unwrap();
         });
@@ -1272,14 +1258,14 @@ mod tests {
             .await
             .unwrap();
 
-        let lock_result = time::timeout(Duration::from_secs(2), lock_job)
+        let lock_result = timeout(Duration::from_secs(2), lock_job)
             .await
             .expect("set exclusive lock should success");
 
-        assert!(lock_result.unwrap().unwrap())
+        assert!(lock_result.unwrap())
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn get_lock_kind() {
         log_init(true);
 
@@ -1301,8 +1287,7 @@ mod tests {
                 .set_lock(1, false, lock_table.clone())
                 .await
                 .unwrap()
-                .await
-                .unwrap(),
+                .await,
             Ok(true),
         );
 
@@ -1317,8 +1302,7 @@ mod tests {
                 .set_lock(1, true, lock_table.clone())
                 .await
                 .unwrap()
-                .await
-                .unwrap(),
+                .await,
             Ok(true),
         );
 
@@ -1329,7 +1313,7 @@ mod tests {
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
     }
 
-    #[tokio::test]
+    #[async_std::test]
     async fn lookup_exist_entry() {
         log_init(true);
 

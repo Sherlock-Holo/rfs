@@ -1,8 +1,10 @@
+#![type_length_limit = "111913108"]
+
 use anyhow::Result;
 
-use rfs_server::run;
+use rfs_server::{enter_tokio, run};
 
-#[tokio::main]
+#[async_std::main]
 async fn main() -> Result<()> {
-    run().await
+    enter_tokio(run()).await
 }
