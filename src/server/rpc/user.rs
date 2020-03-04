@@ -59,7 +59,7 @@ impl User {
             .ok_or(Errno::from(libc::EBADF))?
             .clone();
 
-        let mut buf = vec![0; size as usize - offset as usize];
+        let mut buf = vec![0; size as usize];
 
         let n = file_handle.lock().await.read(&mut buf, offset).await?;
 
