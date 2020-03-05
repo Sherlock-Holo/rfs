@@ -15,7 +15,13 @@ structopt = "0.3"
 anyhow = "1.0"
 log = "0.4"
 tonic = { version = "0.1", features = ["tls"] }
+futures-util = "0.3"
+lazy_static = "1"
 
 [dependencies.tokio]
 version = "0.2"
-features = ["rt-threaded", "fs", "macros", "blocking"]
+features = ["rt-threaded"]
+
+[dependencies.async-std]
+version = "1.5"
+features = ["attributes"]

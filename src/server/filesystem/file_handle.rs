@@ -8,23 +8,25 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use async_notify::Notify;
+use async_std::fs::File as SysFile;
+use async_std::prelude::*;
+use async_std::sync::{Mutex, RwLock};
+use async_std::task;
+use async_std::task::JoinHandle;
 use fuse::{FileAttr, FileType};
+use futures_util::future::FutureExt;
+use futures_util::select;
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::FlockArg;
-use tokio::fs::File as SysFile;
-use tokio::prelude::*;
-use tokio::select;
-use tokio::sync::{Mutex, Notify, RwLock};
-use tokio::task;
-use tokio::task::JoinHandle;
 
-use crate::{block_on, Result};
 use crate::errno::Errno;
+use crate::Result;
 
 use super::inode::Inode;
 
-pub type LockTable = Arc<Mutex<BTreeMap<u64, Arc<Notify>>>>;
+pub type LockTable = Arc<Mutex<BTreeMap<u64, Notify>>>;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
@@ -163,7 +165,7 @@ impl FileHandle {
 
         let lock_kind = self.lock_kind.clone();
 
-        let lock_canceler = Arc::new(Notify::new());
+        let lock_canceler = Notify::new();
 
         // save lock canceler at first, ensure when return JoinHandle, lock canceler is usable
         lock_table
@@ -178,14 +180,8 @@ impl FileHandle {
                 let lock_job = task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
 
                 let result = select! {
-                    _ = lock_canceler.notified() => break false,
-                    result = lock_job => {
-                        if result.is_err() {
-                            break false
-                        }
-
-                        result.unwrap()
-                    }
+                    _ = lock_canceler.notified().fuse() => break false,
+                    result = lock_job.fuse() => result,
                 };
 
                 if let Err(err) = result {
@@ -310,7 +306,7 @@ impl FileHandle {
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        block_on(async {
+        task::block_on(async {
             let _ = self.flush().await;
         })
     }

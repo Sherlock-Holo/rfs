@@ -1,36 +1,36 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 
+use async_std::fs;
+use async_std::os::unix::net::UnixListener;
+use async_std::path::Path;
 use chrono::prelude::*;
 use fuse::FileType;
-use futures::stream::TryStreamExt;
-use futures::try_join;
+use futures_util::stream::TryStreamExt;
+use futures_util::try_join;
 use log::{debug, info, warn};
-use tokio::fs;
-use tokio::net::UnixListener;
 use tokio::sync::RwLock;
-use tonic::{Code, Request, Status};
-use tonic::Response;
-use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::transport::Server as TonicServer;
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tonic::Response;
+use tonic::{Code, Request, Status};
 use uuid::Uuid;
 
 use crate::errno::Errno;
 use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
 use crate::pb;
-use crate::pb::*;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 use crate::pb::rfs_server::RfsServer;
+use crate::pb::*;
+use crate::TokioUnixStream;
 
 use super::super::filesystem::Filesystem;
 use super::super::filesystem::LockKind;
 use super::super::filesystem::SetAttr;
 use super::user::User;
-use super::wrapper;
 
 type Result<T> = std::result::Result<T, Status>;
 
@@ -65,7 +65,7 @@ impl Server {
             .identity(server_identity)
             .client_ca_root(client_ca);
 
-        let mut unix_listener = UnixListener::bind(uds_path.as_ref())?;
+        let unix_listener = UnixListener::bind(uds_path.as_ref()).await?;
 
         let fs = Arc::new(Filesystem::new(root_path.as_ref()).await?);
 
@@ -86,7 +86,7 @@ impl Server {
 
         let uds_serve = TonicServer::builder()
             .add_service(RfsServer::new(nds_server))
-            .serve_with_incoming(unix_listener.incoming().map_ok(wrapper::UnixStream));
+            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
 
         try_join!(rpc_serve, uds_serve)?;
 
@@ -463,7 +463,7 @@ impl Rfs for Server {
                 Ok(lock_job) => lock_job,
             };
 
-            return if let Ok(Ok(true)) = lock_job.await {
+            return if let Ok(true) = lock_job.await {
                 Ok(Response::new(SetLockResponse { error: None }))
             } else {
                 Ok(Response::new(SetLockResponse {

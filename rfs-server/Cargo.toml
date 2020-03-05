@@ -19,7 +19,12 @@ nix = "0.17"
 rand = { version = "0.7", default-features = false, features = ["getrandom"] }
 anyhow = "1.0"
 scopeguard = "1.1"
+lazy_static = "1"
 
 [dependencies.tokio]
 version = "0.2"
-features = ["rt-threaded", "signal", "fs", "macros", "time"]
+features = ["rt-threaded", "signal"]
+
+[dependencies.async-std]
+version = "1.5"
+features = ["attributes"]

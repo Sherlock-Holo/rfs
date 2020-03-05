@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, format_err, Result};
+use anyhow::{format_err, Context, Result};
+use async_std::fs;
+use async_std::task;
+use futures_util::future::FutureExt;
+use futures_util::select;
 use log::{debug, info};
 use nix::mount;
 use nix::mount::MntFlags;
@@ -17,16 +21,13 @@ use rand::rngs::OsRng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
-use tokio::fs;
-use tokio::select;
 use tokio::signal::unix::{self, SignalKind};
-use tokio::task;
-use tokio::time;
 
+use rfs::log_init;
 use rfs::Apply;
 use rfs::Filesystem;
-use rfs::log_init;
 use rfs::Server;
+pub use tokio_runtime::enter_tokio;
 
 const UDS_DIR: &str = "/run/rfs";
 const UDS_CLIENT_ENV: &str = "RFS_UDS_CLIENT";
@@ -147,12 +148,12 @@ pub async fn run() -> Result<()> {
     info!("starting rfs server");
 
     task::spawn(async move {
-        time::delay_for(Duration::from_secs(1)).await;
+        task::sleep(Duration::from_secs(1)).await;
 
         task::spawn_blocking(move || {
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGHUP)
         })
-            .await
+        .await
     });
 
     let serve = Server::run(
@@ -170,20 +171,52 @@ pub async fn run() -> Result<()> {
     let mut stop_signal = unix::signal(SignalKind::interrupt())?;
 
     select! {
-        result = serve => {
+        result = serve.fuse() => {
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
 
             result?;
             Ok(())
         },
-        result = uds_client_job => {
-            result??;
+        result = uds_client_job.fuse() => {
+            result?;
             Ok(())
         }
-        _ = stop_signal.recv() => {
+        _ = stop_signal.recv().fuse() => {
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
 
             Ok(())
         }
+    }
+}
+
+mod tokio_runtime {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::thread;
+
+    use futures_util::future::{pending, poll_fn};
+    use tokio::runtime::{Handle, Runtime};
+
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref HANDLE: Handle = {
+            let mut rt = Runtime::new().unwrap();
+            let handle = rt.handle().clone();
+            thread::spawn(move || rt.block_on(pending::<()>()));
+            handle
+        };
+    }
+
+    pub async fn enter_tokio<T>(mut f: impl Future<Output = T>) -> T {
+        poll_fn(|context| {
+            HANDLE.enter(|| {
+                // Safety: pinned on stack, and we are in an async fn
+                // WARN: DO NOT use f in other places
+                let f = unsafe { Pin::new_unchecked(&mut f) };
+                f.poll(context)
+            })
+        })
+        .await
     }
 }
