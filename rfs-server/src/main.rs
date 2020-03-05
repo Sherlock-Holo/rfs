@@ -1,4 +1,4 @@
-#![type_length_limit = "111913108"]
+#![type_length_limit = "112013908"]
 
 use anyhow::Result;
 

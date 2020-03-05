@@ -41,12 +41,12 @@ pub struct Server {
 
 impl Server {
     /// new a Server will chroot and listen rpc server and uds server
-    pub async fn run<P: AsRef<Path>>(
-        root_path: P,
-        cert_path: P,
-        key_path: P,
-        client_ca_path: P,
-        uds_path: P,
+    pub async fn run(
+        root_path: impl AsRef<Path>,
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+        client_ca_path: impl AsRef<Path>,
+        uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
     ) -> anyhow::Result<()> {
         let cert = fs::read(cert_path).await?;

@@ -26,7 +26,7 @@ use tokio::signal::unix::SignalKind;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
 use tonic::transport::{Channel, Uri};
-use tonic::Request as TonicRequest;
+use tonic::{Code, Request as TonicRequest};
 use tower::service_fn;
 use uuid::Uuid;
 
@@ -163,42 +163,56 @@ impl Filesystem {
         fuse::mount(self, mount_point, &opts)
     }
 
-    fn get_rpc_header(&self) -> Option<Header> {
-        if let Some(uuid) = self.uuid {
-            Some(Header {
-                uuid: uuid.to_hyphenated().to_string(),
-            })
-        } else {
-            None
-        }
+    fn get_rpc_header(&self) -> Header {
+        let uuid = self
+            .uuid
+            .expect("uuid must be initialize")
+            .to_hyphenated()
+            .to_string();
+
+        Header { uuid }
     }
 }
 
 impl FuseFilesystem for Filesystem {
     fn init(&mut self, _req: &Request) -> Result<(), libc::c_int> {
         task::block_on(async {
-            let req = TonicRequest::new(RegisterRequest {});
+            for _ in 0..3 {
+                let req = TonicRequest::new(RegisterRequest {});
 
-            match self.rpc_client.register(req).await {
-                Err(err) => {
-                    error!("register failed {}", err);
+                return match self.rpc_client.register(req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            task::sleep(Duration::from_secs(1)).await;
 
-                    return Err(libc::EINVAL);
-                }
+                            warn!("register failed {}", err);
 
-                Ok(resp) => {
-                    let resp = resp.into_inner();
+                            continue;
+                        }
 
-                    let uuid: Uuid = match resp.uuid.parse() {
-                        Err(_) => return Err(libc::EINVAL),
-                        Ok(uuid) => uuid,
-                    };
+                        error!("register failed {}", err);
 
-                    self.uuid.replace(uuid);
+                        Err(libc::EIO)
+                    }
 
-                    Ok(())
-                }
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
+
+                        let uuid: Uuid = match resp.uuid.parse() {
+                            Err(_) => return Err(libc::EINVAL),
+                            Ok(uuid) => uuid,
+                        };
+
+                        self.uuid.replace(uuid);
+
+                        Ok(())
+                    }
+                };
             }
+
+            error!("register fails more than 3 times");
+
+            Err(libc::EIO)
         })
     }
 
@@ -232,48 +246,63 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(LookupRequest {
-            head: header,
-            inode: parent,
-            name,
-        });
-
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
-            let result = match client.lookup(rpc_req).await {
-                Err(err) => {
-                    error!("lookup rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(LookupRequest {
+                    head: Some(header.clone()),
+                    inode: parent,
+                    name: name.to_string(),
+                });
 
-                    return;
-                }
+                let result = match client.lookup(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("lookup rpc has error {}", err);
 
-                Ok(resp) => {
-                    let resp = resp.into_inner();
+                            task::sleep(Duration::from_secs(1)).await;
 
-                    if let Some(result) = resp.result {
-                        result
-                    } else {
-                        error!("lookup result is None");
+                            continue;
+                        }
+
+                        error!("lookup rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
-                }
-            };
 
-            match result {
-                lookup_response::Result::Error(err) => reply.error(err.errno as i32),
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
 
-                lookup_response::Result::Attr(attr) => {
-                    match proto_attr_into_fuse_attr(attr, uid, gid) {
-                        Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.entry(&TTL, &attr, 0),
+                        if let Some(result) = resp.result {
+                            result
+                        } else {
+                            error!("lookup result is None");
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+                    }
+                };
+
+                match result {
+                    lookup_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    lookup_response::Result::Attr(attr) => {
+                        match proto_attr_into_fuse_attr(attr, uid, gid) {
+                            Err(err) => reply.error(err.into()),
+                            Ok(attr) => reply.entry(&TTL, &attr, 0),
+                        }
                     }
                 }
+
+                return;
             }
+
+            error!("lookup failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -282,47 +311,62 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(GetAttrRequest {
-            head: header,
-            inode,
-        });
-
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
-            let result = match client.get_attr(rpc_req).await {
-                Err(err) => {
-                    error!("getattr rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(GetAttrRequest {
+                    head: Some(header.clone()),
+                    inode,
+                });
 
-                    return;
-                }
+                let result = match client.get_attr(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("getattr rpc has error {}", err);
 
-                Ok(resp) => {
-                    let resp = resp.into_inner();
+                            task::sleep(Duration::from_secs(1)).await;
 
-                    if let Some(result) = resp.result {
-                        result
-                    } else {
-                        error!("getattr result is None");
+                            continue;
+                        }
+
+                        error!("getattr rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
-                }
-            };
 
-            match result {
-                get_attr_response::Result::Error(err) => reply.error(err.errno as i32),
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
 
-                get_attr_response::Result::Attr(attr) => {
-                    match proto_attr_into_fuse_attr(attr, uid, gid) {
-                        Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.attr(&TTL, &attr),
+                        if let Some(result) = resp.result {
+                            result
+                        } else {
+                            error!("getattr result is None");
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+                    }
+                };
+
+                match result {
+                    get_attr_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    get_attr_response::Result::Attr(attr) => {
+                        match proto_attr_into_fuse_attr(attr, uid, gid) {
+                            Err(err) => reply.error(err.into()),
+                            Ok(attr) => reply.attr(&TTL, &attr),
+                        }
                     }
                 }
+
+                return;
             }
+
+            error!("getattr failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -347,67 +391,82 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(SetAttrRequest {
-            head: header,
-            inode,
-            attr: Some(Attr {
-                inode,
-                name: String::new(),
-                mode: if let Some(mode) = mode {
-                    mode as i32
-                } else {
-                    -1
-                },
-                size: if let Some(size) = size {
-                    size as i64
-                } else {
-                    -1
-                },
-                r#type: 0,
-                access_time: None,
-                modify_time: None,
-                change_time: None,
-            }),
-        });
-
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
-            let result = match client.set_attr(rpc_req).await {
-                Err(err) => {
-                    error!("setattr rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(SetAttrRequest {
+                    head: Some(header.clone()),
+                    inode,
+                    attr: Some(Attr {
+                        inode,
+                        name: String::new(),
+                        mode: if let Some(mode) = mode {
+                            mode as i32
+                        } else {
+                            -1
+                        },
+                        size: if let Some(size) = size {
+                            size as i64
+                        } else {
+                            -1
+                        },
+                        r#type: 0,
+                        access_time: None,
+                        modify_time: None,
+                        change_time: None,
+                    }),
+                });
 
-                    return;
-                }
+                let result = match client.set_attr(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("setattr rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(result) = resp.into_inner().result {
-                        result
-                    } else {
-                        error!("setattr result is None");
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("setattr rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
-                }
-            };
 
-            match result {
-                set_attr_response::Result::Error(err) => {
-                    error!("setattr failed errno {}", err.errno);
+                    Ok(resp) => {
+                        if let Some(result) = resp.into_inner().result {
+                            result
+                        } else {
+                            error!("setattr result is None");
+                            reply.error(libc::EIO);
 
-                    reply.error(err.errno as i32)
-                }
+                            return;
+                        }
+                    }
+                };
 
-                set_attr_response::Result::Attr(attr) => {
-                    match proto_attr_into_fuse_attr(attr, uid, gid) {
-                        Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.attr(&TTL, &attr),
+                match result {
+                    set_attr_response::Result::Error(err) => {
+                        error!("setattr failed errno {}", err.errno);
+
+                        reply.error(err.errno as i32)
+                    }
+
+                    set_attr_response::Result::Attr(attr) => {
+                        match proto_attr_into_fuse_attr(attr, uid, gid) {
+                            Err(err) => reply.error(err.into()),
+                            Ok(attr) => reply.attr(&TTL, &attr),
+                        }
                     }
                 }
+
+                return;
             }
+
+            error!("setattr failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -425,47 +484,64 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(MkdirRequest {
-            head: header,
-            inode: parent,
-            name,
-            mode,
-        });
-
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
-            let result = match client.mkdir(rpc_req).await {
-                Err(err) => {
-                    error!("mkdir rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(MkdirRequest {
+                    head: Some(header.clone()),
+                    inode: parent,
+                    name: name.to_string(),
+                    mode,
+                });
 
-                    return;
-                }
+                let result = match client.mkdir(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("mkdir rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(result) = resp.into_inner().result {
-                        result
-                    } else {
-                        error!("mkdir result is None");
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("mkdir rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
-                }
-            };
 
-            match result {
-                mkdir_response::Result::Error(err) => reply.error(err.errno as i32),
+                    Ok(resp) => {
+                        if let Some(result) = resp.into_inner().result {
+                            result
+                        } else {
+                            error!("mkdir result is None");
+                            reply.error(libc::EIO);
 
-                mkdir_response::Result::Attr(attr) => {
-                    match proto_attr_into_fuse_attr(attr, uid, gid) {
-                        Err(err) => reply.error(err.into()),
-                        Ok(attr) => reply.entry(&TTL, &attr, 0),
+                            return;
+                        }
+                    }
+                };
+
+                match result {
+                    mkdir_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    mkdir_response::Result::Attr(attr) => {
+                        match proto_attr_into_fuse_attr(attr, uid, gid) {
+                            Err(err) => reply.error(err.into()),
+                            Ok(attr) => reply.entry(&TTL, &attr, 0),
+                        }
                     }
                 }
+
+                return;
             }
+
+            error!("mkdir failed more than 3 times");
+            reply.error(libc::EIO);
+
+            return;
         });
     }
 
@@ -483,30 +559,44 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(UnlinkRequest {
-            head: header,
-            inode: parent,
-            name,
-        });
-
         task::spawn(async move {
-            match client.unlink(rpc_req).await {
-                Err(err) => {
-                    error!("unlink rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(UnlinkRequest {
+                    head: Some(header.clone()),
+                    inode: parent,
+                    name: name.to_string(),
+                });
 
-                    return;
-                }
+                match client.unlink(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("unlink rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(error) = resp.into_inner().error {
-                        reply.error(error.errno as c_int);
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("unlink rpc has error {}", err);
+                        reply.error(libc::EIO);
+
                         return;
-                    } else {
-                        reply.ok()
                     }
-                }
-            };
+
+                    Ok(resp) => {
+                        if let Some(error) = resp.into_inner().error {
+                            reply.error(error.errno as c_int);
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
+                    }
+                };
+            }
+
+            error!("unlink failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -524,30 +614,44 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(RmDirRequest {
-            head: header,
-            inode: parent,
-            name,
-        });
-
         task::spawn(async move {
-            match client.rm_dir(rpc_req).await {
-                Err(err) => {
-                    error!("rmdir rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(RmDirRequest {
+                    head: Some(header.clone()),
+                    inode: parent,
+                    name: name.to_string(),
+                });
 
-                    return;
-                }
+                match client.rm_dir(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("rmdir rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(error) = resp.into_inner().error {
-                        reply.error(error.errno as c_int);
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("rmdir rpc has error {}", err);
+                        reply.error(libc::EIO);
+
                         return;
-                    } else {
-                        reply.ok()
                     }
-                }
-            };
+
+                    Ok(resp) => {
+                        if let Some(error) = resp.into_inner().error {
+                            reply.error(error.errno as c_int);
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
+                    }
+                };
+            }
+
+            error!("rmdir failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -582,32 +686,46 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(RenameRequest {
-            head: header,
-            old_parent: parent,
-            old_name: name,
-            new_parent,
-            new_name,
-        });
-
         task::spawn(async move {
-            match client.rename(rpc_req).await {
-                Err(err) => {
-                    error!("rename rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(RenameRequest {
+                    head: Some(header.clone()),
+                    old_parent: parent,
+                    old_name: name.to_string(),
+                    new_parent,
+                    new_name: new_name.to_string(),
+                });
 
-                    return;
-                }
+                match client.rename(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("rename rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(error) = resp.into_inner().error {
-                        reply.error(error.errno as c_int);
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("rename rpc has error {}", err);
+                        reply.error(libc::EIO);
+
                         return;
-                    } else {
-                        reply.ok()
+                    }
+
+                    Ok(resp) => {
+                        if let Some(error) = resp.into_inner().error {
+                            reply.error(error.errno as c_int);
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
                     }
                 }
             }
+
+            error!("rename failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -616,40 +734,55 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(OpenFileRequest {
-            head: header,
-            inode,
-            flags,
-        });
-
         debug!("client open inode {} flags {}", inode, flags);
 
         task::spawn(async move {
-            let result = match client.open_file(rpc_req).await {
-                Err(err) => {
-                    error!("open rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(OpenFileRequest {
+                    head: Some(header.clone()),
+                    inode,
+                    flags,
+                });
 
-                    return;
-                }
+                let result = match client.open_file(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("open rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(result) = resp.into_inner().result {
-                        result
-                    } else {
-                        error!("open result is None");
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("open rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
+
+                    Ok(resp) => {
+                        if let Some(result) = resp.into_inner().result {
+                            result
+                        } else {
+                            error!("open result is None");
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+                    }
+                };
+
+                match result {
+                    open_file_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    open_file_response::Result::FileHandleId(fh_id) => reply.opened(fh_id, flags),
                 }
-            };
 
-            match result {
-                open_file_response::Result::Error(err) => reply.error(err.errno as i32),
-
-                open_file_response::Result::FileHandleId(fh_id) => reply.opened(fh_id, flags),
+                return;
             }
+
+            error!("open failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -666,39 +799,54 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(ReadFileRequest {
-            head: header,
-            file_handle_id: fh,
-            offset,
-            size: size as u64,
-        });
-
         task::spawn(async move {
-            let result = match client.read_file(rpc_req).await {
-                Err(err) => {
-                    error!("read_file rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(ReadFileRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                    offset,
+                    size: size as u64,
+                });
 
-                    return;
-                }
+                let result = match client.read_file(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("read_file rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(result) = resp.into_inner().result {
-                        result
-                    } else {
-                        error!("open result is None");
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("read_file rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
+
+                    Ok(resp) => {
+                        if let Some(result) = resp.into_inner().result {
+                            result
+                        } else {
+                            error!("read_file result is None");
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+                    }
+                };
+
+                match result {
+                    read_file_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    read_file_response::Result::Data(data) => reply.data(&data),
                 }
-            };
 
-            match result {
-                read_file_response::Result::Error(err) => reply.error(err.errno as i32),
-
-                read_file_response::Result::Data(data) => reply.data(&data),
+                return;
             }
+
+            error!("read_file failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -716,39 +864,56 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(WriteFileRequest {
-            head: header,
-            file_handle_id: fh,
-            offset,
-            data: data.to_vec(),
-        });
+        let data = data.to_vec();
 
         task::spawn(async move {
-            let result = match client.write_file(rpc_req).await {
-                Err(err) => {
-                    error!("write_file rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(WriteFileRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                    offset,
+                    data: data.clone(),
+                });
 
-                    return;
-                }
+                let result = match client.write_file(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("write_file rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(result) = resp.into_inner().result {
-                        result
-                    } else {
-                        error!("open result is None");
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("write_file rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
+
+                    Ok(resp) => {
+                        if let Some(result) = resp.into_inner().result {
+                            result
+                        } else {
+                            error!("write_file result is None");
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+                    }
+                };
+
+                match result {
+                    write_file_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    write_file_response::Result::Written(written) => reply.written(written as u32),
                 }
-            };
 
-            match result {
-                write_file_response::Result::Error(err) => reply.error(err.errno as i32),
-
-                write_file_response::Result::Written(written) => reply.written(written as u32),
+                return;
             }
+
+            error!("write_file failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -757,28 +922,43 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(FlushRequest {
-            head: header,
-            file_handle_id: fh,
-        });
-
         task::spawn(async move {
-            match client.flush(rpc_req).await {
-                Err(err) => {
-                    error!("flush rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(FlushRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                });
 
-                    return;
-                }
+                match client.flush(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("flush rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(err) = resp.into_inner().error {
-                        reply.error(err.errno as c_int)
-                    } else {
-                        reply.ok()
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("flush rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(err) = resp.into_inner().error {
+                            reply.error(err.errno as c_int)
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
                     }
                 }
             }
+
+            error!("flush failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -796,28 +976,43 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(CloseFileRequest {
-            head: header,
-            file_handle_id: fh,
-        });
-
         task::spawn(async move {
-            match client.close_file(rpc_req).await {
-                Err(err) => {
-                    error!("close_file rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(CloseFileRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                });
 
-                    return;
-                }
+                match client.close_file(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("close_file rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(err) = resp.into_inner().error {
-                        reply.error(err.errno as c_int)
-                    } else {
-                        reply.ok()
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("close_file rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(err) = resp.into_inner().error {
+                            reply.error(err.errno as c_int)
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
                     }
                 }
             }
+
+            error!("close_file failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -826,28 +1021,43 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(SyncFileRequest {
-            head: header,
-            file_handle_id: fh,
-        });
-
         task::spawn(async move {
-            match client.sync_file(rpc_req).await {
-                Err(err) => {
-                    error!("sync_file rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(SyncFileRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                });
 
-                    return;
-                }
+                match client.sync_file(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("sync_file rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(err) = resp.into_inner().error {
-                        reply.error(err.errno as c_int)
-                    } else {
-                        reply.ok()
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("sync_file rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(err) = resp.into_inner().error {
+                            reply.error(err.errno as c_int)
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
                     }
                 }
             }
+
+            error!("sync_file failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -865,83 +1075,98 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(ReadDirRequest {
-            head: header,
-            inode,
-        });
-
         task::spawn(async move {
-            let dir_entries: Vec<read_dir_response::DirEntry> = match client.read_dir(rpc_req).await
-            {
-                Err(err) => {
-                    error!("read_dir rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(ReadDirRequest {
+                    head: Some(header.clone()),
+                    inode,
+                });
 
-                    return;
-                }
+                let dir_entries: Vec<read_dir_response::DirEntry> =
+                    match client.read_dir(rpc_req).await {
+                        Err(err) => {
+                            if code_can_retry(err.code()) {
+                                warn!("read_dir rpc has error {}", err);
 
-                Ok(resp) => {
-                    let resp = resp.into_inner();
+                                task::sleep(Duration::from_secs(1)).await;
 
-                    if let Some(error) = resp.error {
-                        reply.error(error.errno as c_int);
-                        return;
-                    }
+                                continue;
+                            }
 
-                    resp.dir_entries
-                }
-            };
+                            error!("read_dir rpc has error {}", err);
+                            reply.error(libc::EIO);
 
-            debug!("got readdir result");
+                            return;
+                        }
 
-            for (inode, index, kind, name) in dir_entries
-                .into_iter()
-                .enumerate()
-                .skip(offset as usize)
-                .map(|(index, dir_entry)| {
-                    let dir = EntryType::Dir as i32;
-                    let file = EntryType::File as i32;
+                        Ok(resp) => {
+                            let resp = resp.into_inner();
 
-                    let kind = if dir_entry.r#type == dir {
-                        Some(FileType::Directory)
-                    } else if dir_entry.r#type == file {
-                        Some(FileType::RegularFile)
-                    } else {
-                        error!("unexpect file type {}", dir_entry.r#type);
+                            if let Some(error) = resp.error {
+                                reply.error(error.errno as c_int);
+                                return;
+                            }
 
-                        None
+                            resp.dir_entries
+                        }
                     };
 
-                    (dir_entry.inode, index + 1, kind, dir_entry.name)
-                })
-            {
-                let kind = match kind {
-                    None => {
-                        error!(
-                            "unexpect file type in inode {}, index {}, name {}",
-                            inode, index, name
-                        );
+                debug!("got readdir result");
 
-                        // we got unknown entry type, it should not happened
-                        reply.error(libc::EIO);
-                        return;
+                for (inode, index, kind, name) in dir_entries
+                    .into_iter()
+                    .enumerate()
+                    .skip(offset as usize)
+                    .map(|(index, dir_entry)| {
+                        let dir = EntryType::Dir as i32;
+                        let file = EntryType::File as i32;
+
+                        let kind = if dir_entry.r#type == dir {
+                            Some(FileType::Directory)
+                        } else if dir_entry.r#type == file {
+                            Some(FileType::RegularFile)
+                        } else {
+                            error!("unexpect file type {}", dir_entry.r#type);
+
+                            None
+                        };
+
+                        (dir_entry.inode, index + 1, kind, dir_entry.name)
+                    })
+                {
+                    let kind = match kind {
+                        None => {
+                            error!(
+                                "unexpect file type in inode {}, index {}, name {}",
+                                inode, index, name
+                            );
+
+                            // we got unknown entry type, it should not happened
+                            reply.error(libc::EIO);
+                            return;
+                        }
+                        Some(kind) => kind,
+                    };
+
+                    debug!(
+                        "file type {:?}, inode {}, index {}, name {}",
+                        kind, inode, index, name
+                    );
+
+                    if reply.add(inode, index as i64, kind, name) {
+                        break;
                     }
-                    Some(kind) => kind,
-                };
-
-                debug!(
-                    "file type {:?}, inode {}, index {}, name {}",
-                    kind, inode, index, name
-                );
-
-                if reply.add(inode, index as i64, kind, name) {
-                    break;
                 }
+
+                reply.ok();
+
+                debug!("readdir success");
+
+                return;
             }
 
-            reply.ok();
-
-            debug!("readdir success")
+            error!("read_dir failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -972,49 +1197,64 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(CreateFileRequest {
-            head: header,
-            inode: parent,
-            name,
-            mode,
-            flags,
-        });
-
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
-            let (fh_id, attr) = match client.create_file(rpc_req).await {
-                Err(err) => {
-                    error!("create_file rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(CreateFileRequest {
+                    head: Some(header.clone()),
+                    inode: parent,
+                    name: name.to_string(),
+                    mode,
+                    flags,
+                });
 
-                    return;
-                }
+                let (fh_id, attr) = match client.create_file(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("create_file rpc has error {}", err);
 
-                Ok(resp) => {
-                    let resp = resp.into_inner();
+                            task::sleep(Duration::from_secs(1)).await;
 
-                    if let Some(error) = resp.error {
-                        reply.error(error.errno as c_int);
-                        return;
-                    }
+                            continue;
+                        }
 
-                    if resp.attr.is_none() {
-                        error!("create_file attr is None");
+                        error!("create_file rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
 
-                    (resp.file_handle_id, resp.attr.unwrap())
-                }
-            };
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
 
-            match proto_attr_into_fuse_attr(attr, uid, gid) {
-                Err(err) => reply.error(err.into()),
-                Ok(attr) => reply.created(&TTL, &attr, 0, fh_id, flags),
+                        if let Some(error) = resp.error {
+                            reply.error(error.errno as c_int);
+                            return;
+                        }
+
+                        if resp.attr.is_none() {
+                            error!("create_file attr is None");
+                            reply.error(libc::EIO);
+
+                            return;
+                        }
+
+                        (resp.file_handle_id, resp.attr.unwrap())
+                    }
+                };
+
+                match proto_attr_into_fuse_attr(attr, uid, gid) {
+                    Err(err) => reply.error(err.into()),
+                    Ok(attr) => reply.created(&TTL, &attr, 0, fh_id, flags),
+                }
+
+                return;
             }
+
+            error!("create_file failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -1034,52 +1274,67 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(GetLockRequest {
-            head: header,
-            file_handle_id: fh,
-        });
-
         task::spawn(async move {
-            let result = match client.get_lock(rpc_req).await {
-                Err(err) => {
-                    error!("get_lock rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(GetLockRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                });
 
-                    return;
-                }
+                let result = match client.get_lock(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("get_lock rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(result) = resp.into_inner().result {
-                        result
-                    } else {
-                        error!("get_lock result is None");
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("get_lock rpc has error {}", err);
                         reply.error(libc::EIO);
 
                         return;
                     }
-                }
-            };
 
-            match result {
-                get_lock_response::Result::Error(err) => reply.error(err.errno as i32),
-
-                get_lock_response::Result::LockType(lock_type) => {
-                    let lock_type = match lock_type {
-                        n if n == LockType::ReadLock as i32 => libc::F_RDLCK,
-                        n if n == LockType::WriteLock as i32 => libc::F_WRLCK,
-                        n if n == LockType::NoLock as i32 => libc::F_UNLCK, // TODO is it right way?
-                        _ => {
-                            error!("unknown lock type {}", lock_type);
-
+                    Ok(resp) => {
+                        if let Some(result) = resp.into_inner().result {
+                            result
+                        } else {
+                            error!("get_lock result is None");
                             reply.error(libc::EIO);
 
                             return;
                         }
-                    };
+                    }
+                };
 
-                    reply.locked(start, end, lock_type as u32, pid);
+                match result {
+                    get_lock_response::Result::Error(err) => reply.error(err.errno as i32),
+
+                    get_lock_response::Result::LockType(lock_type) => {
+                        let lock_type = match lock_type {
+                            n if n == LockType::ReadLock as i32 => libc::F_RDLCK,
+                            n if n == LockType::WriteLock as i32 => libc::F_WRLCK,
+                            n if n == LockType::NoLock as i32 => libc::F_UNLCK, // TODO is it right way?
+                            _ => {
+                                error!("unknown lock type {}", lock_type);
+
+                                reply.error(libc::EIO);
+
+                                return;
+                            }
+                        };
+
+                        reply.locked(start, end, lock_type as u32, pid);
+                    }
                 }
+
+                return;
             }
+
+            error!("get_lock failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -1101,30 +1356,44 @@ impl FuseFilesystem for Filesystem {
         let mut client = self.rpc_client.clone();
 
         if typ as i32 == libc::F_UNLCK {
-            let rpc_req = TonicRequest::new(ReleaseLockRequest {
-                head: header,
-                file_handle_id: fh,
-                block: false,
-            });
-
             task::spawn(async move {
-                match client.release_lock(rpc_req).await {
-                    Err(err) => {
-                        error!("release_lock rpc has error {}", err);
-                        reply.error(libc::EIO);
+                for _ in 0..3 {
+                    let rpc_req = TonicRequest::new(ReleaseLockRequest {
+                        head: Some(header.clone()),
+                        file_handle_id: fh,
+                        block: false,
+                    });
 
-                        return;
-                    }
+                    match client.release_lock(rpc_req).await {
+                        Err(err) => {
+                            if code_can_retry(err.code()) {
+                                warn!("release_lock rpc has error {}", err);
 
-                    Ok(resp) => {
-                        if let Some(error) = resp.into_inner().error {
-                            reply.error(error.errno as c_int);
+                                task::sleep(Duration::from_secs(1)).await;
+
+                                continue;
+                            }
+
+                            error!("release_lock rpc has error {}", err);
+                            reply.error(libc::EIO);
+
                             return;
-                        } else {
-                            reply.ok()
+                        }
+
+                        Ok(resp) => {
+                            if let Some(error) = resp.into_inner().error {
+                                reply.error(error.errno as c_int);
+                            } else {
+                                reply.ok()
+                            }
+
+                            return;
                         }
                     }
                 }
+
+                error!("release_lock failed more than 3 times");
+                reply.error(libc::EIO);
             });
 
             return;
@@ -1144,36 +1413,51 @@ impl FuseFilesystem for Filesystem {
 
         let unique = req.unique();
 
-        let rpc_req = TonicRequest::new(SetLockRequest {
-            head: header,
-            file_handle_id: fh,
-            unique,
-            lock_kind: lock_kind.into(),
-            block: sleep,
-        });
-
         task::spawn(async move {
-            match client.set_lock(rpc_req).await {
-                Err(err) => {
-                    error!("set_lock rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(SetLockRequest {
+                    head: Some(header.clone()),
+                    file_handle_id: fh,
+                    unique,
+                    lock_kind: lock_kind.into(),
+                    block: sleep,
+                });
 
-                    return;
-                }
+                match client.set_lock(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("set_lock rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(error) = resp.into_inner().error {
-                        warn!(
-                            "set lock failed, uiqueue {} errno is {}",
-                            unique, error.errno
-                        );
+                            task::sleep(Duration::from_secs(1)).await;
 
-                        reply.error(error.errno as c_int)
-                    } else {
-                        reply.ok()
+                            continue;
+                        }
+
+                        error!("set_lock rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(error) = resp.into_inner().error {
+                            warn!(
+                                "set lock failed, unique {} errno is {}",
+                                unique, error.errno
+                            );
+
+                            reply.error(error.errno as c_int)
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
                     }
                 }
             }
+
+            error!("set_lock failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
 
@@ -1182,30 +1466,49 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = self.rpc_client.clone();
 
-        let rpc_req = TonicRequest::new(InterruptRequest {
-            head: header,
-            unique,
-        });
-
         debug!("interrupt unique {}", unique);
 
         task::spawn(async move {
-            match client.interrupt(rpc_req).await {
-                Err(err) => {
-                    error!("interrupt rpc has error {}", err);
-                    reply.error(libc::EIO);
+            for _ in 0..3 {
+                let rpc_req = TonicRequest::new(InterruptRequest {
+                    head: Some(header.clone()),
+                    unique,
+                });
 
-                    return;
-                }
+                match client.interrupt(rpc_req).await {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("interrupt rpc has error {}", err);
 
-                Ok(resp) => {
-                    if let Some(err) = resp.into_inner().error {
-                        reply.error(err.errno as c_int)
-                    } else {
-                        reply.ok()
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("interrupt rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(err) = resp.into_inner().error {
+                            reply.error(err.errno as c_int)
+                        } else {
+                            reply.ok()
+                        }
+
+                        return;
                     }
                 }
             }
+
+            error!("interrupt failed more than 3 times");
+            reply.error(libc::EIO);
         });
     }
+}
+
+fn code_can_retry(code: Code) -> bool {
+    code == Code::Unavailable || code == Code::DeadlineExceeded
 }

@@ -342,7 +342,7 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 [[package]]
 name = "fuse"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#3a2b5ff654ca6d13084ed37f15bbea3282bcd308"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#3bcd972137254d18eb5039139834e10c0068f76e"
 dependencies = [
  "fuse-abi",
  "fuse-sys",
@@ -354,12 +354,12 @@ dependencies = [
 [[package]]
 name = "fuse-abi"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#3a2b5ff654ca6d13084ed37f15bbea3282bcd308"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#3bcd972137254d18eb5039139834e10c0068f76e"
 
 [[package]]
 name = "fuse-sys"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#3a2b5ff654ca6d13084ed37f15bbea3282bcd308"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#3bcd972137254d18eb5039139834e10c0068f76e"
 dependencies = [
  "pkg-config",
 ]
@@ -976,9 +976,9 @@ checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quote"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053a8c8bcc71fcce321828dc897a98ab9760bef03a4fc36693c231e5b3216cfe"
+checksum = "2bdc6c187c65bca4260c9011c9e3132efe4909da44726bad24cf7572ae338d7f"
 dependencies = [
  "proc-macro2",
 ]
