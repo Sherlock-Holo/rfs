@@ -234,6 +234,23 @@ impl FuseFilesystem for Filesystem {
                             .send(uuid)
                             .await;
 
+                        let mut client = self.rpc_client.clone();
+
+                        task::spawn(async move {
+                            loop {
+                                task::sleep(Duration::from_secs(60)).await;
+
+                                let ping_req = TonicRequest::new(PingRequest {
+                                    header: Some(Header {
+                                        uuid: uuid.to_hyphenated().to_string(),
+                                    }),
+                                });
+
+                                // ignore error because we should let user unmount filesystem
+                                let _ = client.ping(ping_req).await;
+                            }
+                        });
+
                         Ok(())
                     }
                 };
