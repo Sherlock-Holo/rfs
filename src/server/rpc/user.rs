@@ -234,7 +234,7 @@ impl User {
         Ok(lock_kind)
     }
 
-    pub async fn is_alive(&self, interval: Duration) -> bool {
+    pub async fn is_online(&self, interval: Duration) -> bool {
         let guard = self.0.read().await;
 
         match (Local::now() - guard.last_alive_time).to_std() {

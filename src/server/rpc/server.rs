@@ -10,8 +10,8 @@ use async_std::path::Path;
 use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
-use futures_util::stream::TryStreamExt;
-use futures_util::try_join;
+use futures_util::stream::{FuturesUnordered, TryStreamExt};
+use futures_util::{try_join, StreamExt};
 use log::{debug, info, warn};
 use tokio::sync::RwLock;
 use tonic::transport::Server as TonicServer;
@@ -129,13 +129,22 @@ impl Server {
             {
                 let mut user_map = user_map.write().await;
 
-                let mut dead_user_ids = vec![];
+                let futures_unordered = FuturesUnordered::new();
 
-                for (uuid, user) in user_map.iter() {
-                    if !user.is_alive(Duration::from_secs(60)).await {
-                        dead_user_ids.push(uuid.clone());
-                    }
-                }
+                user_map.iter().for_each(|(uuid, user)| {
+                    futures_unordered.push(async move {
+                        if !user.is_online(Duration::from_secs(60)).await {
+                            Some(uuid)
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                let dead_user_ids = futures_unordered
+                    .filter_map(|uuid| async move { uuid.map(Clone::clone) })
+                    .collect::<Vec<_>>()
+                    .await;
 
                 for dead_user_id in dead_user_ids {
                     info!(
