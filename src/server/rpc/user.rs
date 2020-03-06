@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_std::sync::{Mutex, RwLock};
 use async_std::task::JoinHandle;
 use chrono::prelude::*;
 use futures_util::future::FutureExt;
 use futures_util::select;
-use log::debug;
+use log::{debug, warn};
 use uuid::Uuid;
 
 use crate::errno::Errno;
@@ -231,5 +232,23 @@ impl User {
         let lock_kind = file_handle.lock().await.get_lock_kind().await;
 
         Ok(lock_kind)
+    }
+
+    pub async fn is_alive(&self, interval: Duration) -> bool {
+        let guard = self.0.read().await;
+
+        match (Local::now() - guard.last_alive_time).to_std() {
+            Err(err) => {
+                warn!(
+                    "check user {} is alive failed {}",
+                    guard.uuid.to_hyphenated_ref().to_string(),
+                    err
+                );
+
+                return false;
+            }
+
+            Ok(no_response_time) => no_response_time > interval,
+        }
     }
 }

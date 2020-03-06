@@ -1,4 +1,4 @@
-#![cfg_attr(backtrace, feature(backtrace))]
+#![feature(backtrace)]
 
 use log::LevelFilter;
 

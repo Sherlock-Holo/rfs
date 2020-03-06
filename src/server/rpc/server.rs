@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_std::fs;
 use async_std::os::unix::net::UnixListener;
 use async_std::path::Path;
+use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
 use futures_util::stream::TryStreamExt;
@@ -35,7 +37,7 @@ use super::user::User;
 type Result<T> = std::result::Result<T, Status>;
 
 pub struct Server {
-    users: RwLock<BTreeMap<Uuid, Arc<User>>>,
+    users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     filesystem: Arc<Filesystem>,
 }
 
@@ -69,24 +71,28 @@ impl Server {
 
         let fs = Arc::new(Filesystem::new(root_path.as_ref()).await?);
 
-        let rpc_server = Self {
-            users: RwLock::new(BTreeMap::new()),
+        let nds_server = Self {
+            users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs.clone(),
         };
 
-        let nds_server = Self {
-            users: RwLock::new(BTreeMap::new()),
+        let uds_serve = TonicServer::builder()
+            .add_service(RfsServer::new(nds_server))
+            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
+
+        let rpc_server = Self {
+            users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs,
         };
+
+        let users = rpc_server.users.clone();
+
+        task::spawn(async { Self::check_online_users(users) });
 
         let rpc_serve = TonicServer::builder()
             .tls_config(tls_config)
             .add_service(RfsServer::new(rpc_server))
             .serve(listen_path);
-
-        let uds_serve = TonicServer::builder()
-            .add_service(RfsServer::new(nds_server))
-            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
 
         try_join!(rpc_serve, uds_serve)?;
 
@@ -114,6 +120,33 @@ impl Server {
         })?;
 
         Ok(user.clone())
+    }
+
+    async fn check_online_users(user_map: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>) {
+        loop {
+            task::sleep(Duration::from_secs(60)).await;
+
+            {
+                let mut user_map = user_map.write().await;
+
+                let mut dead_user_ids = vec![];
+
+                for (uuid, user) in user_map.iter() {
+                    if !user.is_alive(Duration::from_secs(60)).await {
+                        dead_user_ids.push(uuid.clone());
+                    }
+                }
+
+                for dead_user_id in dead_user_ids {
+                    info!(
+                        "user {} may be dead, removing",
+                        dead_user_id.to_hyphenated_ref().to_string()
+                    );
+
+                    user_map.remove(&dead_user_id);
+                }
+            }
+        }
     }
 }
 

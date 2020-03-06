@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use async_std::fs;
 use async_std::os::unix::net::UnixStream;
+use async_std::sync;
+use async_std::sync::Sender;
 use async_std::task;
 use fuse::{
     FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -30,16 +32,12 @@ use tonic::{Code, Request as TonicRequest};
 use tower::service_fn;
 use uuid::Uuid;
 
-use lazy_static::lazy_static;
-
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
 use crate::TokioUnixStream;
 
-lazy_static! {
-    static ref TTL: Duration = Duration::new(1, 0);
-}
+const TTL: Duration = Duration::from_secs(1);
 
 enum ClientKind {
     Rpc,
@@ -65,6 +63,7 @@ pub struct Filesystem {
     uuid: Option<Uuid>,
     rpc_client: RfsClient<Channel>,
     client_kind: ClientKind,
+    id_sender: Option<Sender<Uuid>>,
 }
 
 impl Filesystem {
@@ -111,6 +110,7 @@ impl Filesystem {
             uuid: None,
             rpc_client: RfsClient::new(channel),
             client_kind: ClientKind::Uds,
+            id_sender: None,
         })
     }
 
@@ -129,10 +129,11 @@ impl Filesystem {
             uuid: None,
             rpc_client: RfsClient::new(channel),
             client_kind: ClientKind::Rpc,
+            id_sender: None,
         })
     }
 
-    pub fn mount<P: AsRef<Path>>(self, mount_point: P) -> io::Result<()> {
+    pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
         let uid = unistd::getuid();
         let gid = unistd::getgid();
 
@@ -160,7 +161,29 @@ impl Filesystem {
             let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
         });
 
-        fuse::mount(self, mount_point, &opts)
+        let (sender, receiver) = sync::channel(1);
+
+        self.id_sender.replace(sender);
+
+        let mut client = self.rpc_client.clone();
+
+        fuse::mount(self, mount_point, &opts)?;
+
+        if let Some(uuid) = receiver.recv().await {
+            let req = TonicRequest::new(LogoutRequest {
+                uuid: uuid.to_hyphenated().to_string(),
+            });
+
+            info!("sending logout request");
+
+            if let Err(err) = client.logout(req).await {
+                error!("logout failed {}", err)
+            }
+
+            info!("logout success")
+        }
+
+        Ok(())
     }
 
     fn get_rpc_header(&self) -> Header {
@@ -205,6 +228,12 @@ impl FuseFilesystem for Filesystem {
 
                         self.uuid.replace(uuid);
 
+                        self.id_sender
+                            .as_ref()
+                            .expect("id sender must be initialize")
+                            .send(uuid)
+                            .await;
+
                         Ok(())
                     }
                 };
@@ -216,7 +245,7 @@ impl FuseFilesystem for Filesystem {
         })
     }
 
-    fn destroy(&mut self, _req: &Request) {
+    /*fn destroy(&mut self, _req: &Request) {
         let uuid = self
             .uuid
             .as_ref()
@@ -226,11 +255,15 @@ impl FuseFilesystem for Filesystem {
         task::block_on(async {
             let req = TonicRequest::new(LogoutRequest { uuid });
 
+            info!("sending logout request");
+
             if let Err(err) = self.rpc_client.logout(req).await {
                 error!("logout failed {}", err)
             }
+
+            info!("logout success")
         })
-    }
+    }*/
 
     fn lookup(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = match name.to_str() {
