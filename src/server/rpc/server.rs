@@ -671,6 +671,11 @@ impl Rfs for Server {
 
         user.update_last_alive_time(Local::now()).await;
 
+        debug!(
+            "receive ping message from {}",
+            user.get_id().await.to_hyphenated().to_string()
+        );
+
         Ok(Response::new(PingResponse {}))
     }
 

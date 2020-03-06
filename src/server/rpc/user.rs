@@ -251,4 +251,8 @@ impl User {
             Ok(no_response_time) => no_response_time > interval,
         }
     }
+
+    pub async fn get_id(&self) -> Uuid {
+        self.0.read().await.uuid
+    }
 }

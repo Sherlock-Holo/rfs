@@ -248,6 +248,8 @@ impl FuseFilesystem for Filesystem {
 
                                 // ignore error because we should let user unmount filesystem
                                 let _ = client.ping(ping_req).await;
+
+                                debug!("sent ping message");
                             }
                         });
 
