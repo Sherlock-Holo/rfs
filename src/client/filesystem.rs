@@ -193,7 +193,10 @@ impl Filesystem {
             .to_hyphenated()
             .to_string();
 
-        Header { uuid }
+        Header {
+            uuid,
+            version: VERSION.to_string(),
+        }
     }
 }
 
@@ -234,24 +237,28 @@ impl FuseFilesystem for Filesystem {
                             .send(uuid)
                             .await;
 
-                        let mut client = self.rpc_client.clone();
+                        // uds client doesn't need send ping
+                        if let ClientKind::Rpc = self.client_kind {
+                            let mut client = self.rpc_client.clone();
 
-                        task::spawn(async move {
-                            loop {
-                                task::sleep(Duration::from_secs(60)).await;
+                            task::spawn(async move {
+                                loop {
+                                    task::sleep(Duration::from_secs(60)).await;
 
-                                let ping_req = TonicRequest::new(PingRequest {
-                                    header: Some(Header {
-                                        uuid: uuid.to_hyphenated().to_string(),
-                                    }),
-                                });
+                                    let ping_req = TonicRequest::new(PingRequest {
+                                        header: Some(Header {
+                                            uuid: uuid.to_hyphenated().to_string(),
+                                            version: VERSION.to_string(),
+                                        }),
+                                    });
 
-                                // ignore error because we should let user unmount filesystem
-                                let _ = client.ping(ping_req).await;
+                                    // ignore error because we should let user unmount filesystem
+                                    let _ = client.ping(ping_req).await;
 
-                                debug!("sent ping message");
-                            }
-                        });
+                                    debug!("sent ping message");
+                                }
+                            });
+                        }
 
                         Ok(())
                     }

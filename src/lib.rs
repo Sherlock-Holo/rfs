@@ -15,6 +15,8 @@ mod path;
 
 mod pb {
     tonic::include_proto!("proto");
+
+    pub const VERSION: &str = "0.1";
 }
 
 mod server;

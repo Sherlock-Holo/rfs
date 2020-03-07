@@ -101,22 +101,29 @@ impl Server {
 
     async fn get_user(&self, header: Option<Header>) -> Result<Arc<User>> {
         let uuid: Uuid = if let Some(header) = header {
+            if header.version != VERSION {
+                return Err(Status::invalid_argument(format!(
+                    "version {} is not support",
+                    header.version
+                )));
+            }
+
             if let Ok(uuid) = header.uuid.parse() {
                 uuid
             } else {
                 warn!("header uuid {} is invalid", header.uuid);
-                return Err(Status::new(Code::InvalidArgument, "header uuid is invalid"));
+                return Err(Status::invalid_argument("header uuid is invalid"));
             }
         } else {
             warn!("header not found");
-            return Err(Status::new(Code::InvalidArgument, "header miss"));
+            return Err(Status::invalid_argument("header miss"));
         };
 
-        let user = self.users.read().await;
+        let users = self.users.read().await;
 
-        let user = user.get(&uuid).ok_or_else(|| {
+        let user = users.get(&uuid).ok_or_else(|| {
             warn!("user {} not found", uuid);
-            Status::new(Code::InvalidArgument, "user not found")
+            Status::invalid_argument("user not found")
         })?;
 
         Ok(user.clone())

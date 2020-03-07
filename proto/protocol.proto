@@ -261,7 +261,8 @@ message InterruptResponse {
 }
 
 message Header {
-    string uuid = 1;
+    string version = 1; // current version is 0.1
+    string uuid = 2;
 }
 
 message PingRequest {
