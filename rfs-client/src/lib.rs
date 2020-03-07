@@ -65,9 +65,7 @@ pub async fn run() -> Result<()> {
 
     let filesystem = Filesystem::new(uri, tls_config).await?;
 
-    // let filesystem = Filesystem::new(uri, ClientTlsConfig::new().rustls_client_config(client_cfg)).await?;
-
-    filesystem.mount(&cfg.mount_path)?;
+    filesystem.mount(&cfg.mount_path).await?;
 
     Ok(())
 }
@@ -91,13 +89,14 @@ mod tokio_runtime {
         };
     }
 
-    pub async fn enter_tokio<T>(mut f: impl Future<Output = T>) -> T {
+    pub async fn enter_tokio<T>(mut f: Pin<Box<dyn Future<Output = T> + 'static + Send>>) -> T {
         poll_fn(|context| {
             HANDLE.enter(|| {
                 // Safety: pinned on stack, and we are in an async fn
                 // WARN: DO NOT use f in other places
-                let f = unsafe { Pin::new_unchecked(&mut f) };
-                f.poll(context)
+                // let f = unsafe { Pin::new_unchecked(&mut f) };
+
+                f.as_mut().poll(context)
             })
         })
         .await

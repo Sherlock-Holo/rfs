@@ -2,14 +2,16 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_std::fs;
 use async_std::os::unix::net::UnixListener;
 use async_std::path::Path;
+use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
-use futures_util::stream::TryStreamExt;
-use futures_util::try_join;
+use futures_util::stream::{FuturesUnordered, TryStreamExt};
+use futures_util::{try_join, StreamExt};
 use log::{debug, info, warn};
 use tokio::sync::RwLock;
 use tonic::transport::Server as TonicServer;
@@ -35,18 +37,18 @@ use super::user::User;
 type Result<T> = std::result::Result<T, Status>;
 
 pub struct Server {
-    users: RwLock<BTreeMap<Uuid, Arc<User>>>,
+    users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     filesystem: Arc<Filesystem>,
 }
 
 impl Server {
     /// new a Server will chroot and listen rpc server and uds server
-    pub async fn run<P: AsRef<Path>>(
-        root_path: P,
-        cert_path: P,
-        key_path: P,
-        client_ca_path: P,
-        uds_path: P,
+    pub async fn run(
+        root_path: impl AsRef<Path>,
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+        client_ca_path: impl AsRef<Path>,
+        uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
     ) -> anyhow::Result<()> {
         let cert = fs::read(cert_path).await?;
@@ -69,24 +71,28 @@ impl Server {
 
         let fs = Arc::new(Filesystem::new(root_path.as_ref()).await?);
 
-        let rpc_server = Self {
-            users: RwLock::new(BTreeMap::new()),
+        let nds_server = Self {
+            users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs.clone(),
         };
 
-        let nds_server = Self {
-            users: RwLock::new(BTreeMap::new()),
+        let uds_serve = TonicServer::builder()
+            .add_service(RfsServer::new(nds_server))
+            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
+
+        let rpc_server = Self {
+            users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs,
         };
+
+        let users = rpc_server.users.clone();
+
+        task::spawn(async { Self::check_online_users(users) });
 
         let rpc_serve = TonicServer::builder()
             .tls_config(tls_config)
             .add_service(RfsServer::new(rpc_server))
             .serve(listen_path);
-
-        let uds_serve = TonicServer::builder()
-            .add_service(RfsServer::new(nds_server))
-            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
 
         try_join!(rpc_serve, uds_serve)?;
 
@@ -114,6 +120,42 @@ impl Server {
         })?;
 
         Ok(user.clone())
+    }
+
+    async fn check_online_users(user_map: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>) {
+        loop {
+            task::sleep(Duration::from_secs(60)).await;
+
+            {
+                let mut user_map = user_map.write().await;
+
+                let futures_unordered = FuturesUnordered::new();
+
+                user_map.iter().for_each(|(uuid, user)| {
+                    futures_unordered.push(async move {
+                        if !user.is_online(Duration::from_secs(60)).await {
+                            Some(uuid)
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                let dead_user_ids = futures_unordered
+                    .filter_map(|uuid| async move { uuid.map(Clone::clone) })
+                    .collect::<Vec<_>>()
+                    .await;
+
+                for dead_user_id in dead_user_ids {
+                    info!(
+                        "user {} may be dead, removing",
+                        dead_user_id.to_hyphenated_ref().to_string()
+                    );
+
+                    user_map.remove(&dead_user_id);
+                }
+            }
+        }
     }
 }
 
@@ -628,6 +670,11 @@ impl Rfs for Server {
         let user = self.get_user(request.header).await?;
 
         user.update_last_alive_time(Local::now()).await;
+
+        debug!(
+            "receive ping message from {}",
+            user.get_id().await.to_hyphenated().to_string()
+        );
 
         Ok(Response::new(PingResponse {}))
     }

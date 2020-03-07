@@ -27,7 +27,6 @@ chrono = "0.4"
 thiserror = "1.0"
 tower = "0.3"
 anyhow = "1.0"
-lazy_static = "1.4"
 async-notify = "0.1"
 
 [profile.release]
@@ -51,4 +50,3 @@ tempfile = "3.1"
 
 [build-dependencies]
 tonic-build = "0.1"
-rustversion = "1.0"

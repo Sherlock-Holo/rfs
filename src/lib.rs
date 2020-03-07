@@ -1,4 +1,4 @@
-#![cfg_attr(backtrace, feature(backtrace))]
+#![feature(backtrace)]
 
 use log::LevelFilter;
 
@@ -23,6 +23,7 @@ pub fn log_init(debug: bool) {
     builder
         .filter(Some("h2"), LevelFilter::Info)
         .filter(Some("tower_buffer"), LevelFilter::Info)
+        .filter(Some("hyper"), LevelFilter::Info)
         .filter(Some("rustls"), LevelFilter::Info);
 
     if debug {
