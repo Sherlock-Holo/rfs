@@ -12,7 +12,11 @@ mod client;
 mod errno;
 mod helper;
 mod path;
-mod pb;
+
+mod pb {
+    tonic::include_proto!("proto");
+}
+
 mod server;
 
 pub type Result<T> = std::result::Result<T, Errno>;
