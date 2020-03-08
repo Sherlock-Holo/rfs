@@ -6,11 +6,13 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{format_err, Context, Result};
+use async_signals::Signals;
 use async_std::fs;
 use async_std::task;
 use futures_util::future::FutureExt;
-use futures_util::select;
+use futures_util::{select, StreamExt};
 use log::{debug, info};
+use nix::libc;
 use nix::mount;
 use nix::mount::MntFlags;
 use nix::sys::signal::{self, Signal};
@@ -21,7 +23,6 @@ use rand::rngs::OsRng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
-use tokio::signal::unix::{self, SignalKind};
 
 use rfs::log_init;
 use rfs::Apply;
@@ -68,9 +69,9 @@ pub async fn run() -> Result<()> {
 
         let cfg: Config = serde_yaml::from_slice(&cfg_data)?;
 
-        let mut initialize_signal = unix::signal(SignalKind::hangup())?;
+        let mut initialize_signal = Signals::new(vec![libc::SIGHUP])?;
 
-        if let None = initialize_signal.recv().await {
+        if let None = initialize_signal.next().await {
             return Err(format_err!("should receive a SIGHUP signal"));
         }
 
@@ -168,7 +169,7 @@ pub async fn run() -> Result<()> {
     let uds_client_job =
         task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"));
 
-    let mut stop_signal = unix::signal(SignalKind::interrupt())?;
+    let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
 
     select! {
         result = serve.fuse() => {
@@ -181,7 +182,7 @@ pub async fn run() -> Result<()> {
             result?;
             Ok(())
         }
-        _ = stop_signal.recv().fuse() => {
+        _ = stop_signal.next().fuse() => {
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
 
             Ok(())
