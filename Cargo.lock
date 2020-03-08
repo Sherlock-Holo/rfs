@@ -51,6 +51,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-signals"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf1b1fcc89707392766227c008c74265c1df55d21643a3850965c01d26b8b0fa"
+dependencies = [
+ "futures-util",
+ "lazy_static",
+ "libc",
+ "mio",
+ "signal-hook",
+]
+
+[[package]]
 name = "async-std"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,9 +219,9 @@ checksum = "4785bdd1c96b2a846b2bd7cc02e86b6b3dbf14e7e53446c4f54c92a361040822"
 
 [[package]]
 name = "chrono"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31850b4a4d6bae316f7a09e691c944c28299298837edc0a03f755618c23cbc01"
+checksum = "80094f509cf8b5ae86a4966a39b3ff66cd7e2a3e594accec3743ff3fabeab5b2"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -1073,6 +1086,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-notify",
+ "async-signals",
  "async-std",
  "chrono",
  "fuse",
@@ -1116,6 +1130,7 @@ name = "rfs-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-signals",
  "async-std",
  "futures-util",
  "lazy_static",
@@ -1246,6 +1261,17 @@ dependencies = [
  "linked-hash-map",
  "serde",
  "yaml-rust",
+]
+
+[[package]]
+name = "signal-hook"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10b9f3a1686a29f53cfd91ee5e3db3c12313ec02d33765f02c1a9645a1811e2c"
+dependencies = [
+ "libc",
+ "mio",
+ "signal-hook-registry",
 ]
 
 [[package]]
@@ -1414,18 +1440,13 @@ checksum = "0fa5e81d6bc4e67fe889d5783bd2a128ab2e0cfa487e0be16b6a8d177b101616"
 dependencies = [
  "bytes",
  "fnv",
- "futures-core",
  "iovec",
  "lazy_static",
- "libc",
  "memchr",
  "mio",
- "mio-uds",
  "num_cpus",
  "pin-project-lite",
- "signal-hook-registry",
  "slab",
- "winapi 0.3.8",
 ]
 
 [[package]]

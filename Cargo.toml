@@ -28,6 +28,8 @@ thiserror = "1.0"
 tower = "0.3"
 anyhow = "1.0"
 async-notify = "0.1"
+async-signals = "0.1.0"
+tokio = "0.2"
 
 [profile.release]
 lto = true
@@ -40,10 +42,6 @@ features = ["posix-lock"]
 [dependencies.async-std]
 version = "1.5"
 features = ["attributes"]
-
-[dependencies.tokio]
-version = "0.2"
-features = ["signal", "stream"]
 
 [dev-dependencies]
 tempfile = "3.1"

@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use async_signals::Signals;
 use async_std::fs;
 use async_std::os::unix::net::UnixStream;
 use async_std::sync;
@@ -17,14 +18,13 @@ use fuse::{
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
 use futures_util::future::ready;
+use futures_util::StreamExt;
 use libc::c_int;
 use log::{debug, error, info, warn};
 use nix::mount;
 use nix::mount::MntFlags;
 use nix::unistd;
 use serde::export::Formatter;
-use tokio::signal::unix;
-use tokio::signal::unix::SignalKind;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
 use tonic::transport::{Channel, Uri};
@@ -151,12 +151,12 @@ impl Filesystem {
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 
-        let mut stop_signal = unix::signal(SignalKind::interrupt())?;
+        let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
 
         let unmount_point = mount_point.as_ref().to_path_buf();
 
         task::spawn(async move {
-            stop_signal.recv().await;
+            stop_signal.next().await;
 
             let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
         });
