@@ -25,7 +25,7 @@ use nix::mount;
 use nix::mount::MntFlags;
 use nix::unistd;
 use serde::export::Formatter;
-use tonic::transport::ClientTlsConfig;
+use rustls::ClientConfig;
 use tonic::transport::Endpoint;
 use tonic::transport::{Channel, Uri};
 use tonic::{Code, Request as TonicRequest};
@@ -36,6 +36,10 @@ use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
 use crate::TokioUnixStream;
+use hyper::Client;
+use crate::compat::{HyperExecutor, HyperConnector};
+use tonic::body::Body;
+use hyper::body::HttpBody;
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -59,14 +63,14 @@ impl Display for ClientKind {
     }
 }
 
-pub struct Filesystem {
+pub struct Filesystem<T> {
     uuid: Option<Uuid>,
-    rpc_client: RfsClient<Channel>,
+    rpc_client: RfsClient<T>,
     client_kind: ClientKind,
     id_sender: Option<Sender<Uuid>>,
 }
 
-impl Filesystem {
+impl Filesystem<Channel> {
     pub async fn new_uds<P: AsRef<Path>>(uds_path: P) -> Result<Self> {
         let uds_path = uds_path.as_ref().to_path_buf();
 
@@ -113,21 +117,96 @@ impl Filesystem {
             id_sender: None,
         })
     }
+}
 
-    pub async fn new(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
+impl <T>Filesystem<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody>,
+        T::ResponseBody: Body + HttpBody + Send + 'static,
+        T::Error: Into<dyn std::error::Error>,
+        <T::ResponseBody as HttpBody>::Error: Into<dyn std::error::Error> + Send,
+{
+    /*pub async fn new_uds<P: AsRef<Path>>(uds_path: P) -> Result<Self> {
+        let uds_path = uds_path.as_ref().to_path_buf();
+
+        // check if uds inits or not
+        loop {
+            if let Err(err) = fs::metadata(&uds_path).await {
+                if let ErrorKind::NotFound = err.kind() {
+                    info!("waiting for uds creating");
+
+                    continue;
+                } else {
+                    return Err(err.into());
+                };
+            }
+
+            break;
+        }
+
+        debug!("uds connected");
+
+        let uds_path = uds_path.to_str().expect("invalid unix path").to_string();
+
+        fn string_to_static_str(s: String) -> &'static str {
+            Box::leak(s.into_boxed_str())
+        };
+
+        let uds_path: &'static str = string_to_static_str(uds_path);
+
+        let channel = Endpoint::try_from("http://[::]:50051")?
+            .connect_with_connector(service_fn(move |_: Uri| {
+                task::block_on(async {
+                    match UnixStream::connect(uds_path).await {
+                        Err(err) => ready(Err(err)),
+                        Ok(unix_stream) => ready(Ok(TokioUnixStream(unix_stream))),
+                    }
+                })
+            }))
+            .await?;
+
+        Ok(Filesystem {
+            uuid: None,
+            rpc_client: RfsClient::new(channel),
+            client_kind: ClientKind::Uds,
+            id_sender: None,
+        })
+    }*/
+
+    pub async fn new(uri: Uri, tls_cfg: ClientConfig) -> Result<Self, tonic::transport::Error> {
         info!("connecting server");
 
-        let channel = Channel::builder(uri)
+        let connector = HyperConnector::from(tls_cfg);
+
+        let client = Client::builder()
+            .http2_only(true)
+            .executor(HyperExecutor {})
+            .build(connector);
+
+        let custom_client = tower::service_fn(|mut req: hyper::Request<tonic::body::BoxBody>| {
+            let uri = Uri::builder()
+                .scheme(uri.scheme().unwrap().clone())
+                .authority(uri.authority().unwrap().clone())
+                .path_and_query(req.uri().path_and_query().unwrap().clone())
+                .build()
+                .unwrap();
+
+            *req.uri_mut() = uri;
+
+            client.request(req)
+        });
+
+        /*let channel = Channel::builder(uri)
             .tls_config(tls_cfg)
             .tcp_keepalive(Some(Duration::from_secs(5)))
             .connect()
-            .await?;
+            .await?;*/
 
         info!("server connected");
 
         Ok(Filesystem {
             uuid: None,
-            rpc_client: RfsClient::new(channel),
+            rpc_client: RfsClient::new(custom_client),
             client_kind: ClientKind::Rpc,
             id_sender: None,
         })

@@ -30,6 +30,9 @@ anyhow = "1.0"
 async-notify = "0.1"
 async-signals = "0.1.0"
 tokio = "0.2"
+hyper = { version = "0.13", default-features = false }
+async-tls = { git = "https://github.com/async-rs/async-tls", branch = "master" }
+rustls = "0.17"
 
 [profile.release]
 lto = true

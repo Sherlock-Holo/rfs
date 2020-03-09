@@ -9,6 +9,7 @@ pub use helper::UnixStream as TokioUnixStream;
 pub use server::rpc::Server;
 
 mod client;
+mod compat;
 mod errno;
 mod helper;
 mod path;
