@@ -9,13 +9,14 @@ use std::task::{Context, Poll};
 use async_std::net::TcpStream;
 use async_tls::TlsConnector;
 use hyper::{Client, Request, Response, Uri};
+use log::debug;
 use rustls::ClientConfig;
 use tonic::body::BoxBody;
 use tonic::client::GrpcService;
 use tower_service::Service;
 
-use crate::{TlsClientStream, TokioUnixStream};
 use crate::helper::HyperExecutor;
+use crate::{TlsClientStream, TokioUnixStream};
 
 #[derive(Clone)]
 pub struct UdsConnector {
@@ -24,14 +25,17 @@ pub struct UdsConnector {
 
 impl UdsConnector {
     pub fn new<P: AsRef<OsStr>>(path: P) -> Self {
-        Self { path: path.as_ref().to_os_string() }
+        Self {
+            path: path.as_ref().to_os_string(),
+        }
     }
 }
 
 impl Service<Uri> for UdsConnector {
     type Response = TokioUnixStream;
     type Error = Error;
-    type Future = Pin<Box<dyn Future<Output=Result<Self::Response, Self::Error>> + Send + 'static>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -52,7 +56,8 @@ impl UdsClient {
         Self {
             inner_client: Client::builder()
                 .executor(HyperExecutor {})
-                .build(UdsConnector::new(path))
+                .http2_only(true)
+                .build(UdsConnector::new(path)),
         }
     }
 }
@@ -60,13 +65,31 @@ impl UdsClient {
 impl GrpcService<BoxBody> for UdsClient {
     type ResponseBody = hyper::Body;
     type Error = hyper::Error;
-    type Future = Pin<Box<dyn Future<Output=Result<Response<Self::ResponseBody>, Self::Error>> + Send + 'static>>;
+    type Future = Pin<
+        Box<
+            dyn Future<Output = Result<Response<Self::ResponseBody>, Self::Error>> + Send + 'static,
+        >,
+    >;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, request: Request<BoxBody>) -> Self::Future {
+    fn call(&mut self, mut request: Request<BoxBody>) -> Self::Future {
+        let s_uri = Uri::from_static("http://[::]:50051");
+
+        debug!("s_uri {}", s_uri);
+        debug!("request uri {}", request.uri());
+
+        let uri = Uri::builder()
+            .scheme(s_uri.scheme().unwrap().clone())
+            .authority(s_uri.authority().unwrap().clone())
+            .path_and_query(request.uri().path_and_query().unwrap().clone())
+            .build()
+            .unwrap();
+
+        *request.uri_mut() = uri;
+
         Box::pin(self.inner_client.request(request))
     }
 }
@@ -78,27 +101,35 @@ pub struct RpcConnector {
 
 impl RpcConnector {
     pub fn new(tls_cfg: ClientConfig) -> Self {
-        Self { tls_connector: TlsConnector::from(Arc::new(tls_cfg)) }
+        Self {
+            tls_connector: TlsConnector::from(Arc::new(tls_cfg)),
+        }
     }
 }
 
 impl Service<Uri> for RpcConnector {
     type Response = TlsClientStream;
     type Error = Error;
-    type Future = Pin<Box<dyn Future<Output=Result<Self::Response, Self::Error>> + Send + 'static>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: Uri) -> Self::Future {
-        let authority = req.authority().
-            map(|authority| authority.clone()).
-            ok_or(Error::new(ErrorKind::AddrNotAvailable, format!("uri {} is invalid", req)));
+        let authority = req
+            .authority()
+            .map(|authority| authority.clone())
+            .ok_or(Error::new(
+                ErrorKind::AddrNotAvailable,
+                format!("uri {} is invalid", req),
+            ));
 
-        let host = req.host().
-            map(|host| host.to_string()).
-            ok_or(Error::new(ErrorKind::AddrNotAvailable, format!("uri {} host is invalid", req)));
+        let host = req.host().map(|host| host.to_string()).ok_or(Error::new(
+            ErrorKind::AddrNotAvailable,
+            format!("uri {} host is invalid", req),
+        ));
 
         let tls_connector = self.tls_connector.clone();
 
@@ -124,9 +155,12 @@ pub struct RpcClient {
 impl RpcClient {
     pub fn new(tls_cfg: ClientConfig, uri: Uri) -> Self {
         Self {
-            inner_client: Arc::new(Client::builder()
-                .executor(HyperExecutor {})
-                .build(RpcConnector::new(tls_cfg))),
+            inner_client: Arc::new(
+                Client::builder()
+                    .executor(HyperExecutor {})
+                    .http2_only(true)
+                    .build(RpcConnector::new(tls_cfg)),
+            ),
             uri,
         }
     }
@@ -135,13 +169,20 @@ impl RpcClient {
 impl GrpcService<BoxBody> for RpcClient {
     type ResponseBody = hyper::Body;
     type Error = hyper::Error;
-    type Future = Pin<Box<dyn Future<Output=Result<Response<Self::ResponseBody>, Self::Error>> + Send + 'static>>;
+    type Future = Pin<
+        Box<
+            dyn Future<Output = Result<Response<Self::ResponseBody>, Self::Error>> + Send + 'static,
+        >,
+    >;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, mut request: Request<BoxBody>) -> Self::Future {
+        debug!("client uri {}", self.uri);
+        debug!("request uri {}", request.uri());
+
         let uri = Uri::builder()
             .scheme(self.uri.scheme().unwrap().clone())
             .authority(self.uri.authority().unwrap().clone())

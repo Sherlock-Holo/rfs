@@ -12,7 +12,7 @@ use async_std::sync;
 use async_std::sync::Sender;
 use async_std::task;
 use fuse::{
-    Filesystem as FuseFilesystem, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
 use futures_util::StreamExt;
@@ -25,14 +25,14 @@ use nix::mount::MntFlags;
 use nix::unistd;
 use rustls::ClientConfig;
 use serde::export::Formatter;
-use tonic::{Code, Request as TonicRequest};
 use tonic::codegen::{Body, StdError};
+use tonic::{Code, Request as TonicRequest};
 use uuid::Uuid;
 
 use crate::client::client::{RpcClient, UdsClient};
 use crate::helper::proto_attr_into_fuse_attr;
-use crate::pb::*;
 use crate::pb::rfs_client::RfsClient;
+use crate::pb::*;
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -61,12 +61,12 @@ impl Display for ClientKind {
 }
 
 pub struct Filesystem<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
-        T::ResponseBody: Body + HttpBody + Send + 'static,
-        T::Error: Into<StdError>,
-        T::Future: Send + 'static,
-        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+where
+    T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
+    T::ResponseBody: Body + HttpBody + Send + 'static,
+    T::Error: Into<StdError>,
+    T::Future: Send + 'static,
+    <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
 {
     uuid: Option<Uuid>,
     rpc_client: RfsClient<T>,
@@ -75,13 +75,13 @@ pub struct Filesystem<T>
 }
 
 impl<T> Filesystem<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send,
-        T::ResponseBody: Body + HttpBody + Send + 'static,
-        T::Error: Into<StdError>,
-        T::Future: Send + 'static,
-        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
-        Self: FuseFilesystem,
+where
+    T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send,
+    T::ResponseBody: Body + HttpBody + Send + 'static,
+    T::Error: Into<StdError>,
+    T::Future: Send + 'static,
+    <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+    Self: FuseFilesystem,
 {
     pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
         let uid = unistd::getuid();
@@ -94,10 +94,10 @@ impl<T> Filesystem<T>
             format!("uid={}", uid),
             format!("gid={}", gid),
         ]
-            .into_iter()
-            .map(|opt| vec!["-o".to_string(), opt])
-            .flatten()
-            .collect();
+        .into_iter()
+        .map(|opt| vec!["-o".to_string(), opt])
+        .flatten()
+        .collect();
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 
@@ -138,12 +138,12 @@ impl<T> Filesystem<T>
 }
 
 impl<T> Filesystem<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
-        T::ResponseBody: Body + HttpBody + Send + 'static,
-        T::Error: Into<StdError>,
-        T::Future: Send + 'static,
-        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+where
+    T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
+    T::ResponseBody: Body + HttpBody + Send + 'static,
+    T::Error: Into<StdError>,
+    T::Future: Send + 'static,
+    <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
 {
     fn get_rpc_header(&self) -> Header {
         let uuid = self
@@ -185,12 +185,12 @@ impl Filesystem<UdsClient> {
         // let uds_path: &'static str = string_to_static_str(uds_path);
 
         /*let channel = Endpoint::try_from("http://[::]:50051")?
-            .connect_with_connector(service_fn(move |_: Uri| {
-                TokioUnixStream::connect(uds_path)
-            })).await?;*/
+        .connect_with_connector(service_fn(move |_: Uri| {
+            TokioUnixStream::connect(uds_path)
+        })).await?;*/
 
         /*let channel = Endpoint::try_from("http://[::]:50051")?
-            .connect_with_connector(UdsConnector::new(uds_path)).await?;*/
+        .connect_with_connector(UdsConnector::new(uds_path)).await?;*/
 
         let uds_client = UdsClient::new(uds_path);
 
@@ -333,12 +333,12 @@ impl Filesystem<RpcClient> {
 }
 
 impl<T> FuseFilesystem for Filesystem<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
-        T::ResponseBody: Body + HttpBody + Send + 'static,
-        T::Error: Into<StdError>,
-        T::Future: Send + 'static,
-        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+where
+    T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
+    T::ResponseBody: Body + HttpBody + Send + 'static,
+    T::Error: Into<StdError>,
+    T::Future: Send + 'static,
+    <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
 {
     fn init(&mut self, _req: &Request) -> Result<(), libc::c_int> {
         task::block_on(async {

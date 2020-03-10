@@ -2,7 +2,10 @@ use std::ffi::OsString;
 use std::time::SystemTime;
 
 use async_std::sync::Sender;
-use fuse::{ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite};
+use fuse::{
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock,
+    ReplyOpen, ReplyWrite,
+};
 
 #[derive(Copy, Clone)]
 pub struct BasicMessage {

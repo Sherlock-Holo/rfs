@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ffi::OsStr;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,25 +14,28 @@ use async_std::sync::RwLock;
 use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
-use futures_util::{StreamExt, try_join};
 use futures_util::stream::{FuturesUnordered, TryStreamExt};
+use futures_util::{try_join, StreamExt, TryFutureExt};
 use hyper::service::make_service_fn;
 use hyper::Version;
 use log::{debug, info, warn};
-use tonic::{Code, Request, Status};
-use tonic::Response;
-use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use rustls::internal::pemfile::{certs, rsa_private_keys};
+use rustls::{AllowAnyAuthenticatedClient, RootCertStore, ServerConfig};
 use tonic::transport::Server as TonicServer;
+use tonic::Response;
+use tonic::{Code, Request, Status};
 use uuid::Uuid;
 
 use crate::errno::Errno;
-use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr, HyperExecutor};
+use crate::helper::{
+    convert_proto_time_to_system_time, fuse_attr_into_proto_attr, HyperExecutor, TlsServerStream,
+};
 use crate::pb;
-use crate::pb::*;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 use crate::pb::rfs_server::RfsServer;
-use crate::server::rpc::custom_server::{CustomUnixListener, CustomUnixServer};
+use crate::pb::*;
+use crate::server::rpc::custom_server::{CustomUnixListener, CustomUnixServer, TlsListener};
 use crate::TokioUnixStream;
 
 use super::super::filesystem::Filesystem;
@@ -57,21 +61,50 @@ impl Server {
         uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
     ) -> anyhow::Result<()> {
-        let cert = fs::read(cert_path).await?;
-        let key = fs::read(key_path).await?;
-        let client_ca = fs::read(client_ca_path).await?;
+        let mut root_cert_store = RootCertStore::empty();
 
-        let server_identity = Identity::from_pem(cert, key);
+        let client_ca_path = client_ca_path.as_ref().to_path_buf();
+        let ca_certificate = task::spawn_blocking(|| -> anyhow::Result<_> {
+            let file = std::fs::File::open(client_ca_path).context("open ca file failed")?;
+            let mut reader = BufReader::new(file);
 
-        info!("server identity loaded");
+            let mut certs =
+                certs(&mut reader).map_err(|_| anyhow::anyhow!("read ca certificate failed"))?;
 
-        let client_ca = Certificate::from_pem(client_ca);
+            Ok(certs.remove(0))
+        })
+        .await?;
 
-        info!("client ca loaded");
+        root_cert_store.add(&ca_certificate)?;
 
-        let tls_config = ServerTlsConfig::new()
-            .identity(server_identity)
-            .client_ca_root(client_ca);
+        let cert_path = cert_path.as_ref().to_path_buf();
+        let certificate = task::spawn_blocking(|| -> anyhow::Result<_> {
+            let file = std::fs::File::open(cert_path).context("open certificate file failed")?;
+            let mut reader = BufReader::new(file);
+
+            let certs =
+                certs(&mut reader).map_err(|_| anyhow::anyhow!("read certificate failed"))?;
+
+            Ok(certs)
+        })
+        .await?;
+
+        let key_path = key_path.as_ref().to_path_buf();
+        let key = task::spawn_blocking(|| -> anyhow::Result<_> {
+            let file = std::fs::File::open(key_path).context("open private key file failed")?;
+            let mut reader = BufReader::new(file);
+
+            let mut private_keys = rsa_private_keys(&mut reader)
+                .map_err(|_| anyhow::anyhow!("read private key failed"))?;
+
+            Ok(private_keys.remove(0))
+        })
+        .await?;
+
+        let mut server_config =
+            ServerConfig::new(AllowAnyAuthenticatedClient::new(root_cert_store));
+
+        server_config.set_single_cert(certificate, key)?;
 
         let unix_listener = UnixListener::bind(uds_path.as_ref()).await?;
 
@@ -82,28 +115,28 @@ impl Server {
             filesystem: fs.clone(),
         };
 
-        /*let uds_serve = TonicServer::builder()
+        let uds_serve = TonicServer::builder()
             .add_service(RfsServer::new(uds_server))
-            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));*/
+            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
 
-        let uds_server = hyper::Server::builder(CustomUnixListener::from(unix_listener))
-            .executor(HyperExecutor {})
-            .serve(make_service_fn(move |_| {
-                futures_util::future::ok::<_, Infallible>(CustomUnixServer::new(uds_server.clone()))
-                /*let uds_server = uds_server.clone();
+        /*let uds_server = hyper::Server::builder(CustomUnixListener::from(unix_listener))
+        .executor(HyperExecutor {})
+        .serve(make_service_fn(move |_| {
+            futures_util::future::ok::<_, Infallible>(CustomUnixServer::new(uds_server.clone()))
+            *//*let uds_server = uds_server.clone();
 
-                tower::service_fn(move |req: hyper::Request<hyper::Body>| {
-                    if let Version::HTTP_2 = req.version() {
-                        uds_server.call(req)
-                    } else {
-                        unimplemented!()
-                    }
-                })*/
-            }));
+            tower::service_fn(move |req: hyper::Request<hyper::Body>| {
+                if let Version::HTTP_2 = req.version() {
+                    uds_server.call(req)
+                } else {
+                    unimplemented!()
+                }
+            })*//*
+        }));*/
 
-        let uds_server = task::spawn(async move {
+        /*let uds_server = task::spawn(async move {
             uds_server.await.context("uds failed")
-        });
+        });*/
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
@@ -115,17 +148,22 @@ impl Server {
         task::spawn(async { Self::check_online_users(users) });
 
         let rpc_serve = TonicServer::builder()
-            .tls_config(tls_config)
+            // .tls_config(tls_config)
             .add_service(RfsServer::new(rpc_server))
-            .serve(listen_path);
+            .serve_with_incoming(
+                TlsListener::bind(server_config, listen_path)
+                    .await?
+                    .map_ok(TlsServerStream),
+            );
+        // .serve(listen_path);
 
-        let rpc_serve = task::spawn(async move {
+        /*let rpc_serve = async move {
             rpc_serve.await.context("rpc failed")
-        });
+        };*/
 
-        // try_join!(rpc_serve, uds_serve)?;
+        try_join!(rpc_serve, uds_serve)?;
 
-        try_join!(rpc_serve, uds_server)?;
+        // try_join!(rpc_serve, uds_server)?;
 
         Ok(())
     }

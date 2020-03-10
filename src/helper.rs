@@ -1,10 +1,10 @@
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_std::io::{Read, Write};
 use async_std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -24,8 +24,8 @@ use crate::Result;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-        where
-            F: FnOnce(&mut Self),
+    where
+        F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -39,7 +39,9 @@ pub struct UnixStream(pub async_std::os::unix::net::UnixStream);
 
 impl UnixStream {
     pub async fn connect(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        Ok(Self(async_std::os::unix::net::UnixStream::connect(path).await?))
+        Ok(Self(
+            async_std::os::unix::net::UnixStream::connect(path).await?,
+        ))
     }
 }
 
@@ -106,7 +108,11 @@ impl Connected for TlsClientStream {
 }
 
 impl AsyncRead for TlsClientStream {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
@@ -140,7 +146,11 @@ impl Connection for TlsServerStream {
 impl Connected for TlsServerStream {}
 
 impl AsyncRead for TlsServerStream {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
@@ -167,9 +177,9 @@ impl AsyncWrite for TlsServerStream {
 pub struct HyperExecutor;
 
 impl<F> Executor<F> for HyperExecutor
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
 {
     fn execute(&self, fut: F) {
         task::spawn(fut);

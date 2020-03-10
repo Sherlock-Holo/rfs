@@ -4,21 +4,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use async_std::net::{TcpListener, ToSocketAddrs};
+use async_std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use async_std::os::unix::net::UnixListener;
-use async_std::path::Path;
+use async_tls::server::TlsStream as TlsServerStream;
 use async_tls::TlsAcceptor;
+use futures_util::pin_mut;
 use futures_util::ready;
-use hyper::Request;
+use futures_util::stream::Stream;
 use hyper::server::accept::Accept;
-use log::debug;
+use hyper::Request;
 use rustls::ServerConfig;
 use tonic::body::BoxBody;
 use tonic::codegen::Never;
 use tonic::transport::Body;
 use tower_service::Service;
 
-use crate::helper::TlsServerStream;
 use crate::pb::rfs_server::{Rfs, RfsServer};
 use crate::TokioUnixStream;
 
@@ -34,14 +34,17 @@ impl Accept for CustomUnixListener {
     type Conn = TokioUnixStream;
     type Error = io::Error;
 
-    fn poll_accept(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
+    fn poll_accept(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
         let accept = self.0.accept();
 
         futures_util::pin_mut!(accept);
 
         match ready!(accept.poll(cx)) {
             Err(err) => Poll::Ready(Some(Err(err))),
-            Ok((stream, _)) => Poll::Ready(Some(Ok(TokioUnixStream(stream))))
+            Ok((stream, _)) => Poll::Ready(Some(Ok(TokioUnixStream(stream)))),
         }
     }
 }
@@ -52,14 +55,17 @@ pub struct CustomUnixServer<T: Rfs> {
 
 impl<T: Rfs> CustomUnixServer<T> {
     pub fn new(t: T) -> Self {
-        Self { inner_server: RfsServer::new(t) }
+        Self {
+            inner_server: RfsServer::new(t),
+        }
     }
 }
 
 impl<T: Rfs> Service<hyper::Request<hyper::Body>> for CustomUnixServer<T> {
     type Response = hyper::Response<BoxBody>;
     type Error = Never;
-    type Future = Pin<Box<dyn Future<Output=Result<Self::Response, Self::Error>> + Send + 'static>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -70,34 +76,74 @@ impl<T: Rfs> Service<hyper::Request<hyper::Body>> for CustomUnixServer<T> {
     }
 }
 
-pub struct CustomTlsListener {
+pub struct TlsListener {
     tls_acceptor: TlsAcceptor,
     tcp_listener: TcpListener,
+    wait_queue: Option<Vec<Pin<Box<dyn Future<Output = io::Result<TlsServerStream<TcpStream>>>>>>>,
+    success_queue: Vec<io::Result<TlsServerStream<TcpStream>>>,
 }
 
-impl CustomTlsListener {
-    pub async fn new<A: ToSocketAddrs>(tls_cfg: ServerConfig, addr: A) -> io::Result<Self> {
+impl TlsListener {
+    pub async fn bind<A: ToSocketAddrs>(tls_cfg: ServerConfig, addr: A) -> io::Result<Self> {
         Ok(Self {
             tls_acceptor: TlsAcceptor::from(Arc::new(tls_cfg)),
             tcp_listener: TcpListener::bind(addr).await?,
+            wait_queue: None,
+            success_queue: vec![],
         })
     }
 }
 
-impl Accept for CustomTlsListener {
-    type Conn = TlsServerStream;
-    type Error = io::Error;
+impl Stream for TlsListener {
+    type Item = io::Result<TlsServerStream<TcpStream>>;
 
-    fn poll_accept(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
-        let accept = self.tcp_listener.accept();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let myself = self.get_mut();
 
-        futures_util::pin_mut!(accept);
+        if let Some(stream) = myself.success_queue.pop() {
+            return Poll::Ready(Some(stream));
+        }
 
-        let stream = match ready!(accept.poll(cx)) {
-            Err(err) => return Poll::Ready(Some(Err(err))),
-            Ok((stream, _)) => stream,
-        };
+        if let Some(queue) = myself.wait_queue.take() {
+            let mut wait_queue = vec![];
 
-        self.tls_acceptor.accept(stream).
+            for mut future in queue {
+                match future.as_mut().poll(cx) {
+                    Poll::Pending => wait_queue.push(future),
+                    Poll::Ready(stream) => myself.success_queue.push(stream),
+                }
+            }
+
+            myself.wait_queue.replace(wait_queue);
+        }
+
+        if let Some(stream) = myself.success_queue.pop() {
+            return Poll::Ready(Some(stream));
+        }
+
+        let accept = myself.tcp_listener.accept();
+
+        pin_mut!(accept);
+
+        let stream = futures_util::ready!(accept.poll(cx));
+
+        let tls_acceptor = myself.tls_acceptor.clone();
+
+        let future = Box::pin(async move {
+            let (tcp_stream, _) = stream?;
+
+            tls_acceptor.accept(tcp_stream).await
+        });
+
+        match &mut myself.wait_queue {
+            Some(wait_queue) => {
+                wait_queue.push(future);
+            }
+            None => {
+                myself.wait_queue.replace(vec![future]);
+            }
+        }
+
+        Poll::Pending
     }
 }
