@@ -1,10 +1,8 @@
-use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::fmt::{self, Debug, Display};
 use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -19,6 +17,7 @@ use fuse::{
 };
 use futures_util::StreamExt;
 use hyper::body::HttpBody;
+use hyper::Uri;
 use libc::c_int;
 use log::{debug, error, info, warn};
 use nix::mount;
@@ -28,22 +27,18 @@ use rustls::ClientConfig;
 use serde::export::Formatter;
 use tonic::{Code, Request as TonicRequest};
 use tonic::codegen::{Body, StdError};
-use tonic::transport::{Channel, Uri};
-use tonic::transport::Endpoint;
-use tower::service_fn;
 use uuid::Uuid;
 
-use crate::{TlsClientStream, TokioUnixStream};
-use crate::client::client::{RpcClient, UdsClient, UdsConnector};
+use crate::client::client::{RpcClient, UdsClient};
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::*;
 use crate::pb::rfs_client::RfsClient;
 
 const TTL: Duration = Duration::from_secs(1);
 
-fn string_to_static_str(s: String) -> &'static str {
+/*fn string_to_static_str(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
-}
+}*/
 
 enum ClientKind {
     Rpc,
@@ -81,11 +76,12 @@ pub struct Filesystem<T>
 
 impl<T> Filesystem<T>
     where
-        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + FuseFilesystem,
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send,
         T::ResponseBody: Body + HttpBody + Send + 'static,
         T::Error: Into<StdError>,
         T::Future: Send + 'static,
         <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+        Self: FuseFilesystem,
 {
     pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
         let uid = unistd::getuid();

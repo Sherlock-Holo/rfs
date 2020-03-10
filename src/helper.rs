@@ -3,12 +3,12 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_std::io::{Read, Write};
 use async_std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use async_std::path::Path;
-use async_std::sync::Arc;
 use async_std::task;
 use async_tls::TlsConnector;
 use fuse::{FileAttr, FileType};
@@ -87,16 +87,6 @@ impl AsyncWrite for UnixStream {
 
 pub struct TlsClientStream(pub async_tls::client::TlsStream<TcpStream>);
 
-impl TlsClientStream {
-    pub async fn connect<T: ToSocketAddrs>(tls_cfg: Arc<ClientConfig>, addr: T, domain: &str) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
-
-        let stream = TlsConnector::from(tls_cfg).connect(domain, stream).await?;
-
-        Ok(Self(stream))
-    }
-}
-
 impl Connection for TlsClientStream {
     fn connected(&self) -> hyper::client::connect::Connected {
         let connected = hyper::client::connect::Connected::new();
@@ -139,6 +129,41 @@ impl AsyncWrite for TlsClientStream {
     }
 }
 
+pub struct TlsServerStream(pub async_tls::server::TlsStream<TcpStream>);
+
+impl Connection for TlsServerStream {
+    fn connected(&self) -> hyper::client::connect::Connected {
+        hyper::client::connect::Connected::new()
+    }
+}
+
+impl Connected for TlsServerStream {}
+
+impl AsyncRead for TlsServerStream {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TlsServerStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_close(cx)
+    }
+}
+
+#[derive(Clone)]
 pub struct HyperExecutor;
 
 impl<F> Executor<F> for HyperExecutor

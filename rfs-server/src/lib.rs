@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{format_err, Context, Result};
+use anyhow::{Context, format_err, Result};
 use async_signals::Signals;
 use async_std::fs;
 use async_std::task;
-use futures_util::future::FutureExt;
 use futures_util::{select, StreamExt};
+use futures_util::future::FutureExt;
 use log::{debug, info};
 use nix::libc;
 use nix::mount;
@@ -24,9 +24,9 @@ use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 
-use rfs::log_init;
 use rfs::Apply;
 use rfs::Filesystem;
+use rfs::log_init;
 use rfs::Server;
 pub use tokio_runtime::enter_tokio;
 
@@ -170,6 +170,8 @@ pub async fn run() -> Result<()> {
         task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"));
 
     let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
+
+    debug!("stop signal initialize");
 
     select! {
         result = serve.fuse() => {

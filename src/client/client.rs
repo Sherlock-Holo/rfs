@@ -1,13 +1,13 @@
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
 use std::io::Error;
+use std::io::ErrorKind;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_std::net::TcpStream;
-use async_std::sync::Arc;
 use async_tls::TlsConnector;
-use futures_util::io::ErrorKind;
-use futures_util::task::{Context, Poll};
 use hyper::{Client, Request, Response, Uri};
 use rustls::ClientConfig;
 use tonic::body::BoxBody;

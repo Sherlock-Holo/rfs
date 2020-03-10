@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use async_std::fs;
 use async_std::os::unix::net::UnixListener;
 use async_std::path::Path;
@@ -11,22 +13,25 @@ use async_std::sync::RwLock;
 use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
+use futures_util::{StreamExt, try_join};
 use futures_util::stream::{FuturesUnordered, TryStreamExt};
-use futures_util::{try_join, StreamExt};
+use hyper::service::make_service_fn;
+use hyper::Version;
 use log::{debug, info, warn};
-use tonic::transport::Server as TonicServer;
-use tonic::transport::{Certificate, Identity, ServerTlsConfig};
-use tonic::Response;
 use tonic::{Code, Request, Status};
+use tonic::Response;
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tonic::transport::Server as TonicServer;
 use uuid::Uuid;
 
 use crate::errno::Errno;
-use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
+use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr, HyperExecutor};
 use crate::pb;
+use crate::pb::*;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 use crate::pb::rfs_server::RfsServer;
-use crate::pb::*;
+use crate::server::rpc::custom_server::{CustomUnixListener, CustomUnixServer};
 use crate::TokioUnixStream;
 
 use super::super::filesystem::Filesystem;
@@ -36,6 +41,7 @@ use super::user::User;
 
 type Result<T> = std::result::Result<T, Status>;
 
+#[derive(Clone)]
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     filesystem: Arc<Filesystem>,
@@ -71,14 +77,33 @@ impl Server {
 
         let fs = Arc::new(Filesystem::new(root_path.as_ref()).await?);
 
-        let nds_server = Self {
+        let uds_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs.clone(),
         };
 
-        let uds_serve = TonicServer::builder()
-            .add_service(RfsServer::new(nds_server))
-            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
+        /*let uds_serve = TonicServer::builder()
+            .add_service(RfsServer::new(uds_server))
+            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));*/
+
+        let uds_server = hyper::Server::builder(CustomUnixListener::from(unix_listener))
+            .executor(HyperExecutor {})
+            .serve(make_service_fn(move |_| {
+                futures_util::future::ok::<_, Infallible>(CustomUnixServer::new(uds_server.clone()))
+                /*let uds_server = uds_server.clone();
+
+                tower::service_fn(move |req: hyper::Request<hyper::Body>| {
+                    if let Version::HTTP_2 = req.version() {
+                        uds_server.call(req)
+                    } else {
+                        unimplemented!()
+                    }
+                })*/
+            }));
+
+        let uds_server = task::spawn(async move {
+            uds_server.await.context("uds failed")
+        });
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
@@ -94,7 +119,13 @@ impl Server {
             .add_service(RfsServer::new(rpc_server))
             .serve(listen_path);
 
-        try_join!(rpc_serve, uds_serve)?;
+        let rpc_serve = task::spawn(async move {
+            rpc_serve.await.context("rpc failed")
+        });
+
+        // try_join!(rpc_serve, uds_serve)?;
+
+        try_join!(rpc_serve, uds_server)?;
 
         Ok(())
     }
