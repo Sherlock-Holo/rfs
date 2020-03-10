@@ -1,12 +1,20 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_std::net::Shutdown;
-use async_std::prelude::*;
+use async_std::io::{Read, Write};
+use async_std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use async_std::path::Path;
+use async_std::sync::Arc;
+use async_std::task;
+use async_tls::TlsConnector;
 use fuse::{FileAttr, FileType};
+use hyper::client::connect::Connection;
+use hyper::rt::Executor;
+use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tonic::transport::server::Connected;
 
@@ -16,8 +24,8 @@ use crate::Result;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(&mut Self),
+        where
+            F: FnOnce(&mut Self),
     {
         f(&mut self);
         self
@@ -28,6 +36,24 @@ impl<T> Apply for T {}
 
 #[derive(Debug)]
 pub struct UnixStream(pub async_std::os::unix::net::UnixStream);
+
+impl UnixStream {
+    pub async fn connect(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Ok(Self(async_std::os::unix::net::UnixStream::connect(path).await?))
+    }
+}
+
+impl Connection for UnixStream {
+    fn connected(&self) -> hyper::client::connect::Connected {
+        let connected = hyper::client::connect::Connected::new();
+
+        if let Ok(peer_addr) = self.0.peer_addr() {
+            connected.extra(peer_addr)
+        } else {
+            connected
+        }
+    }
+}
 
 impl Connected for UnixStream {}
 
@@ -54,12 +80,74 @@ impl AsyncWrite for UnixStream {
         Pin::new(&mut self.0).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        if let Err(err) = self.0.shutdown(Shutdown::Both) {
-            Poll::Ready(Err(err))
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_close(cx)
+    }
+}
+
+pub struct TlsClientStream(pub async_tls::client::TlsStream<TcpStream>);
+
+impl TlsClientStream {
+    pub async fn connect<T: ToSocketAddrs>(tls_cfg: Arc<ClientConfig>, addr: T, domain: &str) -> std::io::Result<Self> {
+        let stream = TcpStream::connect(addr).await?;
+
+        let stream = TlsConnector::from(tls_cfg).connect(domain, stream).await?;
+
+        Ok(Self(stream))
+    }
+}
+
+impl Connection for TlsClientStream {
+    fn connected(&self) -> hyper::client::connect::Connected {
+        let connected = hyper::client::connect::Connected::new();
+
+        if let Ok(peer_addr) = self.0.get_ref().peer_addr() {
+            connected.extra(peer_addr)
         } else {
-            Poll::Ready(Ok(()))
+            connected
         }
+    }
+}
+
+impl Connected for TlsClientStream {
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.0.get_ref().peer_addr().ok()
+    }
+}
+
+impl AsyncRead for TlsClientStream {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TlsClientStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_close(cx)
+    }
+}
+
+pub struct HyperExecutor;
+
+impl<F> Executor<F> for HyperExecutor
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+{
+    fn execute(&self, fut: F) {
+        task::spawn(fut);
     }
 }
 

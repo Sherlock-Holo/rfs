@@ -4,40 +4,46 @@ use std::fmt::{self, Debug, Display};
 use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use async_signals::Signals;
 use async_std::fs;
-use async_std::os::unix::net::UnixStream;
 use async_std::sync;
 use async_std::sync::Sender;
 use async_std::task;
 use fuse::{
-    FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    Filesystem as FuseFilesystem, FileType, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
-use futures_util::future::ready;
 use futures_util::StreamExt;
+use hyper::body::HttpBody;
 use libc::c_int;
 use log::{debug, error, info, warn};
 use nix::mount;
 use nix::mount::MntFlags;
 use nix::unistd;
+use rustls::ClientConfig;
 use serde::export::Formatter;
-use tonic::transport::ClientTlsConfig;
-use tonic::transport::Endpoint;
-use tonic::transport::{Channel, Uri};
 use tonic::{Code, Request as TonicRequest};
+use tonic::codegen::{Body, StdError};
+use tonic::transport::{Channel, Uri};
+use tonic::transport::Endpoint;
 use tower::service_fn;
 use uuid::Uuid;
 
+use crate::{TlsClientStream, TokioUnixStream};
+use crate::client::client::{RpcClient, UdsClient, UdsConnector};
 use crate::helper::proto_attr_into_fuse_attr;
-use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
-use crate::TokioUnixStream;
+use crate::pb::rfs_client::RfsClient;
 
 const TTL: Duration = Duration::from_secs(1);
+
+fn string_to_static_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
 
 enum ClientKind {
     Rpc,
@@ -59,14 +65,105 @@ impl Display for ClientKind {
     }
 }
 
-pub struct Filesystem {
+pub struct Filesystem<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
+        T::ResponseBody: Body + HttpBody + Send + 'static,
+        T::Error: Into<StdError>,
+        T::Future: Send + 'static,
+        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+{
     uuid: Option<Uuid>,
-    rpc_client: RfsClient<Channel>,
+    rpc_client: RfsClient<T>,
     client_kind: ClientKind,
     id_sender: Option<Sender<Uuid>>,
 }
 
-impl Filesystem {
+impl<T> Filesystem<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + FuseFilesystem,
+        T::ResponseBody: Body + HttpBody + Send + 'static,
+        T::Error: Into<StdError>,
+        T::Future: Send + 'static,
+        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+{
+    pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
+        let uid = unistd::getuid();
+        let gid = unistd::getgid();
+
+        let opts: Vec<_> = vec![
+            format!("fsname=rfs-{:?}", self.client_kind),
+            "nonempty".to_string(),
+            "auto_cache".to_string(),
+            format!("uid={}", uid),
+            format!("gid={}", gid),
+        ]
+            .into_iter()
+            .map(|opt| vec!["-o".to_string(), opt])
+            .flatten()
+            .collect();
+
+        let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
+
+        let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
+
+        let unmount_point = mount_point.as_ref().to_path_buf();
+
+        task::spawn(async move {
+            stop_signal.next().await;
+
+            let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
+        });
+
+        let (sender, receiver) = sync::channel(1);
+
+        self.id_sender.replace(sender);
+
+        let mut client = self.rpc_client.clone();
+
+        fuse::mount(self, mount_point, &opts)?;
+
+        if let Some(uuid) = receiver.recv().await {
+            let req = TonicRequest::new(LogoutRequest {
+                uuid: uuid.to_hyphenated().to_string(),
+            });
+
+            info!("sending logout request");
+
+            if let Err(err) = client.logout(req).await {
+                error!("logout failed {}", err)
+            }
+
+            info!("logout success")
+        }
+
+        Ok(())
+    }
+}
+
+impl<T> Filesystem<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
+        T::ResponseBody: Body + HttpBody + Send + 'static,
+        T::Error: Into<StdError>,
+        T::Future: Send + 'static,
+        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+{
+    fn get_rpc_header(&self) -> Header {
+        let uuid = self
+            .uuid
+            .expect("uuid must be initialize")
+            .to_hyphenated()
+            .to_string();
+
+        Header {
+            uuid,
+            version: VERSION.to_string(),
+        }
+    }
+}
+
+impl Filesystem<UdsClient> {
     pub async fn new_uds<P: AsRef<Path>>(uds_path: P) -> Result<Self> {
         let uds_path = uds_path.as_ref().to_path_buf();
 
@@ -89,39 +186,45 @@ impl Filesystem {
 
         let uds_path = uds_path.to_str().expect("invalid unix path").to_string();
 
-        fn string_to_static_str(s: String) -> &'static str {
-            Box::leak(s.into_boxed_str())
-        };
+        // let uds_path: &'static str = string_to_static_str(uds_path);
 
-        let uds_path: &'static str = string_to_static_str(uds_path);
-
-        let channel = Endpoint::try_from("http://[::]:50051")?
+        /*let channel = Endpoint::try_from("http://[::]:50051")?
             .connect_with_connector(service_fn(move |_: Uri| {
-                task::block_on(async {
-                    match UnixStream::connect(uds_path).await {
-                        Err(err) => ready(Err(err)),
-                        Ok(unix_stream) => ready(Ok(TokioUnixStream(unix_stream))),
-                    }
-                })
-            }))
-            .await?;
+                TokioUnixStream::connect(uds_path)
+            })).await?;*/
+
+        /*let channel = Endpoint::try_from("http://[::]:50051")?
+            .connect_with_connector(UdsConnector::new(uds_path)).await?;*/
+
+        let uds_client = UdsClient::new(uds_path);
 
         Ok(Filesystem {
             uuid: None,
-            rpc_client: RfsClient::new(channel),
+            rpc_client: RfsClient::new(uds_client),
             client_kind: ClientKind::Uds,
             id_sender: None,
         })
     }
 
-    pub async fn new(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
+    /*pub async fn new(uri: Uri, tls_cfg: ClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
         info!("connecting server");
 
-        let channel = Channel::builder(uri)
-            .tls_config(tls_cfg)
-            .tcp_keepalive(Some(Duration::from_secs(5)))
-            .connect()
-            .await?;
+        let tls_cfg: &'static Arc<ClientConfig> = Box::leak(Box::new(Arc::new(tls_cfg)));
+
+        // let connector = TlsConnector::from(tls_cfg.clone());
+
+        let authority = uri.authority().ok_or(io::Error::from(ErrorKind::AddrNotAvailable))?.to_string();
+
+        let authority: &'static str = string_to_static_str(authority);
+
+        let host = uri.host().ok_or(io::Error::from(ErrorKind::AddrNotAvailable))?.to_string();
+
+        let host: &'static str = string_to_static_str(host);
+
+        let channel = Endpoint::from(uri)
+            .connect_with_connector(service_fn(move |_uri: Uri| {
+                TlsClientStream::connect(tls_cfg.clone(), authority, host)
+            })).await?;
 
         info!("server connected");
 
@@ -131,9 +234,9 @@ impl Filesystem {
             client_kind: ClientKind::Rpc,
             id_sender: None,
         })
-    }
+    }*/
 
-    pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
+    /*pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
         let uid = unistd::getuid();
         let gid = unistd::getgid();
 
@@ -144,10 +247,10 @@ impl Filesystem {
             format!("uid={}", uid),
             format!("gid={}", gid),
         ]
-        .into_iter()
-        .map(|opt| vec!["-o".to_string(), opt])
-        .flatten()
-        .collect();
+            .into_iter()
+            .map(|opt| vec!["-o".to_string(), opt])
+            .flatten()
+            .collect();
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 
@@ -197,10 +300,50 @@ impl Filesystem {
             uuid,
             version: VERSION.to_string(),
         }
+    }*/
+}
+
+impl Filesystem<RpcClient> {
+    pub async fn new(uri: Uri, tls_cfg: ClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        /*info!("connecting server");
+
+        let tls_cfg: &'static Arc<ClientConfig> = Box::leak(Box::new(Arc::new(tls_cfg)));
+
+        // let connector = TlsConnector::from(tls_cfg.clone());
+
+        let authority = uri.authority().ok_or(io::Error::from(ErrorKind::AddrNotAvailable))?.to_string();
+
+        let authority: &'static str = string_to_static_str(authority);
+
+        let host = uri.host().ok_or(io::Error::from(ErrorKind::AddrNotAvailable))?.to_string();
+
+        let host: &'static str = string_to_static_str(host);
+
+        let channel = Endpoint::from(uri)
+            .connect_with_connector(service_fn(move |_uri: Uri| {
+                TlsClientStream::connect(tls_cfg.clone(), authority, host)
+            })).await?;*/
+        let rpc_client = RpcClient::new(tls_cfg, uri);
+
+        info!("server connected");
+
+        Ok(Filesystem {
+            uuid: None,
+            rpc_client: RfsClient::new(rpc_client),
+            client_kind: ClientKind::Rpc,
+            id_sender: None,
+        })
     }
 }
 
-impl FuseFilesystem for Filesystem {
+impl<T> FuseFilesystem for Filesystem<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody> + Clone + Send + 'static,
+        T::ResponseBody: Body + HttpBody + Send + 'static,
+        T::Error: Into<StdError>,
+        T::Future: Send + 'static,
+        <T::ResponseBody as HttpBody>::Error: Into<StdError> + Send,
+{
     fn init(&mut self, _req: &Request) -> Result<(), libc::c_int> {
         task::block_on(async {
             for _ in 0..3 {
