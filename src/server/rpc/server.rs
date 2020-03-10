@@ -154,7 +154,7 @@ impl Server {
                     .await;
 
                 for dead_user_id in dead_user_ids {
-                    info!(
+                    warn!(
                         "user {} may be dead, removing",
                         dead_user_id.to_hyphenated_ref().to_string()
                     );

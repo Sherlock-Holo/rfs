@@ -134,7 +134,8 @@ impl Dir {
     pub async fn lookup(&self, name: &OsStr) -> Result<FileAttr> {
         self.init_children_map().await?;
 
-        self.0
+        let entry = self
+            .0
             .read()
             .await
             .children
@@ -142,8 +143,9 @@ impl Dir {
             .expect("children map should be initialized")
             .get(name)
             .ok_or(Errno::from(libc::ENOENT))?
-            .get_attr()
-            .await
+            .clone();
+
+        entry.get_attr().await
     }
 
     pub async fn read_dir(&self, offset: i64) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
@@ -181,10 +183,9 @@ impl Dir {
     pub async fn create_dir(&self, name: &OsStr, mode: u32) -> Result<Entry> {
         self.init_children_map().await?;
 
-        if self
-            .0
-            .read()
-            .await
+        let mut guard = self.0.write().await;
+
+        if guard
             .children
             .as_ref()
             .expect("children should be initialized")
@@ -193,8 +194,6 @@ impl Dir {
         {
             return Err(Errno::from(libc::EEXIST));
         }
-
-        let mut guard = self.0.write().await;
 
         let parent_path = PathBuf::from(guard.real_path.clone());
         let inode_map = guard.inode_map.clone();
@@ -227,10 +226,11 @@ impl Dir {
 
         self.init_children_map().await?;
 
-        if self
-            .0
-            .read()
-            .await
+        debug!("children map is initialize");
+
+        let mut guard = self.0.write().await;
+
+        if guard
             .children
             .as_ref()
             .expect("children should be initialized")
@@ -239,10 +239,6 @@ impl Dir {
         {
             return Err(Errno::from(libc::EEXIST));
         }
-
-        debug!("children map is initialize");
-
-        let mut guard = self.0.write().await;
 
         debug!("guard acquired");
 
@@ -516,7 +512,7 @@ impl Dir {
         self.0.read().await.name.to_os_string()
     }
 
-    //#[inline]
+    #[inline]
     pub async fn get_real_path(&self) -> OsString {
         self.0.read().await.real_path.to_os_string()
     }

@@ -185,7 +185,7 @@ impl File {
         self.0.write().await.parent = new_parent
     }
 
-    //#[inline]
+    #[inline]
     pub async fn get_inode(&self) -> Inode {
         self.0.read().await.inode
     }
@@ -195,7 +195,7 @@ impl File {
         self.0.read().await.name.to_os_string()
     }
 
-    //#[inline]
+    #[inline]
     pub async fn get_real_path(&self) -> OsString {
         self.0.read().await.real_path.to_os_string()
     }
