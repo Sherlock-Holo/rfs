@@ -1,23 +1,28 @@
 use std::convert::TryFrom;
 use std::ffi::OsStr;
-use std::fmt::{self, Debug, Display};
+use std::fmt::{self, Debug};
 use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use async_signals::Signals;
 use async_std::fs;
+use async_std::future::timeout;
 use async_std::os::unix::net::UnixStream;
 use async_std::sync;
-use async_std::sync::Sender;
+use async_std::sync::{Receiver, RwLock, Sender};
 use async_std::task;
+use chrono::Local;
 use fuse::{
     FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
 use futures_util::future::ready;
+use futures_util::future::FutureExt;
+use futures_util::select;
 use futures_util::StreamExt;
 use libc::c_int;
 use log::{debug, error, info, warn};
@@ -39,31 +44,39 @@ use crate::TokioUnixStream;
 
 const TTL: Duration = Duration::from_secs(1);
 
+#[derive(Clone)]
 enum ClientKind {
-    Rpc,
-    Uds,
+    Rpc(Arc<RwLock<RfsClient<Channel>>>, Uri, ClientTlsConfig),
+    Uds(RfsClient<Channel>),
+}
+
+impl ClientKind {
+    #[inline]
+    async fn get_client(&self) -> RfsClient<Channel> {
+        match self {
+            ClientKind::Uds(client) => client.clone(),
+            ClientKind::Rpc(client, ..) => client.read().await.clone(),
+        }
+    }
 }
 
 impl Debug for ClientKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            ClientKind::Rpc => f.write_str("rpc"),
-            ClientKind::Uds => f.write_str("uds"),
+            ClientKind::Rpc(..) => f.write_str("rpc"),
+            ClientKind::Uds(_) => f.write_str("uds"),
         }
-    }
-}
-
-impl Display for ClientKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(self, f)
     }
 }
 
 pub struct Filesystem {
     uuid: Option<Uuid>,
-    rpc_client: RfsClient<Channel>,
     client_kind: ClientKind,
     id_sender: Option<Sender<Uuid>>,
+    rtt: Arc<RwLock<Duration>>,
+    tokio_handle: Option<tokio::runtime::Handle>,
+    rpc_failed_receiver: Option<Receiver<bool>>,
+    rpc_failed_sender: Option<Sender<bool>>,
 }
 
 impl Filesystem {
@@ -108,28 +121,42 @@ impl Filesystem {
 
         Ok(Filesystem {
             uuid: None,
-            rpc_client: RfsClient::new(channel),
-            client_kind: ClientKind::Uds,
+            client_kind: ClientKind::Uds(RfsClient::new(channel)),
             id_sender: None,
+            rtt: Arc::new(RwLock::new(Duration::from_millis(100))),
+            tokio_handle: None,
+            rpc_failed_receiver: None,
+            rpc_failed_sender: None,
         })
     }
 
-    pub async fn new(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
+    pub async fn new(
+        uri: Uri,
+        tls_cfg: ClientTlsConfig,
+        handle: tokio::runtime::Handle,
+    ) -> Result<Self, tonic::transport::Error> {
         info!("connecting server");
 
-        let channel = Channel::builder(uri)
-            .tls_config(tls_cfg)
+        let channel = Channel::builder(uri.clone())
+            .tls_config(tls_cfg.clone())
             .tcp_keepalive(Some(Duration::from_secs(5)))
             .connect()
             .await?;
 
         info!("server connected");
 
+        let client = Arc::new(RwLock::new(RfsClient::new(channel)));
+
+        let (sender, receiver) = sync::channel(3);
+
         Ok(Filesystem {
             uuid: None,
-            rpc_client: RfsClient::new(channel),
-            client_kind: ClientKind::Rpc,
+            client_kind: ClientKind::Rpc(client.clone(), uri.clone(), tls_cfg),
             id_sender: None,
+            rtt: Arc::new(RwLock::new(Duration::from_millis(100))),
+            tokio_handle: Some(handle),
+            rpc_failed_receiver: Some(receiver),
+            rpc_failed_sender: Some(sender),
         })
     }
 
@@ -158,6 +185,8 @@ impl Filesystem {
         task::spawn(async move {
             stop_signal.next().await;
 
+            info!("stopping rfs");
+
             let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
         });
 
@@ -165,7 +194,10 @@ impl Filesystem {
 
         self.id_sender.replace(sender);
 
-        let mut client = self.rpc_client.clone();
+        let mut client = match &self.client_kind {
+            ClientKind::Uds(client) => client.clone(),
+            ClientKind::Rpc(client, ..) => client.read().await.clone(),
+        };
 
         fuse::mount(self, mount_point, &opts)?;
 
@@ -198,6 +230,102 @@ impl Filesystem {
             version: VERSION.to_string(),
         }
     }
+
+    async fn reconnect_loop(
+        client: Arc<RwLock<RfsClient<Channel>>>,
+        uri: Uri,
+        tls_cfg: ClientTlsConfig,
+        handle: tokio::runtime::Handle,
+        receiver: Receiver<bool>,
+    ) {
+        let mut failed_count = 0;
+
+        loop {
+            while let Some(fail) = receiver.recv().await {
+                if fail {
+                    failed_count += 1;
+
+                    if failed_count >= 3 {
+                        warn!("rpc failed more then 3 times, need reconnect");
+
+                        let uri = uri.clone();
+                        let tls_cfg = tls_cfg.clone();
+
+                        let channel = match handle
+                            .spawn(async move {
+                                Channel::builder(uri)
+                                    .tls_config(tls_cfg)
+                                    .tcp_keepalive(Some(Duration::from_secs(5)))
+                                    .connect()
+                                    .await
+                            })
+                            .await
+                            .unwrap()
+                        {
+                            Err(err) => {
+                                error!("reconnect failed {}", err);
+
+                                continue;
+                            }
+
+                            Ok(channel) => channel,
+                        };
+
+                        failed_count = 0;
+
+                        *client.write().await = RfsClient::new(channel);
+
+                        info!("reconnect success");
+                    }
+                } else {
+                    failed_count = 0;
+                }
+            }
+        }
+    }
+
+    async fn ping_loop(
+        client: Arc<RwLock<RfsClient<Channel>>>,
+        uuid: Uuid,
+        rtt: Arc<RwLock<Duration>>,
+        failed_sender: Sender<bool>,
+    ) {
+        loop {
+            task::sleep(Duration::from_secs(60)).await;
+
+            let before_ping = Local::now();
+
+            let ping_req = TonicRequest::new(PingRequest {
+                header: Some(Header {
+                    uuid: uuid.to_hyphenated().to_string(),
+                    version: VERSION.to_string(),
+                }),
+            });
+
+            let mut client = client.read().await.clone();
+
+            if timeout(*rtt.read().await * 2, client.ping(ping_req))
+                .await
+                .is_ok()
+            {
+                if let Ok(new_rtt) = (Local::now() - before_ping).to_std() {
+                    *rtt.write().await = new_rtt;
+                }
+
+                select! {
+                    _ = failed_sender.send(false).fuse() => (),
+                    default => ()
+                };
+
+                debug!("sent ping message");
+            } else {
+                select! {
+                    _ = failed_sender.send(true).fuse() => (),
+                    default => ()
+                };
+            }
+        }
+    }
 }
 
 impl FuseFilesystem for Filesystem {
@@ -206,7 +334,7 @@ impl FuseFilesystem for Filesystem {
             for _ in 0..3 {
                 let req = TonicRequest::new(RegisterRequest {});
 
-                return match self.rpc_client.register(req).await {
+                return match self.client_kind.get_client().await.register(req).await {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             task::sleep(Duration::from_secs(1)).await;
@@ -238,26 +366,29 @@ impl FuseFilesystem for Filesystem {
                             .await;
 
                         // uds client doesn't need send ping
-                        if let ClientKind::Rpc = self.client_kind {
-                            let mut client = self.rpc_client.clone();
+                        if let ClientKind::Rpc(client, uri, tls_cfg) = &self.client_kind {
+                            let client = client.clone();
 
-                            task::spawn(async move {
-                                loop {
-                                    task::sleep(Duration::from_secs(60)).await;
+                            let rtt = self.rtt.clone();
 
-                                    let ping_req = TonicRequest::new(PingRequest {
-                                        header: Some(Header {
-                                            uuid: uuid.to_hyphenated().to_string(),
-                                            version: VERSION.to_string(),
-                                        }),
-                                    });
+                            let failed_sender = self
+                                .rpc_failed_sender
+                                .clone()
+                                .expect("not None in rpc mode");
 
-                                    // ignore error because we should let user unmount filesystem
-                                    let _ = client.ping(ping_req).await;
+                            let uri = uri.clone();
+                            let tls_cfg = tls_cfg.clone();
+                            let handle = self.tokio_handle.take().expect("not None in rpc mode");
+                            let receiver = self
+                                .rpc_failed_receiver
+                                .clone()
+                                .expect("not None in rpc mode");
 
-                                    debug!("sent ping message");
-                                }
-                            });
+                            task::spawn(Self::ping_loop(client.clone(), uuid, rtt, failed_sender));
+
+                            task::spawn(Self::reconnect_loop(
+                                client, uri, tls_cfg, handle, receiver,
+                            ));
                         }
 
                         Ok(())
@@ -303,10 +434,14 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         let uid = req.uid();
         let gid = req.gid();
+
+        let rtt = self.rtt.clone();
+
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -316,10 +451,36 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                let result = match client.lookup(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.lookup(rpc_req)).await {
+                    Err(err) => {
+                        warn!("lookup rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("lookup rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -333,6 +494,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        }
+
                         let resp = resp.into_inner();
 
                         if let Some(result) = resp.result {
@@ -368,10 +536,14 @@ impl FuseFilesystem for Filesystem {
     fn getattr(&mut self, req: &Request, inode: u64, reply: ReplyAttr) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         let uid = req.uid();
         let gid = req.gid();
+
+        let rtt = self.rtt.clone();
+
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -380,10 +552,36 @@ impl FuseFilesystem for Filesystem {
                     inode,
                 });
 
-                let result = match client.get_attr(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.get_attr(rpc_req)).await {
+                    Err(err) => {
+                        warn!("getattr rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("getattr rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -397,6 +595,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        }
+
                         let resp = resp.into_inner();
 
                         if let Some(result) = resp.result {
@@ -448,10 +653,14 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         let uid = req.uid();
         let gid = req.gid();
+
+        let rtt = self.rtt.clone();
+
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -478,10 +687,36 @@ impl FuseFilesystem for Filesystem {
                     }),
                 });
 
-                let result = match client.set_attr(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.set_attr(rpc_req)).await {
+                    Err(err) => {
+                        warn!("setattr rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("setattr rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -495,6 +730,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        }
+
                         if let Some(result) = resp.into_inner().result {
                             result
                         } else {
@@ -541,7 +783,11 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let rtt = self.rtt.clone();
+
+        let failed_sender = self.rpc_failed_sender.clone();
 
         let uid = req.uid();
         let gid = req.gid();
@@ -555,10 +801,36 @@ impl FuseFilesystem for Filesystem {
                     mode,
                 });
 
-                let result = match client.mkdir(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.mkdir(rpc_req)).await {
+                    Err(err) => {
+                        warn!("mkdir rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("mkdir rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -572,6 +844,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        }
+
                         if let Some(result) = resp.into_inner().result {
                             result
                         } else {
@@ -616,7 +895,9 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -626,10 +907,36 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                match client.unlink(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.unlink(rpc_req)).await {
+                    Err(err) => {
+                        warn!("unlink rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("unlink rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -643,6 +950,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        }
+
                         if let Some(error) = resp.into_inner().error {
                             reply.error(error.errno as c_int);
                         } else {
@@ -671,7 +985,9 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -681,10 +997,36 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                match client.rm_dir(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.rm_dir(rpc_req)).await {
+                    Err(err) => {
+                        warn!("rmdir rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("rmdir rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -698,6 +1040,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        }
+
                         if let Some(error) = resp.into_inner().error {
                             reply.error(error.errno as c_int);
                         } else {
@@ -743,7 +1092,9 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -755,10 +1106,36 @@ impl FuseFilesystem for Filesystem {
                     new_name: new_name.to_string(),
                 });
 
-                match client.rename(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.rename(rpc_req)).await {
+                    Err(err) => {
+                        warn!("rename rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("rename rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(false).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -772,6 +1149,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(error) = resp.into_inner().error {
                             reply.error(error.errno as c_int);
                         } else {
@@ -791,7 +1175,9 @@ impl FuseFilesystem for Filesystem {
     fn open(&mut self, _req: &Request, inode: u64, flags: u32, reply: ReplyOpen) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         debug!("client open inode {} flags {}", inode, flags);
 
@@ -803,10 +1189,36 @@ impl FuseFilesystem for Filesystem {
                     flags,
                 });
 
-                let result = match client.open_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.open_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("open file rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("open rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -820,6 +1232,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(result) = resp.into_inner().result {
                             result
                         } else {
@@ -856,7 +1275,9 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -867,10 +1288,36 @@ impl FuseFilesystem for Filesystem {
                     size: size as u64,
                 });
 
-                let result = match client.read_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.read_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("read_file rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("read_file rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -884,6 +1331,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(result) = resp.into_inner().result {
                             result
                         } else {
@@ -921,7 +1375,9 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         let data = data.to_vec();
 
@@ -934,10 +1390,37 @@ impl FuseFilesystem for Filesystem {
                     data: data.clone(),
                 });
 
-                let result = match client.write_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.write_file(rpc_req)).await
+                {
+                    Err(err) => {
+                        warn!("write file rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("write_file rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -951,6 +1434,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(result) = resp.into_inner().result {
                             result
                         } else {
@@ -979,7 +1469,9 @@ impl FuseFilesystem for Filesystem {
     fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -988,10 +1480,36 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                match client.flush(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.flush(rpc_req)).await {
+                    Err(err) => {
+                        warn!("flush rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("flush rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1005,6 +1523,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(err) = resp.into_inner().error {
                             reply.error(err.errno as c_int)
                         } else {
@@ -1033,7 +1558,9 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -1042,10 +1569,37 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                match client.close_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.close_file(rpc_req)).await
+                {
+                    Err(err) => {
+                        warn!("close file rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("close_file rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1059,6 +1613,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(err) = resp.into_inner().error {
                             reply.error(err.errno as c_int)
                         } else {
@@ -1078,7 +1639,9 @@ impl FuseFilesystem for Filesystem {
     fn fsync(&mut self, _req: &Request, _inode: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -1087,10 +1650,36 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                match client.sync_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.sync_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("sync file rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("sync_file rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1104,6 +1693,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(err) = resp.into_inner().error {
                             reply.error(err.errno as c_int)
                         } else {
@@ -1132,7 +1728,9 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -1141,34 +1739,66 @@ impl FuseFilesystem for Filesystem {
                     inode,
                 });
 
-                let dir_entries: Vec<read_dir_response::DirEntry> =
-                    match client.read_dir(rpc_req).await {
-                        Err(err) => {
-                            if code_can_retry(err.code()) {
-                                warn!("read_dir rpc has error {}", err);
+                let mut client = client_kind.get_client().await.clone();
 
-                                task::sleep(Duration::from_secs(1)).await;
+                let result = match timeout(*rtt.read().await * 2, client.read_dir(rpc_req)).await {
+                    Err(err) => {
+                        warn!("readdir rpc timeout {}", err);
 
-                                continue;
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let dir_entries: Vec<read_dir_response::DirEntry> = match result {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("read_dir rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
                             }
 
-                            error!("read_dir rpc has error {}", err);
-                            reply.error(libc::EIO);
+                            task::sleep(Duration::from_secs(1)).await;
 
+                            continue;
+                        }
+
+                        error!("read_dir rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
+                        let resp = resp.into_inner();
+
+                        if let Some(error) = resp.error {
+                            reply.error(error.errno as c_int);
                             return;
                         }
 
-                        Ok(resp) => {
-                            let resp = resp.into_inner();
-
-                            if let Some(error) = resp.error {
-                                reply.error(error.errno as c_int);
-                                return;
-                            }
-
-                            resp.dir_entries
-                        }
-                    };
+                        resp.dir_entries
+                    }
+                };
 
                 debug!("got readdir result");
 
@@ -1254,7 +1884,9 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         let uid = req.uid();
         let gid = req.gid();
@@ -1269,10 +1901,37 @@ impl FuseFilesystem for Filesystem {
                     flags,
                 });
 
-                let (fh_id, attr) = match client.create_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.create_file(rpc_req)).await
+                {
+                    Err(err) => {
+                        warn!("create file rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let (fh_id, attr) = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("create_file rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1286,6 +1945,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         let resp = resp.into_inner();
 
                         if let Some(error) = resp.error {
@@ -1331,7 +1997,9 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         task::spawn(async move {
             for _ in 0..3 {
@@ -1340,10 +2008,36 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                let result = match client.get_lock(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.get_lock(rpc_req)).await {
+                    Err(err) => {
+                        warn!("getlk rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("get_lock rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1357,6 +2051,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(result) = resp.into_inner().result {
                             result
                         } else {
@@ -1412,7 +2113,8 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         if typ as i32 == libc::F_UNLCK {
             task::spawn(async move {
@@ -1423,10 +2125,19 @@ impl FuseFilesystem for Filesystem {
                         block: false,
                     });
 
+                    let mut client = client_kind.get_client().await.clone();
+
                     match client.release_lock(rpc_req).await {
                         Err(err) => {
                             if code_can_retry(err.code()) {
                                 warn!("release_lock rpc has error {}", err);
+
+                                if let Some(failed_sender) = &failed_sender {
+                                    select! {
+                                        _ = failed_sender.send(true).fuse() => (),
+                                        default => ()
+                                    };
+                                }
 
                                 task::sleep(Duration::from_secs(1)).await;
 
@@ -1440,6 +2151,13 @@ impl FuseFilesystem for Filesystem {
                         }
 
                         Ok(resp) => {
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(false).fuse() => (),
+                                    default => ()
+                                };
+                            };
+
                             if let Some(error) = resp.into_inner().error {
                                 reply.error(error.errno as c_int);
                             } else {
@@ -1482,10 +2200,19 @@ impl FuseFilesystem for Filesystem {
                     block: sleep,
                 });
 
+                let mut client = client_kind.get_client().await.clone();
+
                 match client.set_lock(rpc_req).await {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("set_lock rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1499,6 +2226,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(error) = resp.into_inner().error {
                             warn!(
                                 "set lock failed, unique {} errno is {}",
@@ -1523,7 +2257,9 @@ impl FuseFilesystem for Filesystem {
     fn interrupt(&mut self, _req: &Request, unique: u64, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let rtt = self.rtt.clone();
+        let failed_sender = self.rpc_failed_sender.clone();
 
         debug!("interrupt unique {}", unique);
 
@@ -1534,10 +2270,36 @@ impl FuseFilesystem for Filesystem {
                     unique,
                 });
 
-                match client.interrupt(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(*rtt.read().await * 2, client.interrupt(rpc_req)).await {
+                    Err(err) => {
+                        warn!("interrupt rpc timeout {}", err);
+
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(true).fuse() => (),
+                                default => ()
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("interrupt rpc has error {}", err);
+
+                            if let Some(failed_sender) = &failed_sender {
+                                select! {
+                                    _ = failed_sender.send(true).fuse() => (),
+                                    default => ()
+                                };
+                            }
 
                             task::sleep(Duration::from_secs(1)).await;
 
@@ -1551,6 +2313,13 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
+                        if let Some(failed_sender) = &failed_sender {
+                            select! {
+                                _ = failed_sender.send(false).fuse() => (),
+                                default => ()
+                            };
+                        };
+
                         if let Some(err) = resp.into_inner().error {
                             reply.error(err.errno as c_int)
                         } else {
