@@ -43,6 +43,7 @@ use crate::pb::*;
 use crate::TokioUnixStream;
 
 const TTL: Duration = Duration::from_secs(1);
+const MIN_RTT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 enum ClientKind {
@@ -178,12 +179,14 @@ impl Filesystem {
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 
-        let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
+        let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
         let unmount_point = mount_point.as_ref().to_path_buf();
 
         task::spawn(async move {
             stop_signal.next().await;
+
+            drop(stop_signal); // in case release signal handle
 
             info!("stopping rfs");
 
@@ -453,7 +456,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.lookup(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.lookup(rpc_req)).await {
                     Err(err) => {
                         warn!("lookup rpc timeout {}", err);
 
@@ -554,7 +562,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.get_attr(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.get_attr(rpc_req)).await {
                     Err(err) => {
                         warn!("getattr rpc timeout {}", err);
 
@@ -689,7 +702,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.set_attr(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.set_attr(rpc_req)).await {
                     Err(err) => {
                         warn!("setattr rpc timeout {}", err);
 
@@ -803,7 +821,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.mkdir(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.mkdir(rpc_req)).await {
                     Err(err) => {
                         warn!("mkdir rpc timeout {}", err);
 
@@ -909,7 +932,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.unlink(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.unlink(rpc_req)).await {
                     Err(err) => {
                         warn!("unlink rpc timeout {}", err);
 
@@ -999,7 +1027,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.rm_dir(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.rm_dir(rpc_req)).await {
                     Err(err) => {
                         warn!("rmdir rpc timeout {}", err);
 
@@ -1108,7 +1141,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.rename(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.rename(rpc_req)).await {
                     Err(err) => {
                         warn!("rename rpc timeout {}", err);
 
@@ -1191,7 +1229,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.open_file(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.open_file(rpc_req)).await {
                     Err(err) => {
                         warn!("open file rpc timeout {}", err);
 
@@ -1290,7 +1333,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.read_file(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.read_file(rpc_req)).await {
                     Err(err) => {
                         warn!("read_file rpc timeout {}", err);
 
@@ -1392,8 +1440,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.write_file(rpc_req)).await
-                {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.write_file(rpc_req)).await {
                     Err(err) => {
                         warn!("write file rpc timeout {}", err);
 
@@ -1482,7 +1534,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.flush(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.flush(rpc_req)).await {
                     Err(err) => {
                         warn!("flush rpc timeout {}", err);
 
@@ -1571,8 +1628,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.close_file(rpc_req)).await
-                {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.close_file(rpc_req)).await {
                     Err(err) => {
                         warn!("close file rpc timeout {}", err);
 
@@ -1652,7 +1713,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.sync_file(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.sync_file(rpc_req)).await {
                     Err(err) => {
                         warn!("sync file rpc timeout {}", err);
 
@@ -1741,7 +1807,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.read_dir(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.read_dir(rpc_req)).await {
                     Err(err) => {
                         warn!("readdir rpc timeout {}", err);
 
@@ -1903,8 +1974,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.create_file(rpc_req)).await
-                {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.create_file(rpc_req)).await {
                     Err(err) => {
                         warn!("create file rpc timeout {}", err);
 
@@ -2010,7 +2085,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.get_lock(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.get_lock(rpc_req)).await {
                     Err(err) => {
                         warn!("getlk rpc timeout {}", err);
 
@@ -2272,7 +2352,12 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = client_kind.get_client().await.clone();
 
-                let result = match timeout(*rtt.read().await * 2, client.interrupt(rpc_req)).await {
+                let mut rtt = *rtt.read().await * 2;
+                if rtt < MIN_RTT {
+                    rtt = MIN_RTT;
+                }
+
+                let result = match timeout(rtt, client.interrupt(rpc_req)).await {
                     Err(err) => {
                         warn!("interrupt rpc timeout {}", err);
 
