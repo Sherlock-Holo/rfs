@@ -190,17 +190,18 @@ impl Filesystem {
 
             info!("stopping rfs");
 
-            let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
+            while let Err(err) = mount::umount2(&unmount_point, MntFlags::MNT_DETACH) {
+                error!("lazy unmount failed {}", err);
+
+                task::sleep(Duration::from_secs(1)).await;
+            }
         });
 
         let (sender, receiver) = sync::channel(1);
 
         self.id_sender.replace(sender);
 
-        let mut client = match &self.client_kind {
-            ClientKind::Uds(client) => client.clone(),
-            ClientKind::Rpc(client, ..) => client.read().await.clone(),
-        };
+        let mut client = self.client_kind.get_client().await;
 
         fuse::mount(self, mount_point, &opts)?;
 
@@ -211,8 +212,20 @@ impl Filesystem {
 
             info!("sending logout request");
 
-            if let Err(err) = client.logout(req).await {
-                error!("logout failed {}", err)
+            match timeout(Duration::from_secs(10), client.logout(req)).await {
+                Err(err) => {
+                    error!("logout timeout {}", err);
+
+                    std::process::exit(1);
+                }
+
+                Ok(result) => {
+                    if let Err(err) = result {
+                        error!("logout failed {}", err);
+
+                        std::process::exit(1);
+                    }
+                }
             }
 
             info!("logout success")
