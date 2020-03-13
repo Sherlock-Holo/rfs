@@ -201,7 +201,7 @@ impl Filesystem {
 
         self.id_sender.replace(sender);
 
-        let mut client = self.client_kind.get_client().await;
+        let client_kind = self.client_kind.clone();
 
         fuse::mount(self, mount_point, &opts)?;
 
@@ -211,6 +211,8 @@ impl Filesystem {
             });
 
             info!("sending logout request");
+
+            let mut client = client_kind.get_client().await;
 
             match timeout(Duration::from_secs(10), client.logout(req)).await {
                 Err(err) => {
