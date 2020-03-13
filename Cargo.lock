@@ -52,19 +52,6 @@ dependencies = [
 
 [[package]]
 name = "async-signals"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf1b1fcc89707392766227c008c74265c1df55d21643a3850965c01d26b8b0fa"
-dependencies = [
- "futures-util",
- "lazy_static",
- "libc",
- "mio",
- "signal-hook",
-]
-
-[[package]]
-name = "async-signals"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ecc8e73c1710a66df0e1dc6a6a323aa3d64300c30be19a62161cfc378b6c57d"
@@ -1112,7 +1099,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-notify",
- "async-signals 0.2.0",
+ "async-signals",
  "async-std",
  "chrono",
  "fuse",
@@ -1156,7 +1143,7 @@ name = "rfs-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-signals 0.1.0",
+ "async-signals",
  "async-std",
  "futures-util",
  "lazy_static",
