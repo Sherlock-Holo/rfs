@@ -8,6 +8,10 @@ build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release]
+lto = true
+debug = true
+
 [workspace]
 members = [".", "rfs-client", "rfs-server"]
 
@@ -30,9 +34,6 @@ anyhow = "1.0"
 async-notify = "0.1"
 tokio = "0.2"
 async-signals = "0.2"
-
-[profile.release]
-lto = true
 
 [dependencies.fuse]
 branch = "master"

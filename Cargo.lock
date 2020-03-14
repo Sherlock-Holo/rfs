@@ -42,9 +42,9 @@ dependencies = [
 
 [[package]]
 name = "async-notify"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6328dca13c8c11fb1386e937270a309ac119d84f069b627e32664b06fea8a1d"
+checksum = "31a78ebabb89cf6c7662230044c4c2dd3d7fd65149526cf98518d24eae5bfb92"
 dependencies = [
  "async-std",
  "futures-util",
