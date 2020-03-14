@@ -41,7 +41,7 @@ use crate::pb::*;
 use crate::TokioUnixStream;
 
 const TTL: Duration = Duration::from_secs(1);
-const INITIAL_TIMEOUT: Duration = Duration::from_secs(4);
+const INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const MULTIPLIER: f64 = 1.5;
 
 #[derive(Clone)]
