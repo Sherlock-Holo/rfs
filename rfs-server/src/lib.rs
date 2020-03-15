@@ -210,15 +210,6 @@ mod tokio_runtime {
     }
 
     pub async fn enter_tokio<T>(mut f: Pin<Box<dyn Future<Output = T> + 'static + Send>>) -> T {
-        poll_fn(|context| {
-            HANDLE.enter(|| {
-                // Safety: pinned on stack, and we are in an async fn
-                // WARN: DO NOT use f in other places
-                // let f = unsafe { Pin::new_unchecked(&mut f) };
-
-                f.as_mut().poll(context)
-            })
-        })
-        .await
+        poll_fn(|context| HANDLE.enter(|| f.as_mut().poll(context))).await
     }
 }

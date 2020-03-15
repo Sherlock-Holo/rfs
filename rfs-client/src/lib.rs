@@ -9,7 +9,7 @@ use structopt::StructOpt;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
 use rfs::{log_init, Filesystem};
-pub use tokio_runtime::enter_tokio;
+pub use tokio_runtime::{enter_tokio, get_tokio_handle};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -28,7 +28,7 @@ pub struct Argument {
     config: PathBuf,
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(handle: tokio::runtime::Handle) -> Result<()> {
     let args = Argument::from_args();
 
     let cfg_data = fs::read(&args.config).await?;
@@ -63,7 +63,7 @@ pub async fn run() -> Result<()> {
         tls_config = tls_config.ca_certificate(ca);
     }
 
-    let filesystem = Filesystem::new(uri, tls_config).await?;
+    let filesystem = Filesystem::new(uri, tls_config, handle).await?;
 
     filesystem.mount(&cfg.mount_path).await?;
 
@@ -90,15 +90,10 @@ mod tokio_runtime {
     }
 
     pub async fn enter_tokio<T>(mut f: Pin<Box<dyn Future<Output = T> + 'static + Send>>) -> T {
-        poll_fn(|context| {
-            HANDLE.enter(|| {
-                // Safety: pinned on stack, and we are in an async fn
-                // WARN: DO NOT use f in other places
-                // let f = unsafe { Pin::new_unchecked(&mut f) };
+        poll_fn(|context| HANDLE.enter(|| f.as_mut().poll(context))).await
+    }
 
-                f.as_mut().poll(context)
-            })
-        })
-        .await
+    pub fn get_tokio_handle() -> Handle {
+        HANDLE.clone()
     }
 }

@@ -1,17 +1,20 @@
 use std::convert::TryFrom;
 use std::ffi::OsStr;
-use std::fmt::{self, Debug, Display};
+use std::fmt::{self, Debug};
 use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use async_notify::Notify;
 use async_signals::Signals;
 use async_std::fs;
+use async_std::future::timeout;
 use async_std::os::unix::net::UnixStream;
 use async_std::sync;
-use async_std::sync::Sender;
+use async_std::sync::{RwLock, Sender};
 use async_std::task;
 use fuse::{
     FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -38,32 +41,40 @@ use crate::pb::*;
 use crate::TokioUnixStream;
 
 const TTL: Duration = Duration::from_secs(1);
+const INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
+const MULTIPLIER: f64 = 1.5;
 
+#[derive(Clone)]
 enum ClientKind {
-    Rpc,
-    Uds,
+    Rpc(Arc<RwLock<RfsClient<Channel>>>, Uri, ClientTlsConfig),
+    Uds(RfsClient<Channel>),
+}
+
+impl ClientKind {
+    #[inline]
+    async fn get_client(&self) -> RfsClient<Channel> {
+        match self {
+            ClientKind::Uds(client) => client.clone(),
+            ClientKind::Rpc(client, ..) => client.read().await.clone(),
+        }
+    }
 }
 
 impl Debug for ClientKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            ClientKind::Rpc => f.write_str("rpc"),
-            ClientKind::Uds => f.write_str("uds"),
+            ClientKind::Rpc(..) => f.write_str("rpc"),
+            ClientKind::Uds(_) => f.write_str("uds"),
         }
-    }
-}
-
-impl Display for ClientKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(self, f)
     }
 }
 
 pub struct Filesystem {
     uuid: Option<Uuid>,
-    rpc_client: RfsClient<Channel>,
     client_kind: ClientKind,
     id_sender: Option<Sender<Uuid>>,
+    tokio_handle: Option<tokio::runtime::Handle>,
+    failed_notify: Option<Notify>,
 }
 
 impl Filesystem {
@@ -108,28 +119,36 @@ impl Filesystem {
 
         Ok(Filesystem {
             uuid: None,
-            rpc_client: RfsClient::new(channel),
-            client_kind: ClientKind::Uds,
+            client_kind: ClientKind::Uds(RfsClient::new(channel)),
             id_sender: None,
+            tokio_handle: None,
+            failed_notify: None,
         })
     }
 
-    pub async fn new(uri: Uri, tls_cfg: ClientTlsConfig) -> Result<Self, tonic::transport::Error> {
+    pub async fn new(
+        uri: Uri,
+        tls_cfg: ClientTlsConfig,
+        handle: tokio::runtime::Handle,
+    ) -> Result<Self, tonic::transport::Error> {
         info!("connecting server");
 
-        let channel = Channel::builder(uri)
-            .tls_config(tls_cfg)
+        let channel = Channel::builder(uri.clone())
+            .tls_config(tls_cfg.clone())
             .tcp_keepalive(Some(Duration::from_secs(5)))
             .connect()
             .await?;
 
         info!("server connected");
 
+        let client = Arc::new(RwLock::new(RfsClient::new(channel)));
+
         Ok(Filesystem {
             uuid: None,
-            rpc_client: RfsClient::new(channel),
-            client_kind: ClientKind::Rpc,
+            client_kind: ClientKind::Rpc(client.clone(), uri.clone(), tls_cfg),
             id_sender: None,
+            tokio_handle: Some(handle),
+            failed_notify: Some(Notify::new()),
         })
     }
 
@@ -151,21 +170,29 @@ impl Filesystem {
 
         let opts: Vec<_> = opts.iter().map(|opt| opt.as_ref()).collect();
 
-        let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
+        let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
         let unmount_point = mount_point.as_ref().to_path_buf();
 
         task::spawn(async move {
             stop_signal.next().await;
 
-            let _ = mount::umount2(&unmount_point, MntFlags::MNT_DETACH);
+            drop(stop_signal); // in case release signal handle
+
+            info!("stopping rfs");
+
+            while let Err(err) = mount::umount2(&unmount_point, MntFlags::MNT_DETACH) {
+                error!("lazy unmount failed {}", err);
+
+                task::sleep(Duration::from_secs(1)).await;
+            }
         });
 
         let (sender, receiver) = sync::channel(1);
 
         self.id_sender.replace(sender);
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         fuse::mount(self, mount_point, &opts)?;
 
@@ -176,8 +203,22 @@ impl Filesystem {
 
             info!("sending logout request");
 
-            if let Err(err) = client.logout(req).await {
-                error!("logout failed {}", err)
+            let mut client = client_kind.get_client().await;
+
+            match timeout(Duration::from_secs(10), client.logout(req)).await {
+                Err(err) => {
+                    error!("logout timeout {}", err);
+
+                    std::process::exit(1);
+                }
+
+                Ok(result) => {
+                    if let Err(err) = result {
+                        error!("logout failed {}", err);
+
+                        std::process::exit(1);
+                    }
+                }
             }
 
             info!("logout success")
@@ -198,6 +239,86 @@ impl Filesystem {
             version: VERSION.to_string(),
         }
     }
+
+    async fn reconnect_loop(
+        client: Arc<RwLock<RfsClient<Channel>>>,
+        uri: Uri,
+        tls_cfg: ClientTlsConfig,
+        handle: tokio::runtime::Handle,
+        failed_notify: Notify,
+    ) {
+        loop {
+            failed_notify.notified().await;
+
+            warn!("rpc failed, need reconnect");
+
+            let channel = loop {
+                let uri = uri.clone();
+                let tls_cfg = tls_cfg.clone();
+
+                match handle
+                    .spawn(async move {
+                        Channel::builder(uri)
+                            .tls_config(tls_cfg)
+                            .tcp_keepalive(Some(Duration::from_secs(5)))
+                            .connect()
+                            .await
+                    })
+                    .await
+                    .expect("tokio task panic")
+                {
+                    Err(err) => {
+                        error!("reconnect failed {}", err);
+
+                        task::sleep(Duration::from_millis(500)).await;
+
+                        continue;
+                    }
+
+                    Ok(channel) => break channel,
+                };
+            };
+
+            *client.write().await = RfsClient::new(channel);
+
+            info!("reconnect success");
+        }
+    }
+
+    async fn ping_loop(client: Arc<RwLock<RfsClient<Channel>>>, uuid: Uuid, failed_notify: Notify) {
+        let mut rpc_timeout = INITIAL_TIMEOUT;
+
+        'outer: loop {
+            for _ in 0..3 {
+                task::sleep(Duration::from_secs(60)).await;
+
+                let ping_req = TonicRequest::new(PingRequest {
+                    header: Some(Header {
+                        uuid: uuid.to_hyphenated().to_string(),
+                        version: VERSION.to_string(),
+                    }),
+                });
+
+                let mut client = client.read().await.clone();
+
+                if timeout(rpc_timeout, client.ping(ping_req)).await.is_ok() {
+                    rpc_timeout = INITIAL_TIMEOUT;
+
+                    debug!("sent ping message");
+
+                    continue 'outer;
+                } else {
+                    rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+                }
+            }
+
+            // ping failed 3 times, reset rpc timeout and notify to reconnect,
+            // wait for next ping round
+            rpc_timeout = INITIAL_TIMEOUT;
+
+            failed_notify.notify();
+        }
+    }
 }
 
 impl FuseFilesystem for Filesystem {
@@ -206,12 +327,12 @@ impl FuseFilesystem for Filesystem {
             for _ in 0..3 {
                 let req = TonicRequest::new(RegisterRequest {});
 
-                return match self.rpc_client.register(req).await {
+                return match self.client_kind.get_client().await.register(req).await {
                     Err(err) => {
                         if code_can_retry(err.code()) {
-                            task::sleep(Duration::from_secs(1)).await;
-
                             warn!("register failed {}", err);
+
+                            task::sleep(Duration::from_secs(1)).await;
 
                             continue;
                         }
@@ -238,26 +359,29 @@ impl FuseFilesystem for Filesystem {
                             .await;
 
                         // uds client doesn't need send ping
-                        if let ClientKind::Rpc = self.client_kind {
-                            let mut client = self.rpc_client.clone();
+                        if let ClientKind::Rpc(client, uri, tls_cfg) = &self.client_kind {
+                            let client = client.clone();
 
-                            task::spawn(async move {
-                                loop {
-                                    task::sleep(Duration::from_secs(60)).await;
+                            let failed_notify =
+                                self.failed_notify.clone().expect("not None in rpc mode");
 
-                                    let ping_req = TonicRequest::new(PingRequest {
-                                        header: Some(Header {
-                                            uuid: uuid.to_hyphenated().to_string(),
-                                            version: VERSION.to_string(),
-                                        }),
-                                    });
+                            let uri = uri.clone();
+                            let tls_cfg = tls_cfg.clone();
+                            let handle = self.tokio_handle.take().expect("not None in rpc mode");
 
-                                    // ignore error because we should let user unmount filesystem
-                                    let _ = client.ping(ping_req).await;
+                            task::spawn(Self::ping_loop(
+                                client.clone(),
+                                uuid,
+                                failed_notify.clone(),
+                            ));
 
-                                    debug!("sent ping message");
-                                }
-                            });
+                            task::spawn(Self::reconnect_loop(
+                                client,
+                                uri,
+                                tls_cfg,
+                                handle,
+                                failed_notify,
+                            ));
                         }
 
                         Ok(())
@@ -267,7 +391,7 @@ impl FuseFilesystem for Filesystem {
 
             error!("register fails more than 3 times");
 
-            Err(libc::EIO)
+            Err(libc::ETIMEDOUT)
         })
     }
 
@@ -303,12 +427,16 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         let uid = req.uid();
         let gid = req.gid();
 
+        let failed_notify = self.failed_notify.clone();
+
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(LookupRequest {
                     head: Some(header.clone()),
@@ -316,7 +444,21 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                let result = match client.lookup(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.lookup(rpc_req)).await {
+                    Err(err) => {
+                        warn!("lookup rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("lookup rpc has error {}", err);
@@ -361,26 +503,48 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("lookup failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify();
+            }
         });
     }
 
     fn getattr(&mut self, req: &Request, inode: u64, reply: ReplyAttr) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         let uid = req.uid();
         let gid = req.gid();
 
+        let failed_notify = self.failed_notify.clone();
+
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(GetAttrRequest {
                     head: Some(header.clone()),
                     inode,
                 });
 
-                let result = match client.get_attr(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.get_attr(rpc_req)).await {
+                    Err(err) => {
+                        warn!("getattr rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("getattr rpc has error {}", err);
@@ -425,7 +589,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("getattr failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify();
+            }
         });
     }
 
@@ -448,12 +616,16 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
 
         let uid = req.uid();
         let gid = req.gid();
 
+        let failed_notify = self.failed_notify.clone();
+
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(SetAttrRequest {
                     head: Some(header.clone()),
@@ -478,7 +650,21 @@ impl FuseFilesystem for Filesystem {
                     }),
                 });
 
-                let result = match client.set_attr(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.set_attr(rpc_req)).await {
+                    Err(err) => {
+                        warn!("setattr rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("setattr rpc has error {}", err);
@@ -525,7 +711,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("setattr failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify();
+            }
         });
     }
 
@@ -541,12 +731,16 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(MkdirRequest {
                     head: Some(header.clone()),
@@ -555,7 +749,21 @@ impl FuseFilesystem for Filesystem {
                     mode,
                 });
 
-                let result = match client.mkdir(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.mkdir(rpc_req)).await {
+                    Err(err) => {
+                        warn!("mkdir rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("mkdir rpc has error {}", err);
@@ -598,9 +806,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("mkdir failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
 
-            return;
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -616,9 +826,13 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(UnlinkRequest {
                     head: Some(header.clone()),
@@ -626,7 +840,21 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                match client.unlink(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.unlink(rpc_req)).await {
+                    Err(err) => {
+                        warn!("unlink rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("unlink rpc has error {}", err);
@@ -655,7 +883,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("unlink failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -671,9 +903,13 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(RmDirRequest {
                     head: Some(header.clone()),
@@ -681,7 +917,21 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                match client.rm_dir(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.rm_dir(rpc_req)).await {
+                    Err(err) => {
+                        warn!("rmdir rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("rmdir rpc has error {}", err);
@@ -710,7 +960,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("rmdir failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -743,9 +997,13 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(RenameRequest {
                     head: Some(header.clone()),
@@ -755,7 +1013,21 @@ impl FuseFilesystem for Filesystem {
                     new_name: new_name.to_string(),
                 });
 
-                match client.rename(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.rename(rpc_req)).await {
+                    Err(err) => {
+                        warn!("rename rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("rename rpc has error {}", err);
@@ -784,18 +1056,26 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("rename failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
     fn open(&mut self, _req: &Request, inode: u64, flags: u32, reply: ReplyOpen) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         debug!("client open inode {} flags {}", inode, flags);
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(OpenFileRequest {
                     head: Some(header.clone()),
@@ -803,7 +1083,21 @@ impl FuseFilesystem for Filesystem {
                     flags,
                 });
 
-                let result = match client.open_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.open_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("open file rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("open rpc has error {}", err);
@@ -841,7 +1135,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("open failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            };
         });
     }
 
@@ -856,9 +1154,13 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(ReadFileRequest {
                     head: Some(header.clone()),
@@ -867,7 +1169,21 @@ impl FuseFilesystem for Filesystem {
                     size: size as u64,
                 });
 
-                let result = match client.read_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.read_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("read_file rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("read_file rpc has error {}", err);
@@ -905,7 +1221,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("read_file failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -921,11 +1241,15 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         let data = data.to_vec();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(WriteFileRequest {
                     head: Some(header.clone()),
@@ -934,7 +1258,21 @@ impl FuseFilesystem for Filesystem {
                     data: data.clone(),
                 });
 
-                let result = match client.write_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.write_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("write file rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("write_file rpc has error {}", err);
@@ -972,23 +1310,45 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("write_file failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
     fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(FlushRequest {
                     head: Some(header.clone()),
                     file_handle_id: fh,
                 });
 
-                match client.flush(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.flush(rpc_req)).await {
+                    Err(err) => {
+                        warn!("flush rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("flush rpc has error {}", err);
@@ -1017,7 +1377,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("flush failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -1033,16 +1397,34 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(CloseFileRequest {
                     head: Some(header.clone()),
                     file_handle_id: fh,
                 });
 
-                match client.close_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.close_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("close file rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("close_file rpc has error {}", err);
@@ -1071,23 +1453,45 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("close_file failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
     fn fsync(&mut self, _req: &Request, _inode: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(SyncFileRequest {
                     head: Some(header.clone()),
                     file_handle_id: fh,
                 });
 
-                match client.sync_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.sync_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("sync file rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("sync_file rpc has error {}", err);
@@ -1116,7 +1520,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("sync_file failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -1132,43 +1540,60 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(ReadDirRequest {
                     head: Some(header.clone()),
                     inode,
                 });
 
-                let dir_entries: Vec<read_dir_response::DirEntry> =
-                    match client.read_dir(rpc_req).await {
-                        Err(err) => {
-                            if code_can_retry(err.code()) {
-                                warn!("read_dir rpc has error {}", err);
+                let mut client = client_kind.get_client().await.clone();
 
-                                task::sleep(Duration::from_secs(1)).await;
+                let result = match timeout(rpc_timeout, client.read_dir(rpc_req)).await {
+                    Err(err) => {
+                        warn!("readdir rpc timeout {}", err);
 
-                                continue;
-                            }
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
 
-                            error!("read_dir rpc has error {}", err);
-                            reply.error(libc::EIO);
+                        continue;
+                    }
 
+                    Ok(result) => result,
+                };
+
+                let dir_entries: Vec<read_dir_response::DirEntry> = match result {
+                    Err(err) => {
+                        if code_can_retry(err.code()) {
+                            warn!("read_dir rpc has error {}", err);
+
+                            task::sleep(Duration::from_secs(1)).await;
+
+                            continue;
+                        }
+
+                        error!("read_dir rpc has error {}", err);
+                        reply.error(libc::EIO);
+
+                        return;
+                    }
+
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
+
+                        if let Some(error) = resp.error {
+                            reply.error(error.errno as c_int);
                             return;
                         }
 
-                        Ok(resp) => {
-                            let resp = resp.into_inner();
-
-                            if let Some(error) = resp.error {
-                                reply.error(error.errno as c_int);
-                                return;
-                            }
-
-                            resp.dir_entries
-                        }
-                    };
+                        resp.dir_entries
+                    }
+                };
 
                 debug!("got readdir result");
 
@@ -1225,7 +1650,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("read_dir failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -1254,12 +1683,16 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         let uid = req.uid();
         let gid = req.gid();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(CreateFileRequest {
                     head: Some(header.clone()),
@@ -1269,7 +1702,21 @@ impl FuseFilesystem for Filesystem {
                     flags,
                 });
 
-                let (fh_id, attr) = match client.create_file(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.create_file(rpc_req)).await {
+                    Err(err) => {
+                        warn!("create file rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let (fh_id, attr) = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("create_file rpc has error {}", err);
@@ -1313,7 +1760,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("create_file failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -1331,16 +1782,34 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(GetLockRequest {
                     head: Some(header.clone()),
                     file_handle_id: fh,
                 });
 
-                let result = match client.get_lock(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.get_lock(rpc_req)).await {
+                    Err(err) => {
+                        warn!("getlk rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                let result = match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("get_lock rpc has error {}", err);
@@ -1393,7 +1862,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("get_lock failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 
@@ -1412,7 +1885,8 @@ impl FuseFilesystem for Filesystem {
     ) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+        let failed_notify = self.failed_notify.clone();
 
         if typ as i32 == libc::F_UNLCK {
             task::spawn(async move {
@@ -1422,6 +1896,8 @@ impl FuseFilesystem for Filesystem {
                         file_handle_id: fh,
                         block: false,
                     });
+
+                    let mut client = client_kind.get_client().await.clone();
 
                     match client.release_lock(rpc_req).await {
                         Err(err) => {
@@ -1452,7 +1928,11 @@ impl FuseFilesystem for Filesystem {
                 }
 
                 error!("release_lock failed more than 3 times");
-                reply.error(libc::EIO);
+                reply.error(libc::ETIMEDOUT);
+
+                if let Some(failed_notify) = &failed_notify {
+                    failed_notify.notify();
+                }
             });
 
             return;
@@ -1481,6 +1961,8 @@ impl FuseFilesystem for Filesystem {
                     lock_kind: lock_kind.into(),
                     block: sleep,
                 });
+
+                let mut client = client_kind.get_client().await.clone();
 
                 match client.set_lock(rpc_req).await {
                     Err(err) => {
@@ -1516,25 +1998,47 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("set_lock failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify();
+            }
         });
     }
 
     fn interrupt(&mut self, _req: &Request, unique: u64, reply: ReplyEmpty) {
         let header = self.get_rpc_header();
 
-        let mut client = self.rpc_client.clone();
+        let client_kind = self.client_kind.clone();
+
+        let failed_notify = self.failed_notify.clone();
 
         debug!("interrupt unique {}", unique);
 
         task::spawn(async move {
+            let mut rpc_timeout = INITIAL_TIMEOUT;
+
             for _ in 0..3 {
                 let rpc_req = TonicRequest::new(InterruptRequest {
                     head: Some(header.clone()),
                     unique,
                 });
 
-                match client.interrupt(rpc_req).await {
+                let mut client = client_kind.get_client().await.clone();
+
+                let result = match timeout(rpc_timeout, client.interrupt(rpc_req)).await {
+                    Err(err) => {
+                        warn!("interrupt rpc timeout {}", err);
+
+                        rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                        continue;
+                    }
+
+                    Ok(result) => result,
+                };
+
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("interrupt rpc has error {}", err);
@@ -1563,7 +2067,11 @@ impl FuseFilesystem for Filesystem {
             }
 
             error!("interrupt failed more than 3 times");
-            reply.error(libc::EIO);
+            reply.error(libc::ETIMEDOUT);
+
+            if let Some(failed_notify) = &failed_notify {
+                failed_notify.notify()
+            }
         });
     }
 }

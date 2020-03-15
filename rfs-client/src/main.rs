@@ -1,8 +1,8 @@
 use anyhow::Result;
 
-use rfs_client::{enter_tokio, run};
+use rfs_client::{enter_tokio, get_tokio_handle, run};
 
 #[async_std::main]
 async fn main() -> Result<()> {
-    enter_tokio(Box::pin(run())).await
+    enter_tokio(Box::pin(run(get_tokio_handle()))).await
 }
