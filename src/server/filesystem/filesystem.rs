@@ -119,25 +119,28 @@ impl Filesystem {
 
     //#[inline]
     pub async fn get_attr(&self, inode: Inode) -> Result<FileAttr> {
-        self.inode_map
-            .read()
-            .await
-            .get(&inode)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .get_attr()
-            .await
-    }
-
-    //#[inline]
-    pub async fn get_name(&self, inode: Inode) -> Result<OsString> {
-        Ok(self
+        let entry = self
             .inode_map
             .read()
             .await
             .get(&inode)
             .ok_or(Errno::from(libc::ENOENT))?
-            .get_name()
-            .await)
+            .clone();
+
+        entry.get_attr().await
+    }
+
+    //#[inline]
+    pub async fn get_name(&self, inode: Inode) -> Result<OsString> {
+        let entry = self
+            .inode_map
+            .read()
+            .await
+            .get(&inode)
+            .ok_or(Errno::from(libc::ENOENT))?
+            .clone();
+
+        Ok(entry.get_name().await)
     }
 
     pub async fn set_attr(&self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
@@ -187,11 +190,11 @@ impl Filesystem {
 
         if let Entry::Dir(dir) = entry {
             dir.remove_entry(OsStr::new(&name), is_dir).await?;
-        } else {
-            return Err(Errno::from(libc::ENOTDIR));
-        }
 
-        Ok(())
+            Ok(())
+        } else {
+            Err(Errno::from(libc::ENOTDIR))
+        }
     }
 
     pub async fn rename(
