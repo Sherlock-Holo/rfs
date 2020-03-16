@@ -10,19 +10,10 @@ use super::file::File;
 use super::inode::Inode;
 use super::SetAttr;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Entry {
     Dir(Arc<Dir>),
     File(Arc<File>),
-}
-
-impl Clone for Entry {
-    fn clone(&self) -> Self {
-        match self {
-            Entry::Dir(dir) => Entry::Dir(dir.clone()),
-            Entry::File(file) => Entry::File(file.clone()),
-        }
-    }
 }
 
 impl Entry {

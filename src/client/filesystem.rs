@@ -395,26 +395,6 @@ impl FuseFilesystem for Filesystem {
         })
     }
 
-    /*fn destroy(&mut self, _req: &Request) {
-        let uuid = self
-            .uuid
-            .as_ref()
-            .expect("uuid should initialize")
-            .to_string();
-
-        task::block_on(async {
-            let req = TonicRequest::new(LogoutRequest { uuid });
-
-            info!("sending logout request");
-
-            if let Err(err) = self.rpc_client.logout(req).await {
-                error!("logout failed {}", err)
-            }
-
-            info!("logout success")
-        })
-    }*/
-
     fn lookup(&mut self, req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = match name.to_str() {
             None => {

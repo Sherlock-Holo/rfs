@@ -15,7 +15,8 @@ use async_std::path::{Path, PathBuf};
 use async_std::stream;
 use async_std::sync::RwLock;
 use fuse::{FileAttr, FileType};
-use futures_util::stream::StreamExt;
+use futures_util::future::try_join_all;
+use futures_util::stream::{FuturesOrdered, StreamExt};
 use log::debug;
 
 use crate::errno::Errno;
@@ -163,11 +164,15 @@ impl Dir {
             (guard.parent, FileType::Directory, OsString::from("..")),
         ]);
 
-        let children =
-            stream::from_iter(children_map.iter()).filter_map(|(name, child)| async move {
-                match child.get_attr().await {
-                    Err(_err) => None, // ignore error child
-                    Ok(attr) => Some((attr.ino, attr.kind, name.to_os_string())),
+        let children = children_map
+            .iter()
+            .map(|(name, child)| async move { (name, child.get_attr().await) })
+            .collect::<FuturesOrdered<_>>()
+            .filter_map(|(name, result)| async move {
+                if let Ok(attr) = result {
+                    Some((attr.ino, attr.kind, name.to_os_string()))
+                } else {
+                    None
                 }
             });
 
@@ -458,47 +463,57 @@ impl Dir {
 
         debug!("children map not init");
 
-        let mut children_map = BTreeMap::new();
-
         let mut dir_entries = fs::read_dir(&guard.real_path).await?;
 
-        let parent_path = PathBuf::from(guard.real_path.clone());
-        let inode_map = guard.inode_map.clone();
+        let parent_inode = guard.parent;
+
+        let mut futures = vec![];
 
         while let Some(dir_entry) = dir_entries.next().await {
-            let dir_entry = dir_entry?;
+            let inode_map = guard.inode_map.clone();
+            let parent_path = PathBuf::from(guard.real_path.clone());
+            let inode_gen = guard.inode_gen.clone();
 
-            let dir_entry_real_path =
-                PathBuf::from(&parent_path).apply(|path| path.push(dir_entry.file_name()));
+            futures.push(Box::pin(async move {
+                let dir_entry = match dir_entry {
+                    Err(err) => return Err(Errno::from(err)),
+                    Ok(dir_entry) => dir_entry,
+                };
 
-            let child = if dir_entry.file_type().await?.is_dir() {
-                Entry::from(
-                    Dir::from_exist(
-                        guard.parent,
-                        &dir_entry_real_path,
-                        guard.inode_gen.clone(),
-                        guard.inode_map.clone(),
+                let dir_entry_real_path =
+                    PathBuf::from(&parent_path).apply(|path| path.push(dir_entry.file_name()));
+
+                let child = if dir_entry.file_type().await?.is_dir() {
+                    Entry::from(
+                        Dir::from_exist(parent_inode, &dir_entry_real_path, inode_gen, inode_map)
+                            .await?,
                     )
-                    .await?,
-                )
-            } else {
-                Entry::from(
-                    File::from_exist(
-                        guard.parent,
-                        &dir_entry_real_path,
-                        &guard.inode_gen,
-                        inode_map.write().await.deref_mut(),
+                } else {
+                    Entry::from(
+                        File::from_exist(
+                            parent_inode,
+                            &dir_entry_real_path,
+                            &inode_gen,
+                            inode_map.write().await.deref_mut(),
+                        )
+                        .await?,
                     )
-                    .await?,
-                )
-            };
+                };
 
-            children_map.insert(dir_entry.file_name(), child);
+                Ok((dir_entry.file_name(), child))
+            }))
         }
 
-        for (name, _entry) in children_map.iter() {
+        let mut children_map = BTreeMap::new();
+
+        for (name, entry) in try_join_all(futures).await? {
+            children_map.insert(name, entry);
+        }
+
+        // disable this debug log, it may downgrade performance
+        /*for (name, _entry) in children_map.iter() {
             debug!("name is {:?}", name);
-        }
+        }*/
 
         guard.children.replace(children_map);
 
