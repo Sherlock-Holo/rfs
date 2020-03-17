@@ -344,6 +344,9 @@ impl Dir {
         if old_parent_inode == new_parent_inode {
             let mut guard = self.0.write().await;
 
+            let inode_map = guard.inode_map.clone(); // fix immutable borrow can't stay with mutable borrow
+            let mut inode_map = inode_map.write().await;
+
             let new_real_path =
                 PathBuf::from(guard.real_path.clone()).apply(|path| path.push(new_name));
 
@@ -354,13 +357,25 @@ impl Dir {
                 .as_mut()
                 .expect("children map should be initialized");
 
-            // let entry = children_map.remove(old_name).ok_or(Errno(libc::ENOENT))?;
             if children_map.get(old_name).is_none() {
                 return Err(Errno::from(libc::ENOENT));
             }
 
-            if children_map.get(new_name).is_some() {
-                return Err(Errno::from(libc::EEXIST));
+            // if new_name exists, remove it at first
+            if let Some(exist_entry) = children_map.remove(new_name) {
+                match &exist_entry {
+                    Entry::Dir(dir) => {
+                        let real_path = dir.get_real_path().await;
+                        fs::remove_dir_all(real_path).await?;
+                    }
+
+                    Entry::File(file) => {
+                        let real_path = file.get_real_path().await;
+                        fs::remove_file(real_path).await?;
+                    }
+                }
+
+                inode_map.remove(&exist_entry.get_inode().await);
             }
 
             let entry = children_map.remove(old_name).expect("checked");
@@ -380,6 +395,9 @@ impl Dir {
         let mut old_parent = old_parent.0.write().await;
         let mut new_parent = self.0.write().await;
 
+        let inode_map = new_parent.inode_map.clone();
+        let mut inode_map = inode_map.write().await;
+
         let new_real_path =
             PathBuf::from(new_parent.real_path.clone()).apply(|path| path.push(new_name));
 
@@ -387,20 +405,32 @@ impl Dir {
             .children
             .as_mut()
             .expect("children map should be initialized");
+
         let new_children_map = new_parent
             .children
             .as_mut()
             .expect("children map should be initialized");
 
-        old_children_map
-            .get(old_name)
+        let entry = old_children_map
+            .remove(old_name)
             .ok_or(Errno::from(libc::ENOENT))?;
 
-        if new_children_map.get(new_name).is_some() {
-            return Err(Errno::from(libc::EEXIST));
-        }
+        // if new_name exists, remove it at first
+        if let Some(exist_entry) = new_children_map.remove(new_name) {
+            match &exist_entry {
+                Entry::Dir(dir) => {
+                    let real_path = dir.get_real_path().await;
+                    fs::remove_dir_all(real_path).await?;
+                }
 
-        let entry = old_children_map.remove(old_name).unwrap();
+                Entry::File(file) => {
+                    let real_path = file.get_real_path().await;
+                    fs::remove_file(real_path).await?;
+                }
+            }
+
+            inode_map.remove(&exist_entry.get_inode().await);
+        }
 
         match &entry {
             Entry::Dir(child_dir) => {
