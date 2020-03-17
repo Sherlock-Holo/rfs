@@ -1338,4 +1338,66 @@ mod tests {
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm as u32, perm);
     }
+
+    // issue #8
+    #[async_std::test]
+    async fn rename_to_exist_dir() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+
+        filesystem
+            .create_dir(1, OsStr::new("test"), 0o755)
+            .await
+            .unwrap();
+
+        filesystem
+            .create_dir(1, OsStr::new("exist"), 0o755)
+            .await
+            .unwrap();
+
+        filesystem
+            .rename(1, OsStr::new("test"), 1, OsStr::new("exist"))
+            .await
+            .unwrap();
+
+        let attr = filesystem.lookup(1, OsStr::new("exist")).await.unwrap();
+
+        assert_eq!(attr.ino, 2);
+        assert_eq!(attr.kind, FileType::Directory);
+        assert_eq!(attr.perm, 0o755);
+    }
+
+    // issue #8
+    #[async_std::test]
+    async fn rename_to_exist_file() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+
+        filesystem
+            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
+
+        filesystem
+            .create_file(1, OsStr::new("exist"), 0o644, libc::O_RDWR as u32)
+            .await
+            .unwrap();
+
+        filesystem
+            .rename(1, OsStr::new("test"), 1, OsStr::new("exist"))
+            .await
+            .unwrap();
+
+        let attr = filesystem.lookup(1, OsStr::new("exist")).await.unwrap();
+
+        assert_eq!(attr.ino, 2);
+        assert_eq!(attr.kind, FileType::RegularFile);
+        assert_eq!(attr.perm, 0o644);
+    }
 }
