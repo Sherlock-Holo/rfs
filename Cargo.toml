@@ -1,6 +1,6 @@
 [package]
 name = "rfs"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Sherlock Holo <sherlockya@gmail.com>"]
 edition = "2018"
 license = "MIT"
@@ -34,6 +34,7 @@ anyhow = "1.0"
 async-notify = "0.1"
 tokio = "0.2"
 async-signals = "0.2"
+snap = "1"
 
 [dependencies.fuse]
 branch = "master"

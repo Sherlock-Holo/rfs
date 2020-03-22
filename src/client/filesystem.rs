@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::fmt::{self, Debug};
 use std::io;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -28,6 +28,8 @@ use nix::mount;
 use nix::mount::MntFlags;
 use nix::unistd;
 use serde::export::Formatter;
+use snap::read::FrameDecoder;
+use snap::write::FrameEncoder;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
 use tonic::transport::{Channel, Uri};
@@ -43,6 +45,7 @@ use crate::TokioUnixStream;
 const TTL: Duration = Duration::from_secs(1);
 const INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const MULTIPLIER: f64 = 1.5;
+const MIN_COMPRESS_SIZE: usize = 2048;
 
 #[derive(Clone)]
 enum ClientKind {
@@ -75,6 +78,7 @@ pub struct Filesystem {
     id_sender: Option<Sender<Uuid>>,
     tokio_handle: Option<tokio::runtime::Handle>,
     failed_notify: Option<Notify>,
+    enable_compress: bool,
 }
 
 impl Filesystem {
@@ -100,10 +104,6 @@ impl Filesystem {
 
         let uds_path = uds_path.to_str().expect("invalid unix path").to_string();
 
-        fn string_to_static_str(s: String) -> &'static str {
-            Box::leak(s.into_boxed_str())
-        };
-
         let uds_path: &'static str = string_to_static_str(uds_path);
 
         let channel = Endpoint::try_from("http://[::]:50051")?
@@ -123,6 +123,7 @@ impl Filesystem {
             id_sender: None,
             tokio_handle: None,
             failed_notify: None,
+            enable_compress: false,
         })
     }
 
@@ -149,6 +150,7 @@ impl Filesystem {
             id_sender: None,
             tokio_handle: Some(handle),
             failed_notify: Some(Notify::new()),
+            enable_compress: false,
         })
     }
 
@@ -325,7 +327,9 @@ impl FuseFilesystem for Filesystem {
     fn init(&mut self, _req: &Request) -> Result<(), libc::c_int> {
         task::block_on(async {
             for _ in 0..3 {
-                let req = TonicRequest::new(RegisterRequest {});
+                let req = TonicRequest::new(RegisterRequest {
+                    support_compress: true,
+                });
 
                 return match self.client_kind.get_client().await.register(req).await {
                     Err(err) => {
@@ -351,6 +355,8 @@ impl FuseFilesystem for Filesystem {
                         };
 
                         self.uuid.replace(uuid);
+
+                        self.enable_compress = resp.allow_compress;
 
                         self.id_sender
                             .as_ref()
@@ -1163,7 +1169,7 @@ impl FuseFilesystem for Filesystem {
                     Ok(result) => result,
                 };
 
-                let result = match result {
+                match result {
                     Err(err) => {
                         if code_can_retry(err.code()) {
                             warn!("read_file rpc has error {}", err);
@@ -1180,24 +1186,40 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     Ok(resp) => {
-                        if let Some(result) = resp.into_inner().result {
-                            result
-                        } else {
-                            error!("read_file result is None");
-                            reply.error(libc::EIO);
+                        let result = resp.into_inner();
+
+                        if let Some(err) = result.error {
+                            reply.error(err.errno as i32);
 
                             return;
                         }
+
+                        if result.compressed {
+                            match task::spawn_blocking(move || {
+                                let mut decoder = FrameDecoder::new(result.data.as_slice());
+
+                                let mut data = Vec::with_capacity(result.data.len());
+
+                                if let Err(err) = decoder.read_to_end(&mut data) {
+                                    error!("decompress read data failed {}", err);
+
+                                    return Err(libc::EIO);
+                                }
+
+                                Ok(data)
+                            })
+                            .await
+                            {
+                                Err(err) => reply.error(err),
+                                Ok(data) => reply.data(&data),
+                            }
+                        } else {
+                            reply.data(&result.data);
+                        }
+
+                        return;
                     }
-                };
-
-                match result {
-                    read_file_response::Result::Error(err) => reply.error(err.errno as i32),
-
-                    read_file_response::Result::Data(data) => reply.data(&data),
                 }
-
-                return;
             }
 
             error!("read_file failed more than 3 times");
@@ -1225,7 +1247,35 @@ impl FuseFilesystem for Filesystem {
 
         let failed_notify = self.failed_notify.clone();
 
-        let data = data.to_vec();
+        let (data, compressed) = if self.enable_compress && data.len() > MIN_COMPRESS_SIZE {
+            let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE)); // should I choose a better size?
+
+            if let Err(err) = encoder.write_all(data) {
+                warn!("compress write data failed {}", err);
+
+                (data.to_vec(), false)
+            } else {
+                match encoder.into_inner() {
+                    Err(err) => {
+                        warn!("get compress data failed {}", err);
+
+                        (data.to_vec(), false)
+                    }
+
+                    Ok(compressed_data) => {
+                        // sometimes compressed data is bigger than original data, so we should
+                        // use original data directly
+                        if compressed_data.len() < data.len() {
+                            (compressed_data, true)
+                        } else {
+                            (data.to_vec(), false)
+                        }
+                    }
+                }
+            }
+        } else {
+            (data.to_vec(), false)
+        };
 
         task::spawn(async move {
             let mut rpc_timeout = INITIAL_TIMEOUT;
@@ -1236,6 +1286,7 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                     offset,
                     data: data.clone(),
+                    compressed,
                 });
 
                 let mut client = client_kind.get_client().await.clone();
@@ -2058,4 +2109,8 @@ impl FuseFilesystem for Filesystem {
 
 fn code_can_retry(code: Code) -> bool {
     code == Code::Unavailable || code == Code::DeadlineExceeded
+}
+
+fn string_to_static_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
 }
