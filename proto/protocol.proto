@@ -261,8 +261,8 @@ message InterruptResponse {
 }
 
 message Header {
-    string version = 1; // current version is 0.1
-    string uuid = 2;
+    string version = 1; // current version is 0.2
+    bytes uuid = 2;
 }
 
 message PingRequest {
@@ -277,7 +277,7 @@ message RegisterRequest {
 }
 
 message RegisterResponse {
-    string uuid = 1;
+    bytes uuid = 1;
     bool allow_compress = 2;
 }
 

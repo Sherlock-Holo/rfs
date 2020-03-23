@@ -113,10 +113,11 @@ impl Server {
                 )));
             }
 
-            if let Ok(uuid) = header.uuid.parse() {
+            if let Ok(uuid) = Uuid::from_slice(&header.uuid) {
                 uuid
             } else {
-                warn!("header uuid {} is invalid", header.uuid);
+                debug!("receive invalid uuid");
+
                 return Err(Status::invalid_argument("header uuid is invalid"));
             }
         } else {
@@ -755,7 +756,7 @@ impl Rfs for Server {
         info!("user {} register", uuid);
 
         Ok(Response::new(RegisterResponse {
-            uuid: uuid.to_hyphenated().to_string(),
+            uuid: uuid.as_bytes().to_vec(),
             allow_compress: enable_compress,
         }))
     }

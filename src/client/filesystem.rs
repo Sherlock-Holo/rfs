@@ -236,8 +236,8 @@ impl Filesystem {
         let uuid = self
             .uuid
             .expect("uuid must be initialize")
-            .to_hyphenated()
-            .to_string();
+            .as_bytes()
+            .to_vec();
 
         Header {
             uuid,
@@ -299,7 +299,7 @@ impl Filesystem {
 
                 let ping_req = TonicRequest::new(PingRequest {
                     header: Some(Header {
-                        uuid: uuid.to_hyphenated().to_string(),
+                        uuid: uuid.as_bytes().to_vec(),
                         version: VERSION.to_string(),
                     }),
                 });
@@ -352,9 +352,10 @@ impl FuseFilesystem for Filesystem {
                     Ok(resp) => {
                         let resp = resp.into_inner();
 
-                        let uuid: Uuid = match resp.uuid.parse() {
-                            Err(_) => return Err(libc::EINVAL),
-                            Ok(uuid) => uuid,
+                        let uuid = if let Ok(uuid) = Uuid::from_slice(&resp.uuid) {
+                            uuid
+                        } else {
+                            return Err(libc::EINVAL);
                         };
 
                         self.uuid.replace(uuid);
