@@ -1,7 +1,6 @@
 use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::fmt::{self, Debug};
-use std::io;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -131,7 +130,7 @@ impl Filesystem {
         uri: Uri,
         tls_cfg: ClientTlsConfig,
         handle: tokio::runtime::Handle,
-    ) -> Result<Self, tonic::transport::Error> {
+    ) -> Result<Self> {
         info!("connecting server");
 
         let channel = Channel::builder(uri.clone())
@@ -154,7 +153,7 @@ impl Filesystem {
         })
     }
 
-    pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> io::Result<()> {
+    pub async fn mount<P: AsRef<Path>>(mut self, mount_point: P) -> Result<()> {
         let uid = unistd::getuid();
         let gid = unistd::getgid();
 
@@ -176,7 +175,7 @@ impl Filesystem {
 
         let unmount_point = mount_point.as_ref().to_path_buf();
 
-        task::spawn(async move {
+        let unmount_job = task::spawn(async move {
             stop_signal.next().await;
 
             drop(stop_signal); // in case release signal handle
@@ -225,6 +224,10 @@ impl Filesystem {
 
             info!("logout success")
         }
+
+        unmount_job.await;
+
+        info!("unmount done");
 
         Ok(())
     }

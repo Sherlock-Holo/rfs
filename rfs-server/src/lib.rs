@@ -13,8 +13,6 @@ use futures_util::future::FutureExt;
 use futures_util::{select, StreamExt};
 use log::{debug, info};
 use nix::libc;
-use nix::mount;
-use nix::mount::MntFlags;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use rand::distributions::Alphanumeric;
@@ -75,15 +73,13 @@ pub async fn run() -> Result<()> {
             return Err(format_err!("should receive a SIGHUP signal"));
         }
 
+        drop(initialize_signal);
+
         debug!("receive signal, start uds client");
 
         let filesystem = Filesystem::new_uds(uds_cfg.uds_path).await?;
 
         info!("start uds client");
-
-        defer! {
-            let _ = mount::umount2(&cfg.root_path, MntFlags::MNT_DETACH);
-        }
 
         filesystem.mount(&cfg.root_path).await?;
 
@@ -166,24 +162,36 @@ pub async fn run() -> Result<()> {
         cfg.listen_addr.parse()?,
     );
 
-    let uds_client_job =
-        task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"));
+    let mut uds_client_job =
+        task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"))
+            .fuse();
 
-    let mut stop_signal = Signals::new(vec![libc::SIGINT])?;
+    let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
     select! {
         result = serve.fuse() => {
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
 
             result?;
+
+            uds_client_job.await?;
+
             Ok(())
         },
-        result = uds_client_job.fuse() => {
+
+        result = uds_client_job => {
             result?;
             Ok(())
         }
+
         _ = stop_signal.next().fuse() => {
+            debug!("receive stop signal");
+
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
+
+            uds_client_job.await?;
+
+            debug!("uds client exited");
 
             Ok(())
         }
