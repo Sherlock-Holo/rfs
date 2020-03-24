@@ -44,7 +44,7 @@ const MIN_COMPRESS_SIZE: usize = 2048;
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     filesystem: Arc<Filesystem>,
-    support_compress: bool,
+    compress: bool,
 }
 
 impl Server {
@@ -56,9 +56,9 @@ impl Server {
         client_ca_path: impl AsRef<Path>,
         uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
-        support_compress: bool,
+        compress: bool,
     ) -> anyhow::Result<()> {
-        if support_compress {
+        if compress {
             info!("enable compress support");
         }
 
@@ -85,7 +85,7 @@ impl Server {
         let nds_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs.clone(),
-            support_compress,
+            compress,
         };
 
         let uds_serve = TonicServer::builder()
@@ -95,7 +95,7 @@ impl Server {
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs,
-            support_compress,
+            compress,
         };
 
         let users = rpc_server.users.clone();
@@ -414,7 +414,7 @@ impl Rfs for Server {
         };
 
         let (data, compressed) =
-            if self.support_compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
+            if self.compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
                 let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
 
                 task::spawn_blocking(|| {
@@ -454,7 +454,7 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        if request.compressed && !self.support_compress {
+        if request.compressed && !self.compress {
             return Ok(Response::new(WriteFileResponse {
                 result: Some(pb::write_file_response::Result::Error(
                     Errno::from(libc::EINVAL).into(),
@@ -774,7 +774,7 @@ impl Rfs for Server {
 
         Ok(Response::new(RegisterResponse {
             uuid: uuid.as_bytes().to_vec(),
-            allow_compress: enable_compress && self.support_compress,
+            allow_compress: enable_compress && self.compress,
         }))
     }
 

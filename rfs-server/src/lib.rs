@@ -39,7 +39,7 @@ pub struct Config {
     key_path: PathBuf,
     ca_path: PathBuf,
     debug: Option<bool>,
-    support_compress: Option<bool>,
+    compress: Option<bool>,
 }
 
 #[derive(Debug, StructOpt)]
@@ -154,8 +154,8 @@ pub async fn run() -> Result<()> {
         .await
     });
 
-    let support_compress = if let Some(support_compress) = cfg.support_compress {
-        support_compress
+    let compress = if let Some(compress) = cfg.compress {
+        compress
     } else {
         false
     };
@@ -167,7 +167,7 @@ pub async fn run() -> Result<()> {
         cfg.ca_path,
         uds_path,
         cfg.listen_addr.parse()?,
-        support_compress,
+        compress,
     );
 
     let mut uds_client_job =

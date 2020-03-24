@@ -77,7 +77,7 @@ pub struct Filesystem {
     id_sender: Option<Sender<Uuid>>,
     tokio_handle: Option<tokio::runtime::Handle>,
     failed_notify: Option<Notify>,
-    enable_compress: bool,
+    compress: bool,
 }
 
 impl Filesystem {
@@ -122,7 +122,7 @@ impl Filesystem {
             id_sender: None,
             tokio_handle: None,
             failed_notify: None,
-            enable_compress: false,
+            compress: false,
         })
     }
 
@@ -130,9 +130,9 @@ impl Filesystem {
         uri: Uri,
         tls_cfg: ClientTlsConfig,
         handle: tokio::runtime::Handle,
-        enable_compress: bool,
+        compress: bool,
     ) -> Result<Self> {
-        if enable_compress {
+        if compress {
             info!("try to enable compress");
         }
 
@@ -154,7 +154,7 @@ impl Filesystem {
             id_sender: None,
             tokio_handle: Some(handle),
             failed_notify: Some(Notify::new()),
-            enable_compress,
+            compress,
         })
     }
 
@@ -337,7 +337,7 @@ impl FuseFilesystem for Filesystem {
         task::block_on(async {
             for _ in 0..3 {
                 let req = TonicRequest::new(RegisterRequest {
-                    support_compress: self.enable_compress,
+                    support_compress: self.compress,
                 });
 
                 return match self.client_kind.get_client().await.register(req).await {
@@ -367,9 +367,9 @@ impl FuseFilesystem for Filesystem {
                         self.uuid.replace(uuid);
 
                         // in case server report allow_compress when client disable compress
-                        self.enable_compress = self.enable_compress && resp.allow_compress;
+                        self.compress = self.compress && resp.allow_compress;
 
-                        if self.enable_compress {
+                        if self.compress {
                             info!("compress enabled");
                         }
 
@@ -1264,7 +1264,7 @@ impl FuseFilesystem for Filesystem {
 
         let data = data.to_vec();
 
-        let enable_compress = self.enable_compress;
+        let enable_compress = self.compress;
 
         task::spawn(async move {
             let (data, compressed) = task::spawn_blocking(move || {
