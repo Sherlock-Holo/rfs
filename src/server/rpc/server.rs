@@ -44,6 +44,7 @@ const MIN_COMPRESS_SIZE: usize = 2048;
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     filesystem: Arc<Filesystem>,
+    support_compress: bool,
 }
 
 impl Server {
@@ -55,7 +56,12 @@ impl Server {
         client_ca_path: impl AsRef<Path>,
         uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
+        support_compress: bool,
     ) -> anyhow::Result<()> {
+        if support_compress {
+            info!("enable compress support");
+        }
+
         let cert = fs::read(cert_path).await?;
         let key = fs::read(key_path).await?;
         let client_ca = fs::read(client_ca_path).await?;
@@ -79,6 +85,7 @@ impl Server {
         let nds_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs.clone(),
+            support_compress,
         };
 
         let uds_serve = TonicServer::builder()
@@ -88,6 +95,7 @@ impl Server {
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs,
+            support_compress,
         };
 
         let users = rpc_server.users.clone();
@@ -405,30 +413,31 @@ impl Rfs for Server {
             Ok(data) => data,
         };
 
-        let (data, compressed) = if user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
-            let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
+        let (data, compressed) =
+            if self.support_compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
+                let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
 
-            task::spawn_blocking(|| {
-                if let Err(err) = encoder.write_all(&data) {
-                    warn!("compress read data failed {}", err);
-
-                    return (data, false);
-                }
-
-                match encoder.into_inner() {
-                    Err(err) => {
-                        warn!("get compressed read data failed {}", err);
+                task::spawn_blocking(|| {
+                    if let Err(err) = encoder.write_all(&data) {
+                        warn!("compress read data failed {}", err);
 
                         return (data, false);
                     }
 
-                    Ok(data) => (data, true),
-                }
-            })
-            .await
-        } else {
-            (data, false)
-        };
+                    match encoder.into_inner() {
+                        Err(err) => {
+                            warn!("get compressed read data failed {}", err);
+
+                            return (data, false);
+                        }
+
+                        Ok(data) => (data, true),
+                    }
+                })
+                .await
+            } else {
+                (data, false)
+            };
 
         Ok(Response::new(ReadFileResponse {
             error: None,
@@ -444,6 +453,14 @@ impl Rfs for Server {
         let request = request.into_inner();
 
         let user = self.get_user(request.head).await?;
+
+        if request.compressed && !self.support_compress {
+            return Ok(Response::new(WriteFileResponse {
+                result: Some(pb::write_file_response::Result::Error(
+                    Errno::from(libc::EINVAL).into(),
+                )),
+            }));
+        }
 
         let result = if request.compressed {
             let mut decoder = FrameDecoder::new(request.data.as_slice());
@@ -757,7 +774,7 @@ impl Rfs for Server {
 
         Ok(Response::new(RegisterResponse {
             uuid: uuid.as_bytes().to_vec(),
-            allow_compress: enable_compress,
+            allow_compress: enable_compress && self.support_compress,
         }))
     }
 

@@ -130,7 +130,12 @@ impl Filesystem {
         uri: Uri,
         tls_cfg: ClientTlsConfig,
         handle: tokio::runtime::Handle,
+        enable_compress: bool,
     ) -> Result<Self> {
+        if enable_compress {
+            info!("try to enable compress");
+        }
+
         info!("connecting server");
 
         let channel = Channel::builder(uri.clone())
@@ -149,7 +154,7 @@ impl Filesystem {
             id_sender: None,
             tokio_handle: Some(handle),
             failed_notify: Some(Notify::new()),
-            enable_compress: false,
+            enable_compress,
         })
     }
 
@@ -173,9 +178,11 @@ impl Filesystem {
 
         let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
-        let unmount_point = mount_point.as_ref().to_path_buf();
+        let mount_point = mount_point.as_ref();
 
-        let unmount_job = task::spawn(async move {
+        let unmount_point = mount_point.to_path_buf();
+
+        task::spawn(async move {
             stop_signal.next().await;
 
             drop(stop_signal); // in case release signal handle
@@ -225,9 +232,8 @@ impl Filesystem {
             info!("logout success")
         }
 
-        unmount_job.await;
-
-        info!("unmount done");
+        // ensure rfs unmount
+        let _ = mount::umount2(mount_point, MntFlags::MNT_DETACH);
 
         Ok(())
     }
@@ -331,7 +337,7 @@ impl FuseFilesystem for Filesystem {
         task::block_on(async {
             for _ in 0..3 {
                 let req = TonicRequest::new(RegisterRequest {
-                    support_compress: true,
+                    support_compress: self.enable_compress,
                 });
 
                 return match self.client_kind.get_client().await.register(req).await {
@@ -360,7 +366,12 @@ impl FuseFilesystem for Filesystem {
 
                         self.uuid.replace(uuid);
 
-                        self.enable_compress = resp.allow_compress;
+                        // in case server report allow_compress when client disable compress
+                        self.enable_compress = self.enable_compress && resp.allow_compress;
+
+                        if self.enable_compress {
+                            info!("compress enabled");
+                        }
 
                         self.id_sender
                             .as_ref()
@@ -1251,37 +1262,46 @@ impl FuseFilesystem for Filesystem {
 
         let failed_notify = self.failed_notify.clone();
 
-        let (data, compressed) = if self.enable_compress && data.len() > MIN_COMPRESS_SIZE {
-            let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE)); // should I choose a better size?
+        let data = data.to_vec();
 
-            if let Err(err) = encoder.write_all(data) {
-                warn!("compress write data failed {}", err);
-
-                (data.to_vec(), false)
-            } else {
-                match encoder.into_inner() {
-                    Err(err) => {
-                        warn!("get compress data failed {}", err);
-
-                        (data.to_vec(), false)
-                    }
-
-                    Ok(compressed_data) => {
-                        // sometimes compressed data is bigger than original data, so we should
-                        // use original data directly
-                        if compressed_data.len() < data.len() {
-                            (compressed_data, true)
-                        } else {
-                            (data.to_vec(), false)
-                        }
-                    }
-                }
-            }
-        } else {
-            (data.to_vec(), false)
-        };
+        let enable_compress = self.enable_compress;
 
         task::spawn(async move {
+            let (data, compressed) = task::spawn_blocking(move || {
+                if enable_compress && data.len() > MIN_COMPRESS_SIZE {
+                    let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE)); // should I choose a better size?
+
+                    if let Err(err) = encoder.write_all(&data) {
+                        warn!("compress write data failed {}", err);
+
+                        (data.to_vec(), false)
+                    } else {
+                        match encoder.into_inner() {
+                            Err(err) => {
+                                warn!("get compress data failed {}", err);
+
+                                (data.to_vec(), false)
+                            }
+
+                            Ok(compressed_data) => {
+                                // sometimes compressed data is bigger than original data, so we should
+                                // use original data directly
+                                if compressed_data.len() < data.len() {
+                                    (compressed_data, true)
+                                } else {
+                                    debug!("compress is bad");
+
+                                    (data.to_vec(), false)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    (data.to_vec(), false)
+                }
+            })
+            .await;
+
             let mut rpc_timeout = INITIAL_TIMEOUT;
 
             for _ in 0..3 {
