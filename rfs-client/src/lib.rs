@@ -19,6 +19,7 @@ pub struct Config {
     key_path: PathBuf,
     debug_ca_path: Option<PathBuf>,
     debug: Option<bool>,
+    compress: Option<bool>,
 }
 
 #[derive(Debug, StructOpt)]
@@ -63,7 +64,13 @@ pub async fn run(handle: tokio::runtime::Handle) -> Result<()> {
         tls_config = tls_config.ca_certificate(ca);
     }
 
-    let filesystem = Filesystem::new(uri, tls_config, handle).await?;
+    let compress = if let Some(compress) = cfg.compress {
+        compress
+    } else {
+        false
+    };
+
+    let filesystem = Filesystem::new(uri, tls_config, handle, compress).await?;
 
     filesystem.mount(&cfg.mount_path).await?;
 

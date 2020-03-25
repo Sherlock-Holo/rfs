@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,9 @@ use chrono::prelude::*;
 use fuse::FileType;
 use futures_util::stream::{FuturesUnordered, TryStreamExt};
 use futures_util::{try_join, StreamExt};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+use snap::read::FrameDecoder;
+use snap::write::FrameEncoder;
 use tonic::transport::Server as TonicServer;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::Response;
@@ -36,9 +39,12 @@ use super::user::User;
 
 type Result<T> = std::result::Result<T, Status>;
 
+const MIN_COMPRESS_SIZE: usize = 2048;
+
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     filesystem: Arc<Filesystem>,
+    compress: bool,
 }
 
 impl Server {
@@ -50,7 +56,12 @@ impl Server {
         client_ca_path: impl AsRef<Path>,
         uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
+        compress: bool,
     ) -> anyhow::Result<()> {
+        if compress {
+            info!("enable compress support");
+        }
+
         let cert = fs::read(cert_path).await?;
         let key = fs::read(key_path).await?;
         let client_ca = fs::read(client_ca_path).await?;
@@ -74,6 +85,7 @@ impl Server {
         let nds_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs.clone(),
+            compress,
         };
 
         let uds_serve = TonicServer::builder()
@@ -83,6 +95,7 @@ impl Server {
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
             filesystem: fs,
+            compress,
         };
 
         let users = rpc_server.users.clone();
@@ -108,10 +121,11 @@ impl Server {
                 )));
             }
 
-            if let Ok(uuid) = header.uuid.parse() {
+            if let Ok(uuid) = Uuid::from_slice(&header.uuid) {
                 uuid
             } else {
-                warn!("header uuid {} is invalid", header.uuid);
+                debug!("receive invalid uuid");
+
                 return Err(Status::invalid_argument("header uuid is invalid"));
             }
         } else {
@@ -390,15 +404,45 @@ impl Rfs for Server {
         {
             Err(errno) => {
                 return Ok(Response::new(ReadFileResponse {
-                    result: Some(pb::read_file_response::Result::Error(errno.into())),
+                    error: Some(errno.into()),
+                    data: vec![],
+                    compressed: false,
                 }));
             }
 
             Ok(data) => data,
         };
 
+        let (data, compressed) =
+            if self.compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
+                let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
+
+                task::spawn_blocking(|| {
+                    if let Err(err) = encoder.write_all(&data) {
+                        warn!("compress read data failed {}", err);
+
+                        return (data, false);
+                    }
+
+                    match encoder.into_inner() {
+                        Err(err) => {
+                            warn!("get compressed read data failed {}", err);
+
+                            return (data, false);
+                        }
+
+                        Ok(data) => (data, true),
+                    }
+                })
+                .await
+            } else {
+                (data, false)
+            };
+
         Ok(Response::new(ReadFileResponse {
-            result: Some(pb::read_file_response::Result::Data(data)),
+            error: None,
+            data,
+            compressed,
         }))
     }
 
@@ -410,10 +454,37 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        let written = match user
-            .write_file(request.file_handle_id, request.offset, &request.data)
-            .await
-        {
+        if request.compressed && !self.compress {
+            return Ok(Response::new(WriteFileResponse {
+                result: Some(pb::write_file_response::Result::Error(
+                    Errno::from(libc::EINVAL).into(),
+                )),
+            }));
+        }
+
+        let result = if request.compressed {
+            let mut decoder = FrameDecoder::new(request.data.as_slice());
+
+            let mut data = Vec::with_capacity(MIN_COMPRESS_SIZE);
+
+            if let Err(err) = decoder.read_to_end(&mut data) {
+                error!("decompress write data failed {}", err);
+
+                return Ok(Response::new(WriteFileResponse {
+                    result: Some(pb::write_file_response::Result::Error(
+                        Errno::from(libc::EIO).into(),
+                    )),
+                }));
+            }
+
+            user.write_file(request.file_handle_id, request.offset, &data)
+                .await
+        } else {
+            user.write_file(request.file_handle_id, request.offset, &request.data)
+                .await
+        };
+
+        let written = match result {
             Err(errno) => {
                 return Ok(Response::new(WriteFileResponse {
                     result: Some(pb::write_file_response::Result::Error(errno.into())),
@@ -688,19 +759,22 @@ impl Rfs for Server {
 
     async fn register(
         &self,
-        _request: Request<RegisterRequest>,
+        request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>> {
         let uuid = Uuid::new_v4();
+
+        let enable_compress = request.into_inner().support_compress;
 
         self.users
             .write()
             .await
-            .insert(uuid, Arc::new(User::new(uuid)));
+            .insert(uuid, Arc::new(User::new(uuid, enable_compress)));
 
         info!("user {} register", uuid);
 
         Ok(Response::new(RegisterResponse {
-            uuid: uuid.to_hyphenated().to_string(),
+            uuid: uuid.as_bytes().to_vec(),
+            allow_compress: enable_compress && self.compress,
         }))
     }
 

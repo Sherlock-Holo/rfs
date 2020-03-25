@@ -154,10 +154,9 @@ message ReadFileRequest {
 }
 
 message ReadFileResponse {
-    oneof result {
-        bytes data = 1; // if data len is less than size, means EOF
-        Error error = 2;
-    }
+    Error error = 1;
+    bytes data = 2; // if data len is less than size, means EOF
+    bool compressed = 3;
 }
 
 message WriteFileRequest {
@@ -165,6 +164,7 @@ message WriteFileRequest {
     uint64 fileHandleId = 2;
     int64 offset = 3;
     bytes data = 4;
+    bool compressed = 5;
 }
 
 message WriteFileResponse {
@@ -261,8 +261,8 @@ message InterruptResponse {
 }
 
 message Header {
-    string version = 1; // current version is 0.1
-    string uuid = 2;
+    string version = 1; // current version is 0.2
+    bytes uuid = 2;
 }
 
 message PingRequest {
@@ -273,19 +273,13 @@ message PingResponse {
 }
 
 message RegisterRequest {
+    bool support_compress = 1;
 }
 
 message RegisterResponse {
-    string uuid = 1;
+    bytes uuid = 1;
+    bool allow_compress = 2;
 }
-
-/*message LoginRequest {
-    string uuid = 1;
-}
-
-message LoginResponse {
-    bool exist = 1;
-}*/
 
 message LogoutRequest {
     string uuid = 1;
@@ -376,9 +370,6 @@ service Rfs {
 
     rpc Register (RegisterRequest) returns (RegisterResponse) {
     }
-
-    /*rpc Login (LoginRequest) returns (LoginResponse) {
-    }*/
 
     rpc Logout (LogoutRequest) returns (LogoutResponse) {
     }

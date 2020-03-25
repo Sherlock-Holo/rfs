@@ -4,3 +4,4 @@ cert_path: cert.pem
 key_path: key.pem
 debug_ca_path: ca.pem # only use for debug, DO NOT use in production.
 debug: true
+compress: true # enable compress

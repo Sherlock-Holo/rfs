@@ -24,26 +24,32 @@ struct InnerUser {
     lock_table: LockTable,
 }
 
-pub struct User(RwLock<InnerUser>);
+pub struct User {
+    inner: RwLock<InnerUser>,
+    enable_compress: bool,
+}
 
 impl User {
-    pub fn new(uuid: Uuid) -> Self {
-        Self(RwLock::new(InnerUser {
-            uuid,
-            file_handle_map: BTreeMap::new(),
-            last_alive_time: Local::now(),
-            lock_table: Arc::new(Mutex::new(BTreeMap::new())),
-        }))
+    pub fn new(uuid: Uuid, enable_compress: bool) -> Self {
+        Self {
+            inner: RwLock::new(InnerUser {
+                uuid,
+                file_handle_map: BTreeMap::new(),
+                last_alive_time: Local::now(),
+                lock_table: Arc::new(Mutex::new(BTreeMap::new())),
+            }),
+            enable_compress,
+        }
     }
 
     //#[inline]
     pub async fn update_last_alive_time(&self, now: DateTime<Local>) {
-        self.0.write().await.last_alive_time = now;
+        self.inner.write().await.last_alive_time = now;
     }
 
     //#[inline]
     pub async fn add_file_handle(&self, file_handle: FileHandle) {
-        self.0
+        self.inner
             .write()
             .await
             .file_handle_map
@@ -52,7 +58,7 @@ impl User {
 
     pub async fn read_file(&self, fh_id: u64, offset: i64, size: u64) -> Result<Vec<u8>> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -71,7 +77,7 @@ impl User {
 
     pub async fn write_file(&self, fh_id: u64, offset: i64, data: &[u8]) -> Result<usize> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -85,7 +91,7 @@ impl User {
     }
 
     pub async fn close_file(&self, fh_id: u64) -> Result<()> {
-        let mut guard = self.0.write().await;
+        let mut guard = self.inner.write().await;
 
         if let Some(file_handle) = guard.file_handle_map.remove(&fh_id) {
             drop(guard); // release lock as soon as possible
@@ -99,7 +105,7 @@ impl User {
 
     pub async fn sync_file(&self, fh_id: u64) -> Result<()> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -114,7 +120,7 @@ impl User {
 
     pub async fn flush(&self, fh_id: u64) -> Result<()> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -129,7 +135,7 @@ impl User {
 
     /*pub async fn set_file_attr(&self, fh_id: u64, set_attr: SetAttr) -> Result<FileAttr> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -148,7 +154,7 @@ impl User {
         unique: u64,
         share: bool,
     ) -> Result<JoinHandle<Result<bool>>> {
-        let guard = self.0.read().await;
+        let guard = self.inner.read().await;
 
         let lock_table = guard.lock_table.clone();
 
@@ -171,7 +177,7 @@ impl User {
 
     pub async fn try_set_lock(&self, fh_id: u64, share: bool) -> Result<()> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -189,7 +195,7 @@ impl User {
 
     pub async fn release_lock(&self, fh_id: u64) -> Result<()> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -207,7 +213,7 @@ impl User {
         debug!("interrupt unique {} lock", unique);
 
         Ok(self
-            .0
+            .inner
             .read()
             .await
             .lock_table
@@ -221,7 +227,7 @@ impl User {
     //#[inline]
     pub async fn get_lock_kind(&self, fh_id: u64) -> Result<LockKind> {
         let file_handle = self
-            .0
+            .inner
             .read()
             .await
             .file_handle_map
@@ -235,7 +241,7 @@ impl User {
     }
 
     pub async fn is_online(&self, interval: Duration) -> bool {
-        let guard = self.0.read().await;
+        let guard = self.inner.read().await;
 
         match (Local::now() - guard.last_alive_time).to_std() {
             Err(err) => {
@@ -253,6 +259,11 @@ impl User {
     }
 
     pub async fn get_id(&self) -> Uuid {
-        self.0.read().await.uuid
+        self.inner.read().await.uuid
+    }
+
+    #[inline]
+    pub fn support_compress(&self) -> bool {
+        self.enable_compress
     }
 }
