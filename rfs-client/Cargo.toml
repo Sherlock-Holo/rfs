@@ -1,6 +1,6 @@
 [package]
 name = "rfs-client"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Sherlock Holo <sherlockya@gmail.com>"]
 edition = "2018"
 
@@ -17,6 +17,7 @@ log = "0.4"
 tonic = { version = "0.1", features = ["tls"] }
 futures-util = "0.3"
 lazy_static = "1"
+nix = "0.17"
 
 [dependencies.tokio]
 version = "0.2"
