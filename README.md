@@ -65,6 +65,8 @@ debug: true
 Limit by [fuse-rs](https://github.com/zargony/fuse-rs), rfs stills use fuse 3.8. I [fork and modify](https://github.com/Sherlock-Holo/fuse-rs)
 the fuse lib to handle posix lock and unknown operation code. In the future rfs will try to use latest fuse protocol.
 
+Rfs can't run in docker, it may break rfs-server.
+
 ## TODO
 
 use latest fuse protocol.
