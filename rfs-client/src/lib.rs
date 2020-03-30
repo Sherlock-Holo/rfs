@@ -16,10 +16,10 @@ use structopt::StructOpt;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
 use rfs::{log_init, Filesystem};
-pub use tokio_runtime::{enter_tokio, get_tokio_handle};
+use tokio_runtime::{enter_tokio, get_tokio_handle};
 
 #[derive(Debug, Deserialize)]
-pub struct Config {
+struct Config {
     mount_path: PathBuf,
     server_addr: String,
     cert_path: PathBuf,
@@ -31,20 +31,20 @@ pub struct Config {
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "mount a rfs filesystem")]
-pub struct Argument {
+struct Argument {
     #[structopt(short, long, default_value = "/etc/rfs/client.yml", parse(from_os_str))]
-    pub config: PathBuf,
+    config: PathBuf,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum RunMode {
+enum RunMode {
     Foreground,
     Background,
 }
 
 #[derive(Debug, StructOpt)]
 #[structopt(about = "mount a rfs filesystem")]
-pub struct MountArgument {
+struct MountArgument {
     #[structopt(help = "server addr, such as https://example.com")]
     server_addr: String,
 
@@ -139,7 +139,7 @@ pub fn run() -> Result<()> {
     task::block_on(enter_tokio(Box::pin(inner_run(cfg))))
 }
 
-pub async fn inner_run(cfg: Config) -> Result<()> {
+async fn inner_run(cfg: Config) -> Result<()> {
     let debug = if let Some(debug) = cfg.debug {
         debug
     } else {
