@@ -14,28 +14,31 @@ use log::{debug, error};
 use crate::server::filesystem::SetAttr;
 use crate::Result;
 
-use super::entry::Entry;
+use super::entry::EntryPath;
 use super::file_handle::{FileHandle, FileHandleKind};
-use super::inode::{Inode, InodeMap};
+use super::inode::{Inode, InodeToPath};
+use crate::server::filesystem::dir::Dir;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 #[derive(Debug)]
 struct InnerFile {
     inode: Inode,
     name: OsString,
     real_path: OsString,
-    parent: Inode,
+    parent: Dir,
 }
 
-#[derive(Debug)]
-pub struct File(RwLock<InnerFile>);
+#[derive(Debug, Clone)]
+pub struct File(Rc<RefCell<InnerFile>>);
 
 impl File {
     pub async fn from_exist<P: AsRef<Path>>(
-        parent: Inode,
+        parent: &Dir,
         real_path: P,
         inode_gen: &AtomicU64,
-        inode_map: &mut InodeMap,
-    ) -> Result<Arc<Self>> {
+        inode_map: &mut InodeToPath,
+    ) -> Result<Self> {
         fs::metadata(&real_path).await?;
 
         let real_path = real_path.as_ref().to_path_buf();
@@ -44,17 +47,17 @@ impl File {
 
         let inode = inode_gen.fetch_add(1, Ordering::Relaxed);
 
-        let file = Arc::new(File(RwLock::new(InnerFile {
+        let file = File(Rc::new(RefCell::new(InnerFile {
             inode,
             name: real_path
                 .file_name()
                 .expect("name should be valid")
                 .to_os_string(),
             real_path: real_path.as_os_str().to_os_string(),
-            parent,
+            parent:parent.clone(),
         })));
 
-        inode_map.insert(inode, Entry::from(&file));
+        inode_map.insert(inode, Path::from(&file));
 
         Ok(file)
     }
@@ -187,7 +190,7 @@ impl File {
 
     #[inline]
     pub async fn get_inode(&self) -> Inode {
-        self.0.read().await.inode
+        self.0.borrow().inode
     }
 
     //#[inline]

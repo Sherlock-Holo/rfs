@@ -1,33 +1,43 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_std::path::Path;
-use async_std::sync::RwLock;
+use async_std::fs;
+use async_std::fs::{DirBuilder, Metadata};
+use async_std::path::{Path, PathBuf};
+use async_std::sync::{Receiver, RwLock};
 use fuse::{FileAttr, FileType};
-use log::{debug, info};
+use log::{debug, error, info};
 use nix::{sched, unistd};
 
+use crate::{Apply, Result};
 use crate::errno::Errno;
 use crate::path::PathClean;
-use crate::Result;
+use crate::server::filesystem::attr::metadata_to_file_attr;
+use crate::server::filesystem::inode::PathToInode;
 
 use super::attr::SetAttr;
 use super::dir::Dir;
-use super::entry::Entry;
+use super::entry::EntryPath;
 use super::file_handle::FileHandle;
-use super::inode::{Inode, InodeMap};
+use super::inode::{Inode, InodeToPath};
+use super::Request;
 
 pub struct Filesystem {
-    inode_map: Arc<RwLock<InodeMap>>,
-    file_handle_id_gen: Arc<AtomicU64>,
+    inode_to_path: InodeToPath,
+    path_to_inode: PathToInode,
+    inode_gen: AtomicU64,
+    file_handle_id_gen: AtomicU64,
+    receiver: Receiver<Request>,
 }
 
 impl Filesystem {
     /// new a Filesystem will enter a new mount namespace, then chroot to root path
     /// ensure won't be affected by uds client fuse mount
-    pub async fn new<P: AsRef<Path>>(root: P) -> Result<Self> {
+    pub async fn new<P: AsRef<Path>>(root: P, receiver: Receiver<Request>) -> Result<Self> {
         info!("root is {:?}", root.as_ref());
 
         // pivot_root mode, butI think we don't need use pivot_root, chroot is safe enough
@@ -72,14 +82,20 @@ impl Filesystem {
 
         Self::chroot(&root).await?;
 
-        let inode_map = Arc::new(RwLock::new(InodeMap::new()));
-        let inode_gen = Arc::new(AtomicU64::new(1));
+        let mut inode_to_path = InodeToPath::new();
+        let mut path_to_inode = PathToInode::new();
 
-        let _root = Dir::from_exist(1, "/", inode_gen.clone(), inode_map.clone()).await?;
+        let root_path = PathBuf::from("/");
+
+        inode_to_path.insert(1, EntryPath::Dir(root_path.clone()));
+        path_to_inode.insert(root_path, 1);
 
         Ok(Self {
-            inode_map,
-            file_handle_id_gen: Arc::new(AtomicU64::new(1)),
+            inode_to_path,
+            path_to_inode,
+            inode_gen: AtomicU64::new(2),
+            file_handle_id_gen: AtomicU64::new(1),
+            receiver,
         })
     }
 
@@ -97,108 +113,381 @@ impl Filesystem {
         Ok(())
     }
 
-    pub async fn lookup(&self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
-        let name = name.clean()?;
+    async fn run(&mut self) {
+        while let Some(request) = self.receiver.recv().await {
+            match request {
+                Request::Lookup {
+                    parent,
+                    name,
+                    response,
+                } => {
+                    let result = self.lookup(parent, &name).await;
+                    response.send(result).await;
+                }
 
-        debug!("lookup name {:?} in parent {}", name, parent);
-
-        let entry = self
-            .inode_map
-            .read()
-            .await
-            .get(&parent)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
-
-        if let Entry::Dir(dir) = entry {
-            dir.lookup(OsStr::new(&name)).await
-        } else {
-            Err(Errno::from(libc::ENOTDIR))
-        }
-    }
-
-    //#[inline]
-    pub async fn get_attr(&self, inode: Inode) -> Result<FileAttr> {
-        let entry = self
-            .inode_map
-            .read()
-            .await
-            .get(&inode)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
-
-        entry.get_attr().await
-    }
-
-    //#[inline]
-    pub async fn get_name(&self, inode: Inode) -> Result<OsString> {
-        let entry = self
-            .inode_map
-            .read()
-            .await
-            .get(&inode)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
-
-        Ok(entry.get_name().await)
-    }
-
-    pub async fn set_attr(&self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
-        let entry = self
-            .inode_map
-            .read()
-            .await
-            .get(&inode)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
-
-        entry.set_attr(set_attr).await
-    }
-
-    pub async fn create_dir(&self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
-        let name = name.clean()?;
-
-        let entry = self
-            .inode_map
-            .read()
-            .await
-            .get(&parent)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
-
-        match entry {
-            Entry::File(_) => Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => {
-                dir.create_dir(OsStr::new(&name), mode)
-                    .await?
-                    .get_attr()
-                    .await
+                Request::GetAttr {
+                    inode,
+                    response
+                } => {
+                    let result = self.get_attr(inode).await;
+                    response.send(result).await;
+                }
             }
         }
     }
 
-    pub async fn remove_entry(&self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
+    pub async fn lookup(&mut self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
         let name = name.clean()?;
 
-        let entry = self
-            .inode_map
-            .read()
-            .await
-            .get(&parent)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
+        debug!("lookup name {:?} in parent {}", name, parent);
 
-        if let Entry::Dir(dir) = entry {
-            dir.remove_entry(OsStr::new(&name), is_dir).await?;
+        let entry_path = match self.inode_to_path.get(&parent) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
 
-            Ok(())
+        let path = entry_path.get_path();
+
+        let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&parent);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        if metadata.is_file() {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        let lookup_path = path.to_path_buf()
+            .apply(|path| path.push(name));
+
+        let metadata = match fs::metadata(&lookup_path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                if let Some(inode) = self.path_to_inode.remove(&lookup_path) {
+                    self.inode_to_path.remove(&inode);
+                }
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        let inode = match self.path_to_inode.get(&lookup_path) {
+            None => {
+                let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+                self.path_to_inode.insert(lookup_path.clone(), new_inode);
+
+                let entry_path = if metadata.is_file() {
+                    EntryPath::File(lookup_path)
+                } else {
+                    EntryPath::Dir(lookup_path)
+                };
+
+                self.inode_to_path.insert(new_inode, entry_path);
+
+                new_inode
+            }
+
+            Some(&inode) => {
+                let entry_path = self.inode_to_path.get(&inode).expect("checked");
+
+                if self.check_and_fix_inode_and_path(inode, entry_path, lookup_path, &metadata) {
+                    return Err(libc::ENOENT.into());
+                }
+
+                inode
+            }
+        };
+
+        metadata_to_file_attr(inode, metadata)
+    }
+
+    pub async fn get_attr(&mut self, inode: Inode) -> Result<FileAttr> {
+        let entry_path = match self.inode_to_path.get(&inode) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+            return Err(libc::ENOENT.into());
+        }
+
+        metadata_to_file_attr(inode, metadata)
+    }
+
+    pub async fn get_name(&mut self, inode: Inode) -> Result<OsString> {
+        let entry_path = match self.inode_to_path.get(&inode) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+            return Err(libc::ENOENT.into());
+        }
+
+        if let Some(filename) = path.file_name() {
+            Ok(filename.to_os_string())
+        } else if path == Path::new("/") {
+            Ok(OsString::from("/"))
         } else {
-            Err(Errno::from(libc::ENOTDIR))
+            Err(libc::EIO.into())
         }
     }
 
+    pub async fn set_attr(&mut self, mut inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
+        let entry_path = match self.inode_to_path.get(&inode) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+            return Err(libc::ENOENT.into());
+        }
+
+        if let Some(mode) = set_attr.mode {
+            let mut permissions = metadata.permissions();
+
+            permissions.set_mode(mode);
+
+            fs::set_permissions(path, permissions).await?;
+        }
+
+        if let Some(size) = set_attr.size {
+            if entry_path.is_file() {
+                let truncate = size == 0;
+
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .truncate(truncate)
+                    .open(path)
+                    .await?;
+
+                if size > 0 {
+                    if let Err(err) = file.set_len(size).await {
+                        error!("set inode {} size {} failed", guard.inode, size);
+
+                        return Err(err.into());
+                    }
+
+                    debug!("set inode {} size success", guard.inode);
+                }
+            } else {
+                return Err(libc::EISDIR.into());
+            }
+        }
+
+        self.get_attr(inode).await
+    }
+
+    pub async fn create_dir(&mut self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
+        let name = name.clean()?;
+
+        debug!("create dir name {:?} in parent {}", name, parent);
+
+        let entry_path = match self.inode_to_path.get(&parent) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&parent);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        if metadata.is_file() {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        let create_path = path.to_path_buf()
+            .apply(|path| path.push(name));
+
+        match fs::metadata(&create_path).await {
+            Ok(metadata) => {
+                if let Some(&inode) = self.path_to_inode.get(&create_path) {
+                    let entry_path = self.inode_to_path.get(&inode).expect("checked");
+
+                    self.check_and_fix_inode_and_path(inode, entry_path, &create_path, &metadata);
+                } else {
+                    let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+                    let entry_path = if metadata.is_file() {
+                        EntryPath::File(create_path.clone())
+                    } else {
+                        EntryPath::Dir(create_path.clone())
+                    };
+
+                    self.inode_to_path.insert(new_inode, entry_path);
+                    self.path_to_inode.insert(create_path, new_inode);
+                }
+
+                return Err(libc::EEXIST.into());
+            }
+
+            Err(err) => if err.kind() != ErrorKind::NotFound {
+                return Err(err.into());
+            }
+        }
+
+        DirBuilder::new().mode(mode).create(&create_path).await?;
+
+        let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+        let entry_path = EntryPath::Dir(create_path.clone());
+
+        self.inode_to_path.insert(new_inode, entry_path);
+        self.path_to_inode.insert(create_path.clone(), new_inode);
+
+        let metadata = fs::metadata(create_path).await?;
+
+        metadata_to_file_attr(new_inode, metadata)
+    }
+
+    pub async fn remove_entry(&mut self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
+        let name = name.clean()?;
+
+        debug!("remove name {:?} from parent {}, is dir {}", name, parent, is_dir);
+
+        let entry_path = match self.inode_to_path.get(&parent) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&parent);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        if metadata.is_file() {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        let remove_path = path.to_path_buf()
+            .apply(|path| path.push(name));
+
+        let metadata = match fs::metadata(&remove_path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                if let Some(inode) = self.path_to_inode.remove(&remove_path) {
+                    self.inode_to_path.remove(&inode);
+                }
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if metadata.is_file() && is_dir {
+            return Err(libc::ENOTDIR.into());
+        } else if metadata.is_dir() && !is_dir {
+            return Err(libc::EISDIR.into());
+        }
+
+        if metadata.is_file() {
+            fs::remove_file(&remove_path).await?;
+        } else {
+            fs::remove_dir_all(&remove_path).await?;
+        }
+
+        if let Some(inode) = self.path_to_inode.remove(&remove_path) {
+            self.inode_to_path.remove(&inode);
+        }
+
+        Ok(())
+    }
+
     pub async fn rename(
-        &self,
+        &mut self,
         old_parent: Inode,
         old_name: &OsStr,
         new_parent: Inode,
@@ -207,29 +496,138 @@ impl Filesystem {
         let old_name = old_name.clean()?;
         let new_name = new_name.clean()?;
 
-        let guard = self.inode_map.read().await;
+        // op means old parent
+        // oc means old child
+        // np means new parent
+        // nc means new child
 
-        let old_parent = match guard.get(&old_parent).ok_or(Errno::from(libc::ENOENT))? {
-            Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => dir.clone(),
+        debug!("rename {:?} from {} to {} as {:?}", old_name, old_parent, new_parent, new_name);
+
+        let op_entry_path = match self.inode_to_path.get(&old_parent) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
         };
 
-        let new_parent = match guard.get(&new_parent).ok_or(Errno::from(libc::ENOENT))? {
-            Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => dir.clone(),
+        let op_path = op_entry_path.get_path();
+
+        let op_metadata = match fs::metadata(op_path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&old_parent);
+                self.path_to_inode.remove(op_path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
         };
 
-        // release inode map lock
-        drop(guard);
+        if self.check_and_fix_inode_and_path(old_parent,op_entry_path,op_path, &op_metadata) {
+            return Err(libc::ENOENT.into())
+        }
 
-        new_parent
-            .add_child_from(&old_parent, OsStr::new(&old_name), OsStr::new(&new_name))
-            .await
+        if op_metadata.is_file() {
+            return Err(libc::ENOTDIR.into())
+        }
+
+        let oc_path = op_path.to_path_buf()
+            .apply(|path| path.push(old_name));
+
+        let oc_metadata = match fs::metadata(&oc_name).await {
+            Err(err) => return if err.kind() == ErrorKind::NotFound {
+                if let Some(inode) = self.path_to_inode.remove(&oc_name) {
+                    self.inode_to_path.remove(&inode);
+                }
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        /*if let Err(err) = fs::metadata(&oc_path).await {
+            return if err.kind() == ErrorKind::NotFound {
+                if let Some(inode) = self.path_to_inode.remove(&oc_path) {
+                    self.inode_to_path.remove(&inode);
+                }
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            }
+        }*/
+
+        let np_entry_path = match self.inode_to_path.get(&new_parent) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let np_path = np_entry_path.get_path();
+
+        let np_metadata = match fs::metadata(np_path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&new_parent);
+                self.path_to_inode.remove(np_path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };
+
+        if self.check_and_fix_inode_and_path(new_parent, np_entry_path, np_path, &np_metadata) {
+            return Err(libc::ENOENT.into())
+        }
+
+        if np_metadata.is_file() {
+            return Err(libc::ENOTDIR.into())
+        }
+
+        let nc_path = np_path.to_path_buf()
+            .apply(|path| path.push(new_name));
+
+        if let Err(err) = fs::metadata(&nc_path).await {
+            if err.kind()!=ErrorKind::NotFound {
+                return Err(err.into())
+            }
+        } else {
+            return Err(libc::EEXIST.into())
+        }
+
+        fs::rename(&oc_path, &nc_path).await?;
+
+        // no matter exist or not, remove old child inode and path record
+        if let Some(inode) = self.path_to_inode.remove(&oc_path) {
+            self.inode_to_path.remove(&inode);
+        }
+
+        // no matter exist or not, remove new child inode and path record
+        if let Some(inode) = self.path_to_inode.remove(&nc_path) {
+            self.inode_to_path.remove(&inode);
+        }
+
+        let nc_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+        let nc_entry_path = if oc_metadata.is_file() {
+            EntryPath::File(nc_path.clone())
+        } else {
+            EntryPath::Dir(nc_path.clone())
+        };
+
+        self.inode_to_path.insert(nc_inode, nc_entry_path);
+        self.path_to_inode.insert(nc_path, nc_inode);
+
+        Ok(())
     }
 
     pub async fn open(&self, inode: Inode, flags: u32) -> Result<FileHandle> {
-        if let Entry::File(file) = self
-            .inode_map
+        if let Path::File(file) = self
+            .inode_to_path
             .read()
             .await
             .get(&inode)
@@ -240,7 +638,7 @@ impl Filesystem {
                 self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
                 flags,
             )
-            .await
+                .await
         } else {
             Err(Errno::from(libc::EISDIR))
         }
@@ -252,14 +650,14 @@ impl Filesystem {
         offset: i64,
     ) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
         let entry = self
-            .inode_map
+            .inode_to_path
             .read()
             .await
             .get(&inode)
             .ok_or(Errno::from(libc::ENOENT))?
             .clone();
 
-        if let Entry::Dir(dir) = entry {
+        if let Path::Dir(dir) = entry {
             dir.read_dir(offset).await
         } else {
             Err(Errno::from(libc::ENOTDIR))
@@ -276,7 +674,7 @@ impl Filesystem {
         let name = name.clean()?;
 
         let entry = self
-            .inode_map
+            .inode_to_path
             .read()
             .await
             .get(&parent)
@@ -284,8 +682,8 @@ impl Filesystem {
             .clone();
 
         let dir = match entry {
-            Entry::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Entry::Dir(dir) => dir,
+            Path::File(_) => return Err(Errno::from(libc::ENOTDIR)),
+            Path::Dir(dir) => dir,
         };
 
         let file = dir.create_file(OsStr::new(&name), mode).await?;
@@ -303,8 +701,42 @@ impl Filesystem {
 
         Ok((file_handle, attr))
     }
+
+    /// when inode and path need fix, will return true
+    fn check_and_fix_inode_and_path(&mut self, inode: Inode, entry_path: &EntryPath, path: impl AsRef<Path>, metadata: &Metadata) -> bool {
+        if metadata.is_file() {
+            if let EntryPath::Dir(_) = entry_path {
+                let path = path.as_ref();
+
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+                self.inode_to_path.insert(new_inode, EntryPath::File(path.to_path_buf()));
+                self.path_to_inode.insert(path.to_path_buf(), new_inode);
+
+                return true;
+            }
+        } else if let EntryPath::File(_) = entry_path {
+            let path = path.as_ref();
+
+            self.inode_to_path.remove(&inode);
+            self.path_to_inode.remove(path);
+
+            let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+            self.inode_to_path.insert(new_inode, EntryPath::Dir(path.to_path_buf()));
+            self.path_to_inode.insert(path.to_path_buf(), new_inode);
+
+            return true;
+        }
+
+        false
+    }
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1401,3 +1833,4 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 }
+*/

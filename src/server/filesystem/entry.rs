@@ -1,6 +1,8 @@
+use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::sync::Arc;
 
+use async_std::path::{Path, PathBuf};
 use fuse::FileAttr;
 
 use crate::Result;
@@ -11,12 +13,31 @@ use super::inode::Inode;
 use super::SetAttr;
 
 #[derive(Debug, Clone)]
-pub enum Entry {
-    Dir(Arc<Dir>),
-    File(Arc<File>),
+pub enum EntryPath {
+    Dir(PathBuf),
+    File(PathBuf),
 }
 
-impl Entry {
+impl EntryPath {
+    pub fn get_path(&self) -> &Path {
+        match self {
+            EntryPath::Dir(path) => path,
+            EntryPath::File(path) => path
+        }
+    }
+
+    #[inline]
+    pub fn is_file(&self) -> bool {
+        matches!(*self, EntryPath::File(_))
+    }
+
+    #[inline]
+    pub fn is_dir(&self) -> bool {
+        !self.is_file()
+    }
+}
+
+/*impl Entry {
     pub async fn get_attr(&self) -> Result<FileAttr> {
         match self {
             Entry::Dir(dir) => dir.get_attr().await,
@@ -31,10 +52,10 @@ impl Entry {
         }
     }
 
-    pub async fn get_inode(&self) -> Inode {
+    pub fn get_inode(&self) -> Inode {
         match self {
-            Entry::Dir(dir) => dir.get_inode().await,
-            Entry::File(file) => file.get_inode().await,
+            Entry::Dir(dir) => dir.get_inode(),
+            Entry::File(file) => file.get_inode(),
         }
     }
 
@@ -46,26 +67,26 @@ impl Entry {
     }
 }
 
-impl From<&Arc<Dir>> for Entry {
-    fn from(dir: &Arc<Dir>) -> Self {
+impl From<&Dir> for Entry {
+    fn from(dir: &Dir) -> Self {
         Entry::Dir(dir.clone())
     }
 }
 
-impl From<Arc<Dir>> for Entry {
-    fn from(dir: Arc<Dir>) -> Self {
+impl From<Dir> for Entry {
+    fn from(dir: Dir) -> Self {
         Entry::Dir(dir)
     }
 }
 
-impl From<&Arc<File>> for Entry {
-    fn from(file: &Arc<File>) -> Self {
+impl From<&File> for Entry {
+    fn from(file: &File) -> Self {
         Entry::File(file.clone())
     }
 }
 
-impl From<Arc<File>> for Entry {
-    fn from(file: Arc<File>) -> Self {
+impl From<File> for Entry {
+    fn from(file: File) -> Self {
         Entry::File(file)
     }
-}
+}*/
