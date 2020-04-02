@@ -1,26 +1,27 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_std::fs;
-use async_std::fs::{DirBuilder, Metadata};
+use async_std::fs::{DirBuilder, Metadata, OpenOptions};
 use async_std::path::{Path, PathBuf};
-use async_std::sync::{Receiver, RwLock};
+use async_std::sync::Receiver;
 use fuse::{FileAttr, FileType};
+use futures_util::StreamExt;
 use log::{debug, error, info};
 use nix::{sched, unistd};
 
 use crate::{Apply, Result};
-use crate::errno::Errno;
 use crate::path::PathClean;
 use crate::server::filesystem::attr::metadata_to_file_attr;
+use crate::server::filesystem::file_handle::FileHandleKind;
 use crate::server::filesystem::inode::PathToInode;
 
 use super::attr::SetAttr;
-use super::dir::Dir;
 use super::entry::EntryPath;
 use super::file_handle::FileHandle;
 use super::inode::{Inode, InodeToPath};
@@ -132,6 +133,50 @@ impl Filesystem {
                     let result = self.get_attr(inode).await;
                     response.send(result).await;
                 }
+
+                Request::SetAttr {
+                    inode,
+                    new_attr,
+                    response
+                } => {
+                    let result = self.set_attr(inode, new_attr).await;
+                    response.send(result).await;
+                }
+
+                Request::GetName { inode, response } => {
+                    let result = self.get_name(inode).await;
+                    response.send(result).await;
+                }
+
+                Request::CreateDir { parent, name, mode, response } => {
+                    let result = self.create_dir(parent, &name, mode).await;
+                    response.send(result).await;
+                }
+
+                Request::RemoveEntry { parent, name, is_dir, response } => {
+                    let result = self.remove_entry(parent, &name, is_dir).await;
+                    response.send(result).await;
+                }
+
+                Request::Rename { old_parent, old_name, new_parent, new_name, response } => {
+                    let result = self.rename(old_parent, &old_name, new_parent, &new_name).await;
+                    response.send(result).await;
+                }
+
+                Request::Open { inode, flags, response } => {
+                    let result = self.open(inode, flags).await;
+                    response.send(result).await;
+                }
+
+                Request::ReadDir { inode, offset, response } => {
+                    let result = self.read_dir(inode, offset).await;
+                    response.send(result).await;
+                }
+
+                Request::CreateFile { parent, name, mode, flags, response } => {
+                    let result = self.create_file(parent, &name, mode, flags).await;
+                    response.send(result).await;
+                }
             }
         }
     }
@@ -148,7 +193,7 @@ impl Filesystem {
 
         let path = entry_path.get_path();
 
-        let metadata = match fs::metadata(path).await {
+        /*let metadata = match fs::metadata(path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&parent);
                 self.path_to_inode.remove(path);
@@ -159,10 +204,11 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
         if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
-            return Err(libc::ENOTDIR.into());
+            return Err(libc::ENOENT.into());
         }
 
         if metadata.is_file() {
@@ -225,7 +271,7 @@ impl Filesystem {
 
         let path = entry_path.get_path();
 
-        let metadata = match fs::metadata(path).await {
+        /*let metadata = match fs::metadata(path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&inode);
                 self.path_to_inode.remove(path);
@@ -236,7 +282,8 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
         if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
@@ -253,7 +300,7 @@ impl Filesystem {
 
         let path = entry_path.get_path();
 
-        let metadata = match fs::metadata(path).await {
+        /*let metadata = match fs::metadata(path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&inode);
                 self.path_to_inode.remove(path);
@@ -264,7 +311,8 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
         if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
@@ -287,7 +335,7 @@ impl Filesystem {
 
         let path = entry_path.get_path();
 
-        let metadata = match fs::metadata(path).await {
+        /*let metadata = match fs::metadata(path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&inode);
                 self.path_to_inode.remove(path);
@@ -298,7 +346,8 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
         if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
@@ -325,12 +374,12 @@ impl Filesystem {
 
                 if size > 0 {
                     if let Err(err) = file.set_len(size).await {
-                        error!("set inode {} size {} failed", guard.inode, size);
+                        error!("set inode {} size {} failed", inode, size);
 
                         return Err(err.into());
                     }
 
-                    debug!("set inode {} size success", guard.inode);
+                    debug!("set inode {} size success", inode);
                 }
             } else {
                 return Err(libc::EISDIR.into());
@@ -352,7 +401,7 @@ impl Filesystem {
 
         let path = entry_path.get_path();
 
-        let metadata = match fs::metadata(path).await {
+        /*let metadata = match fs::metadata(path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&parent);
                 self.path_to_inode.remove(path);
@@ -363,10 +412,11 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
         if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
-            return Err(libc::ENOTDIR.into());
+            return Err(libc::ENOENT.into());
         }
 
         if metadata.is_file() {
@@ -429,7 +479,7 @@ impl Filesystem {
 
         let path = entry_path.get_path();
 
-        let metadata = match fs::metadata(path).await {
+        /*let metadata = match fs::metadata(path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&parent);
                 self.path_to_inode.remove(path);
@@ -440,10 +490,11 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
         if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
-            return Err(libc::ENOTDIR.into());
+            return Err(libc::ENOENT.into());
         }
 
         if metadata.is_file() {
@@ -510,7 +561,7 @@ impl Filesystem {
 
         let op_path = op_entry_path.get_path();
 
-        let op_metadata = match fs::metadata(op_path).await {
+        /*let op_metadata = match fs::metadata(op_path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&old_parent);
                 self.path_to_inode.remove(op_path);
@@ -521,22 +572,23 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let op_metadata = self.get_metadata_with_inode_and_path(old_parent, op_path).await?;
 
-        if self.check_and_fix_inode_and_path(old_parent,op_entry_path,op_path, &op_metadata) {
-            return Err(libc::ENOENT.into())
+        if self.check_and_fix_inode_and_path(old_parent, op_entry_path, op_path, &op_metadata) {
+            return Err(libc::ENOENT.into());
         }
 
         if op_metadata.is_file() {
-            return Err(libc::ENOTDIR.into())
+            return Err(libc::ENOTDIR.into());
         }
 
         let oc_path = op_path.to_path_buf()
             .apply(|path| path.push(old_name));
 
-        let oc_metadata = match fs::metadata(&oc_name).await {
+        let oc_metadata = match fs::metadata(&oc_path).await {
             Err(err) => return if err.kind() == ErrorKind::NotFound {
-                if let Some(inode) = self.path_to_inode.remove(&oc_name) {
+                if let Some(inode) = self.path_to_inode.remove(&oc_path) {
                     self.inode_to_path.remove(&inode);
                 }
 
@@ -548,18 +600,6 @@ impl Filesystem {
             Ok(metadata) => metadata
         };
 
-        /*if let Err(err) = fs::metadata(&oc_path).await {
-            return if err.kind() == ErrorKind::NotFound {
-                if let Some(inode) = self.path_to_inode.remove(&oc_path) {
-                    self.inode_to_path.remove(&inode);
-                }
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            }
-        }*/
-
         let np_entry_path = match self.inode_to_path.get(&new_parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path
@@ -567,7 +607,7 @@ impl Filesystem {
 
         let np_path = np_entry_path.get_path();
 
-        let np_metadata = match fs::metadata(np_path).await {
+        /*let np_metadata = match fs::metadata(np_path).await {
             Err(err) => return if let ErrorKind::NotFound = err.kind() {
                 self.inode_to_path.remove(&new_parent);
                 self.path_to_inode.remove(np_path);
@@ -578,25 +618,26 @@ impl Filesystem {
             },
 
             Ok(metadata) => metadata
-        };
+        };*/
+        let np_metadata = self.get_metadata_with_inode_and_path(new_parent, np_path).await?;
 
         if self.check_and_fix_inode_and_path(new_parent, np_entry_path, np_path, &np_metadata) {
-            return Err(libc::ENOENT.into())
+            return Err(libc::ENOENT.into());
         }
 
         if np_metadata.is_file() {
-            return Err(libc::ENOTDIR.into())
+            return Err(libc::ENOTDIR.into());
         }
 
         let nc_path = np_path.to_path_buf()
             .apply(|path| path.push(new_name));
 
         if let Err(err) = fs::metadata(&nc_path).await {
-            if err.kind()!=ErrorKind::NotFound {
-                return Err(err.into())
+            if err.kind() != ErrorKind::NotFound {
+                return Err(err.into());
             }
         } else {
-            return Err(libc::EEXIST.into())
+            return Err(libc::EEXIST.into());
         }
 
         fs::rename(&oc_path, &nc_path).await?;
@@ -625,79 +666,275 @@ impl Filesystem {
         Ok(())
     }
 
-    pub async fn open(&self, inode: Inode, flags: u32) -> Result<FileHandle> {
-        if let Path::File(file) = self
-            .inode_to_path
-            .read()
-            .await
-            .get(&inode)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone()
-        {
-            file.open(
-                self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
-                flags,
-            )
-                .await
-        } else {
-            Err(Errno::from(libc::EISDIR))
+    pub async fn open(&mut self, inode: Inode, flags: u32) -> Result<FileHandle> {
+        let entry_path = match self.inode_to_path.get(&inode) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        /*let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
+
+        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+            return Err(libc::ENOENT.into());
         }
+
+        if metadata.is_dir() {
+            return Err(libc::EISDIR.into());
+        }
+
+        debug!("open {:?} flags {}", path, flags);
+
+        let mut options = fs::OpenOptions::new();
+
+        let fh_kind = if flags & libc::O_RDWR as u32 > 0 {
+            options.write(true);
+            options.read(true);
+
+            FileHandleKind::ReadWrite
+        } else if flags & libc::O_WRONLY as u32 > 0 {
+            options.write(true);
+            options.read(false);
+
+            FileHandleKind::WriteOnly
+        } else {
+            options.write(false);
+            options.read(true);
+
+            FileHandleKind::ReadOnly
+        };
+
+        if flags & libc::O_TRUNC as u32 > 0 {
+            debug!("open {:?} flags have truncate", path);
+
+            options.truncate(true);
+        }
+
+        let sys_file = options.open(path).await?;
+
+        let fh_id = self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed);
+
+        Ok(FileHandle::new(fh_id, inode, sys_file, fh_kind))
     }
 
     pub async fn read_dir(
-        &self,
+        &mut self,
         inode: Inode,
         offset: i64,
     ) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
-        let entry = self
-            .inode_to_path
-            .read()
-            .await
-            .get(&inode)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
+        debug!("readdir in parent {}", inode);
 
-        if let Path::Dir(dir) = entry {
-            dir.read_dir(offset).await
-        } else {
-            Err(Errno::from(libc::ENOTDIR))
+        let entry_path = match self.inode_to_path.get(&inode) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
+        };
+
+        let path = entry_path.get_path();
+
+        /*let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
+
+        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+            return Err(libc::ENOENT.into());
         }
+
+        if metadata.is_file() {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        let parent_path = if let Some(parent_path) = path.parent() {
+            parent_path
+        } else if path == Path::new("/") {
+            path
+        } else {
+            return Err(libc::EIO.into());
+        };
+
+        let parent_inode = if let Some(&parent_inode) = self.path_to_inode.get(parent_path) {
+            parent_inode
+        } else {
+            // deleted by client, but recreate by someone
+            let parent_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+            self.inode_to_path.insert(parent_inode, EntryPath::Dir(parent_path.to_path_buf()));
+            self.path_to_inode.insert(parent_path.to_path_buf(), parent_inode);
+
+            parent_inode
+        };
+
+        let mut children = vec![
+            (inode, FileType::Directory, OsString::from(".")),
+            (parent_inode, FileType::Directory, OsString::from("..")),
+        ];
+
+        while let Some(child) = fs::read_dir(path).await?.next().await {
+            if let Ok(child) = child {
+                let metadata = if let Ok(metadata) = child.metadata().await {
+                    metadata
+                } else {
+                    continue;
+                };
+
+                let file_type = if metadata.is_file() {
+                    FileType::RegularFile
+                } else {
+                    FileType::Directory
+                };
+
+                let child_name = child.file_name();
+
+                let child_path = path.to_path_buf()
+                    .apply(|path| path.push(&child_name));
+
+                let child_inode = if let Some(&inode) = self.path_to_inode.get(&child_path) {
+                    let entry_path = self.inode_to_path.get(&inode).expect("checked");
+
+                    self.check_and_fix_inode_and_path(inode, entry_path, &child_path, &metadata);
+
+                    *self.path_to_inode.get(&child_path).expect("checked")
+                } else {
+                    let new_child_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+                    let entry_path = if file_type == FileType::RegularFile {
+                        EntryPath::File(child_path.clone())
+                    } else {
+                        EntryPath::Dir(child_path.clone())
+                    };
+
+                    self.inode_to_path.insert(new_child_inode, entry_path);
+                    self.path_to_inode.insert(child_path.clone(), new_child_inode);
+
+                    new_child_inode
+                };
+
+                children.push((child_inode, file_type, child_name));
+            }
+        }
+
+        Ok(children
+            .into_iter()
+            .enumerate()
+            .map(|(index, (inode, kind, name))| (inode, (index + 1) as i64, kind, name))
+            .skip(offset as usize)
+            .collect())
     }
 
     pub async fn create_file(
-        &self,
+        &mut self,
         parent: Inode,
         name: &OsStr,
         mode: u32,
-        flags: u32,
+        _flags: u32,
     ) -> Result<(FileHandle, FileAttr)> {
         let name = name.clean()?;
 
-        let entry = self
-            .inode_to_path
-            .read()
-            .await
-            .get(&parent)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
+        debug!("create file name {:?} in parent {}", name, parent);
 
-        let dir = match entry {
-            Path::File(_) => return Err(Errno::from(libc::ENOTDIR)),
-            Path::Dir(dir) => dir,
+        let entry_path = match self.inode_to_path.get(&parent) {
+            None => return Err(libc::ENOENT.into()),
+            Some(entry_path) => entry_path
         };
 
-        let file = dir.create_file(OsStr::new(&name), mode).await?;
+        let path = entry_path.get_path();
 
-        debug!("file created");
+        /*let metadata = match fs::metadata(path).await {
+            Err(err) => return if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&parent);
+                self.path_to_inode.remove(path);
 
-        let file_handle = file
-            .open(
-                self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
-                flags,
-            )
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => metadata
+        };*/
+        let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
+
+        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+            return Err(libc::ENOENT.into());
+        }
+
+        if metadata.is_file() {
+            return Err(libc::ENOTDIR.into());
+        }
+
+        let create_path = path.to_path_buf()
+            .apply(|path| path.push(name));
+
+        match fs::metadata(&create_path).await {
+            Ok(metadata) => {
+                if let Some(&inode) = self.path_to_inode.get(&create_path) {
+                    let entry_path = self.inode_to_path.get(&inode).expect("checked");
+
+                    self.check_and_fix_inode_and_path(inode, entry_path, &create_path, &metadata);
+                } else {
+                    let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+                    let entry_path = if metadata.is_file() {
+                        EntryPath::File(create_path.clone())
+                    } else {
+                        EntryPath::Dir(create_path.clone())
+                    };
+
+                    self.inode_to_path.insert(new_inode, entry_path);
+                    self.path_to_inode.insert(create_path, new_inode);
+                }
+
+                return Err(libc::EEXIST.into());
+            }
+
+            Err(err) => if err.kind() != ErrorKind::NotFound {
+                return Err(err.into());
+            }
+        }
+
+        let sys_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .read(true)
+            .mode(mode)
+            .open(&create_path)
             .await?;
 
-        let attr = file_handle.get_attr().await?;
+        let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+        let entry_path = EntryPath::File(create_path.clone());
+
+        self.inode_to_path.insert(new_inode, entry_path);
+        self.path_to_inode.insert(create_path.clone(), new_inode);
+
+        let metadata = fs::metadata(create_path).await?;
+
+        let attr = metadata_to_file_attr(new_inode, metadata)?;
+
+        let fh_id = self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed);
+
+        let file_handle = FileHandle::new(fh_id, new_inode, sys_file, FileHandleKind::ReadWrite);
 
         Ok((file_handle, attr))
     }
@@ -733,6 +970,23 @@ impl Filesystem {
         }
 
         false
+    }
+
+    async fn get_metadata_with_inode_and_path(&mut self, inode: Inode, path: impl AsRef<Path>) -> Result<Metadata> {
+        let path = path.as_ref();
+
+        match fs::metadata(path).await {
+            Err(err) => if let ErrorKind::NotFound = err.kind() {
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(path);
+
+                Err(libc::ENOENT.into())
+            } else {
+                Err(err.into())
+            },
+
+            Ok(metadata) => Ok(metadata)
+        }
     }
 }
 

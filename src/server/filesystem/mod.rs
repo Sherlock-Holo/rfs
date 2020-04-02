@@ -6,9 +6,9 @@ pub use filesystem::Filesystem;
 pub use request::Request;
 
 mod attr;
-mod dir;
+// mod dir;
 mod entry;
-mod file;
+// mod file;
 mod file_handle;
 mod filesystem;
 mod inode;
