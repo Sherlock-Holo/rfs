@@ -1,35 +1,21 @@
-use std::env;
-use std::io::ErrorKind;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
 
-use anyhow::{format_err, Context, Result};
+use anyhow::Result;
 use async_signals::Signals;
 use async_std::fs;
-use async_std::task;
 use futures_util::future::FutureExt;
 use futures_util::{select, StreamExt};
 use log::{debug, info};
 use nix::libc;
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
-use rand::distributions::Alphanumeric;
-use rand::prelude::*;
-use rand::rngs::OsRng;
-use scopeguard::defer;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use structopt::StructOpt;
 
 use rfs::log_init;
-use rfs::Apply;
-use rfs::Filesystem;
 use rfs::Server;
 pub use tokio_runtime::enter_tokio;
 
-const UDS_DIR: &str = "/run/rfs";
-const UDS_CLIENT_ENV: &str = "RFS_UDS_CLIENT";
+/*const UDS_DIR: &str = "/run/rfs";
+const UDS_CLIENT_ENV: &str = "RFS_UDS_CLIENT";*/
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -49,15 +35,15 @@ pub struct Argument {
     config: PathBuf,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/*#[derive(Debug, Serialize, Deserialize)]
 struct UdsConfig {
     uds_path: PathBuf,
     config_path: PathBuf,
     debug: bool,
-}
+}*/
 
 pub async fn run() -> Result<()> {
-    if let Some(uds_client_cfg) = env::var_os(UDS_CLIENT_ENV) {
+    /*if let Some(uds_client_cfg) = env::var_os(UDS_CLIENT_ENV) {
         let uds_cfg: UdsConfig = serde_json::from_slice(uds_client_cfg.as_bytes())?;
 
         log_init(uds_cfg.debug);
@@ -85,7 +71,7 @@ pub async fn run() -> Result<()> {
         filesystem.mount(&cfg.root_path).await?;
 
         return Ok(());
-    }
+    }*/
 
     let args = Argument::from_args();
 
@@ -103,7 +89,7 @@ pub async fn run() -> Result<()> {
 
     debug!("config loaded");
 
-    if let Err(err) = fs::create_dir(UDS_DIR).await {
+    /*if let Err(err) = fs::create_dir(UDS_DIR).await {
         if ErrorKind::AlreadyExists != err.kind() {
             Err(err)?;
         }
@@ -117,7 +103,7 @@ pub async fn run() -> Result<()> {
         .collect::<String>()
         + ".sock";
 
-    let uds_path = PathBuf::from(UDS_DIR).apply(|path| path.push(uds_name));
+
 
     debug!("uds path is {}", uds_path.display());
 
@@ -141,18 +127,18 @@ pub async fn run() -> Result<()> {
 
     let uds_client_id = uds_client.id();
 
-    info!("uds client starting");
+    info!("uds client starting");*/
 
     info!("starting rfs server");
 
-    task::spawn(async move {
+    /*task::spawn(async move {
         task::sleep(Duration::from_secs(1)).await;
 
         task::spawn_blocking(move || {
             signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGHUP)
         })
         .await
-    });
+    });*/
 
     let compress = if let Some(compress) = cfg.compress {
         compress
@@ -165,41 +151,21 @@ pub async fn run() -> Result<()> {
         cfg.cert_path,
         cfg.key_path,
         cfg.ca_path,
-        uds_path,
         cfg.listen_addr.parse()?,
         compress,
     );
 
-    let mut uds_client_job =
-        task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"))
-            .fuse();
+    /*let mut uds_client_job =
+    task::spawn_blocking(move || uds_client.wait().context("uds client quit unexpected"))
+        .fuse();*/
 
     let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
     select! {
-        result = serve.fuse() => {
-            signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
-
-            result?;
-
-            uds_client_job.await?;
-
-            Ok(())
-        },
-
-        result = uds_client_job => {
-            result?;
-            Ok(())
-        }
+        result = serve.fuse() => result,
 
         _ = stop_signal.next().fuse() => {
             debug!("receive stop signal");
-
-            signal::kill(Pid::from_raw(uds_client_id as i32), Signal::SIGINT)?;
-
-            uds_client_job.await?;
-
-            debug!("uds client exited");
 
             Ok(())
         }

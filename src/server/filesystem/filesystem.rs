@@ -15,11 +15,11 @@ use futures_util::StreamExt;
 use log::{debug, error, info};
 use nix::{sched, unistd};
 
-use crate::{Apply, Result};
 use crate::path::PathClean;
 use crate::server::filesystem::attr::metadata_to_file_attr;
 use crate::server::filesystem::file_handle::FileHandleKind;
 use crate::server::filesystem::inode::PathToInode;
+use crate::{Apply, Result};
 
 use super::attr::SetAttr;
 use super::entry::EntryPath;
@@ -114,7 +114,7 @@ impl Filesystem {
         Ok(())
     }
 
-    async fn run(&mut self) {
+    pub async fn run(&mut self) {
         while let Some(request) = self.receiver.recv().await {
             match request {
                 Request::Lookup {
@@ -126,10 +126,7 @@ impl Filesystem {
                     response.send(result).await;
                 }
 
-                Request::GetAttr {
-                    inode,
-                    response
-                } => {
+                Request::GetAttr { inode, response } => {
                     let result = self.get_attr(inode).await;
                     response.send(result).await;
                 }
@@ -137,43 +134,70 @@ impl Filesystem {
                 Request::SetAttr {
                     inode,
                     new_attr,
-                    response
+                    response,
                 } => {
                     let result = self.set_attr(inode, new_attr).await;
                     response.send(result).await;
                 }
 
-                Request::GetName { inode, response } => {
-                    let result = self.get_name(inode).await;
-                    response.send(result).await;
-                }
-
-                Request::CreateDir { parent, name, mode, response } => {
+                Request::CreateDir {
+                    parent,
+                    name,
+                    mode,
+                    response,
+                } => {
                     let result = self.create_dir(parent, &name, mode).await;
                     response.send(result).await;
                 }
 
-                Request::RemoveEntry { parent, name, is_dir, response } => {
+                Request::RemoveEntry {
+                    parent,
+                    name,
+                    is_dir,
+                    response,
+                } => {
                     let result = self.remove_entry(parent, &name, is_dir).await;
                     response.send(result).await;
                 }
 
-                Request::Rename { old_parent, old_name, new_parent, new_name, response } => {
-                    let result = self.rename(old_parent, &old_name, new_parent, &new_name).await;
+                Request::Rename {
+                    old_parent,
+                    old_name,
+                    new_parent,
+                    new_name,
+                    response,
+                } => {
+                    let result = self
+                        .rename(old_parent, &old_name, new_parent, &new_name)
+                        .await;
                     response.send(result).await;
                 }
 
-                Request::Open { inode, flags, response } => {
+                Request::Open {
+                    inode,
+                    flags,
+                    response,
+                } => {
                     let result = self.open(inode, flags).await;
                     response.send(result).await;
                 }
 
-                Request::ReadDir { inode, offset, response } => {
+                Request::ReadDir {
+                    inode,
+                    offset,
+                    response,
+                } => {
                     let result = self.read_dir(inode, offset).await;
                     response.send(result).await;
                 }
 
-                Request::CreateFile { parent, name, mode, flags, response } => {
+                Request::CreateFile {
+                    parent,
+                    name,
+                    mode,
+                    flags,
+                    response,
+                } => {
                     let result = self.create_file(parent, &name, mode, flags).await;
                     response.send(result).await;
                 }
@@ -181,33 +205,21 @@ impl Filesystem {
         }
     }
 
-    pub async fn lookup(&mut self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
+    async fn lookup(&mut self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
         let name = name.clean()?;
 
         debug!("lookup name {:?} in parent {}", name, parent);
 
         let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&parent);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
-        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(parent, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -215,21 +227,22 @@ impl Filesystem {
             return Err(libc::ENOTDIR.into());
         }
 
-        let lookup_path = path.to_path_buf()
-            .apply(|path| path.push(name));
+        let lookup_path = path.to_path_buf().apply(|path| path.push(name));
 
         let metadata = match fs::metadata(&lookup_path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                if let Some(inode) = self.path_to_inode.remove(&lookup_path) {
-                    self.inode_to_path.remove(&inode);
-                }
+            Err(err) => {
+                return if let ErrorKind::NotFound = err.kind() {
+                    if let Some(inode) = self.path_to_inode.remove(&lookup_path) {
+                        self.inode_to_path.remove(&inode);
+                    }
 
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
+                    Err(libc::ENOENT.into())
+                } else {
+                    Err(err.into())
+                };
+            }
 
-            Ok(metadata) => metadata
+            Ok(metadata) => metadata,
         };
 
         let inode = match self.path_to_inode.get(&lookup_path) {
@@ -250,9 +263,9 @@ impl Filesystem {
             }
 
             Some(&inode) => {
-                let entry_path = self.inode_to_path.get(&inode).expect("checked");
+                let entry_path = self.inode_to_path.get(&inode).expect("checked").clone();
 
-                if self.check_and_fix_inode_and_path(inode, entry_path, lookup_path, &metadata) {
+                if self.check_and_fix_inode_and_path(inode, &entry_path, lookup_path, &metadata) {
                     return Err(libc::ENOENT.into());
                 }
 
@@ -263,93 +276,34 @@ impl Filesystem {
         metadata_to_file_attr(inode, metadata)
     }
 
-    pub async fn get_attr(&mut self, inode: Inode) -> Result<FileAttr> {
+    async fn get_attr(&mut self, inode: Inode) -> Result<FileAttr> {
         let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&inode);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
-        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(inode, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
         metadata_to_file_attr(inode, metadata)
     }
 
-    pub async fn get_name(&mut self, inode: Inode) -> Result<OsString> {
+    async fn set_attr(&mut self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
         let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&inode);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
-        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
-            return Err(libc::ENOENT.into());
-        }
-
-        if let Some(filename) = path.file_name() {
-            Ok(filename.to_os_string())
-        } else if path == Path::new("/") {
-            Ok(OsString::from("/"))
-        } else {
-            Err(libc::EIO.into())
-        }
-    }
-
-    pub async fn set_attr(&mut self, mut inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
-        let entry_path = match self.inode_to_path.get(&inode) {
-            None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
-        };
-
-        let path = entry_path.get_path();
-
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&inode);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
-        let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
-
-        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(inode, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -373,6 +327,8 @@ impl Filesystem {
                     .await?;
 
                 if size > 0 {
+                    debug!("set attr size {}", size);
+
                     if let Err(err) = file.set_len(size).await {
                         error!("set inode {} size {} failed", inode, size);
 
@@ -389,33 +345,21 @@ impl Filesystem {
         self.get_attr(inode).await
     }
 
-    pub async fn create_dir(&mut self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
+    async fn create_dir(&mut self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
         let name = name.clean()?;
 
         debug!("create dir name {:?} in parent {}", name, parent);
 
         let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&parent);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
-        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(parent, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -423,15 +367,14 @@ impl Filesystem {
             return Err(libc::ENOTDIR.into());
         }
 
-        let create_path = path.to_path_buf()
-            .apply(|path| path.push(name));
+        let create_path = path.to_path_buf().apply(|path| path.push(name));
 
         match fs::metadata(&create_path).await {
             Ok(metadata) => {
                 if let Some(&inode) = self.path_to_inode.get(&create_path) {
-                    let entry_path = self.inode_to_path.get(&inode).expect("checked");
+                    let entry_path = self.inode_to_path.get(&inode).expect("checked").clone();
 
-                    self.check_and_fix_inode_and_path(inode, entry_path, &create_path, &metadata);
+                    self.check_and_fix_inode_and_path(inode, &entry_path, &create_path, &metadata);
                 } else {
                     let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
@@ -448,8 +391,10 @@ impl Filesystem {
                 return Err(libc::EEXIST.into());
             }
 
-            Err(err) => if err.kind() != ErrorKind::NotFound {
-                return Err(err.into());
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    return Err(err.into());
+                }
             }
         }
 
@@ -467,33 +412,24 @@ impl Filesystem {
         metadata_to_file_attr(new_inode, metadata)
     }
 
-    pub async fn remove_entry(&mut self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
+    async fn remove_entry(&mut self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
         let name = name.clean()?;
 
-        debug!("remove name {:?} from parent {}, is dir {}", name, parent, is_dir);
+        debug!(
+            "remove name {:?} from parent {}, is dir {}",
+            name, parent, is_dir
+        );
 
         let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&parent);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
-        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(parent, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -501,21 +437,22 @@ impl Filesystem {
             return Err(libc::ENOTDIR.into());
         }
 
-        let remove_path = path.to_path_buf()
-            .apply(|path| path.push(name));
+        let remove_path = path.to_path_buf().apply(|path| path.push(name));
 
         let metadata = match fs::metadata(&remove_path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                if let Some(inode) = self.path_to_inode.remove(&remove_path) {
-                    self.inode_to_path.remove(&inode);
-                }
+            Err(err) => {
+                return if let ErrorKind::NotFound = err.kind() {
+                    if let Some(inode) = self.path_to_inode.remove(&remove_path) {
+                        self.inode_to_path.remove(&inode);
+                    }
 
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
+                    Err(libc::ENOENT.into())
+                } else {
+                    Err(err.into())
+                };
+            }
 
-            Ok(metadata) => metadata
+            Ok(metadata) => metadata,
         };
 
         if metadata.is_file() && is_dir {
@@ -537,7 +474,7 @@ impl Filesystem {
         Ok(())
     }
 
-    pub async fn rename(
+    async fn rename(
         &mut self,
         old_parent: Inode,
         old_name: &OsStr,
@@ -552,30 +489,23 @@ impl Filesystem {
         // np means new parent
         // nc means new child
 
-        debug!("rename {:?} from {} to {} as {:?}", old_name, old_parent, new_parent, new_name);
+        debug!(
+            "rename {:?} from {} to {} as {:?}",
+            old_name, old_parent, new_parent, new_name
+        );
 
         let op_entry_path = match self.inode_to_path.get(&old_parent) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let op_path = op_entry_path.get_path();
 
-        /*let op_metadata = match fs::metadata(op_path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&old_parent);
-                self.path_to_inode.remove(op_path);
+        let op_metadata = self
+            .get_metadata_with_inode_and_path(old_parent, op_path)
+            .await?;
 
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
-        let op_metadata = self.get_metadata_with_inode_and_path(old_parent, op_path).await?;
-
-        if self.check_and_fix_inode_and_path(old_parent, op_entry_path, op_path, &op_metadata) {
+        if self.check_and_fix_inode_and_path(old_parent, &op_entry_path, op_path, &op_metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -583,45 +513,36 @@ impl Filesystem {
             return Err(libc::ENOTDIR.into());
         }
 
-        let oc_path = op_path.to_path_buf()
-            .apply(|path| path.push(old_name));
+        let oc_path = op_path.to_path_buf().apply(|path| path.push(old_name));
 
         let oc_metadata = match fs::metadata(&oc_path).await {
-            Err(err) => return if err.kind() == ErrorKind::NotFound {
-                if let Some(inode) = self.path_to_inode.remove(&oc_path) {
-                    self.inode_to_path.remove(&inode);
-                }
+            Err(err) => {
+                return if err.kind() == ErrorKind::NotFound {
+                    if let Some(inode) = self.path_to_inode.remove(&oc_path) {
+                        self.inode_to_path.remove(&inode);
+                    }
 
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
+                    Err(libc::ENOENT.into())
+                } else {
+                    Err(err.into())
+                };
+            }
 
-            Ok(metadata) => metadata
+            Ok(metadata) => metadata,
         };
 
         let np_entry_path = match self.inode_to_path.get(&new_parent) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let np_path = np_entry_path.get_path();
 
-        /*let np_metadata = match fs::metadata(np_path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&new_parent);
-                self.path_to_inode.remove(np_path);
+        let np_metadata = self
+            .get_metadata_with_inode_and_path(new_parent, np_path)
+            .await?;
 
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
-        let np_metadata = self.get_metadata_with_inode_and_path(new_parent, np_path).await?;
-
-        if self.check_and_fix_inode_and_path(new_parent, np_entry_path, np_path, &np_metadata) {
+        if self.check_and_fix_inode_and_path(new_parent, &np_entry_path, np_path, &np_metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -629,16 +550,15 @@ impl Filesystem {
             return Err(libc::ENOTDIR.into());
         }
 
-        let nc_path = np_path.to_path_buf()
-            .apply(|path| path.push(new_name));
+        let nc_path = np_path.to_path_buf().apply(|path| path.push(new_name));
 
-        if let Err(err) = fs::metadata(&nc_path).await {
+        /*if let Err(err) = fs::metadata(&nc_path).await {
             if err.kind() != ErrorKind::NotFound {
                 return Err(err.into());
             }
         } else {
             return Err(libc::EEXIST.into());
-        }
+        }*/
 
         fs::rename(&oc_path, &nc_path).await?;
 
@@ -654,6 +574,8 @@ impl Filesystem {
 
         let nc_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
+        debug!("new child inode {}", nc_inode);
+
         let nc_entry_path = if oc_metadata.is_file() {
             EntryPath::File(nc_path.clone())
         } else {
@@ -666,29 +588,17 @@ impl Filesystem {
         Ok(())
     }
 
-    pub async fn open(&mut self, inode: Inode, flags: u32) -> Result<FileHandle> {
+    async fn open(&mut self, inode: Inode, flags: u32) -> Result<FileHandle> {
         let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&inode);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
-        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(inode, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -730,7 +640,7 @@ impl Filesystem {
         Ok(FileHandle::new(fh_id, inode, sys_file, fh_kind))
     }
 
-    pub async fn read_dir(
+    async fn read_dir(
         &mut self,
         inode: Inode,
         offset: i64,
@@ -739,26 +649,14 @@ impl Filesystem {
 
         let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&inode);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(inode, path).await?;
 
-        if self.check_and_fix_inode_and_path(inode, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(inode, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -780,8 +678,10 @@ impl Filesystem {
             // deleted by client, but recreate by someone
             let parent_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
-            self.inode_to_path.insert(parent_inode, EntryPath::Dir(parent_path.to_path_buf()));
-            self.path_to_inode.insert(parent_path.to_path_buf(), parent_inode);
+            self.inode_to_path
+                .insert(parent_inode, EntryPath::Dir(parent_path.to_path_buf()));
+            self.path_to_inode
+                .insert(parent_path.to_path_buf(), parent_inode);
 
             parent_inode
         };
@@ -791,7 +691,11 @@ impl Filesystem {
             (parent_inode, FileType::Directory, OsString::from("..")),
         ];
 
-        while let Some(child) = fs::read_dir(path).await?.next().await {
+        debug!("inode is {}, parnet inode is {}", inode, parent_inode);
+
+        let mut dir_entries = fs::read_dir(path).await?;
+
+        while let Some(child) = dir_entries.next().await {
             if let Ok(child) = child {
                 let metadata = if let Ok(metadata) = child.metadata().await {
                     metadata
@@ -807,13 +711,17 @@ impl Filesystem {
 
                 let child_name = child.file_name();
 
-                let child_path = path.to_path_buf()
-                    .apply(|path| path.push(&child_name));
+                let child_path = path.to_path_buf().apply(|path| path.push(&child_name));
+
+                debug!(
+                    "file type {:?}, child name {:?}, child path {:?}",
+                    file_type, child_name, child_path
+                );
 
                 let child_inode = if let Some(&inode) = self.path_to_inode.get(&child_path) {
-                    let entry_path = self.inode_to_path.get(&inode).expect("checked");
+                    let entry_path = self.inode_to_path.get(&inode).expect("checked").clone();
 
-                    self.check_and_fix_inode_and_path(inode, entry_path, &child_path, &metadata);
+                    self.check_and_fix_inode_and_path(inode, &entry_path, &child_path, &metadata);
 
                     *self.path_to_inode.get(&child_path).expect("checked")
                 } else {
@@ -826,7 +734,8 @@ impl Filesystem {
                     };
 
                     self.inode_to_path.insert(new_child_inode, entry_path);
-                    self.path_to_inode.insert(child_path.clone(), new_child_inode);
+                    self.path_to_inode
+                        .insert(child_path.clone(), new_child_inode);
 
                     new_child_inode
                 };
@@ -834,6 +743,8 @@ impl Filesystem {
                 children.push((child_inode, file_type, child_name));
             }
         }
+
+        debug!("fs::read_dir done");
 
         Ok(children
             .into_iter()
@@ -843,7 +754,7 @@ impl Filesystem {
             .collect())
     }
 
-    pub async fn create_file(
+    async fn create_file(
         &mut self,
         parent: Inode,
         name: &OsStr,
@@ -856,26 +767,14 @@ impl Filesystem {
 
         let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
-            Some(entry_path) => entry_path
+            Some(entry_path) => entry_path.clone(),
         };
 
         let path = entry_path.get_path();
 
-        /*let metadata = match fs::metadata(path).await {
-            Err(err) => return if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&parent);
-                self.path_to_inode.remove(path);
-
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
-
-            Ok(metadata) => metadata
-        };*/
         let metadata = self.get_metadata_with_inode_and_path(parent, path).await?;
 
-        if self.check_and_fix_inode_and_path(parent, entry_path, path, &metadata) {
+        if self.check_and_fix_inode_and_path(parent, &entry_path, path, &metadata) {
             return Err(libc::ENOENT.into());
         }
 
@@ -883,15 +782,14 @@ impl Filesystem {
             return Err(libc::ENOTDIR.into());
         }
 
-        let create_path = path.to_path_buf()
-            .apply(|path| path.push(name));
+        let create_path = path.to_path_buf().apply(|path| path.push(name));
 
         match fs::metadata(&create_path).await {
             Ok(metadata) => {
                 if let Some(&inode) = self.path_to_inode.get(&create_path) {
-                    let entry_path = self.inode_to_path.get(&inode).expect("checked");
+                    let entry_path = self.inode_to_path.get(&inode).expect("checked").clone();
 
-                    self.check_and_fix_inode_and_path(inode, entry_path, &create_path, &metadata);
+                    self.check_and_fix_inode_and_path(inode, &entry_path, &create_path, &metadata);
                 } else {
                     let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
@@ -908,8 +806,10 @@ impl Filesystem {
                 return Err(libc::EEXIST.into());
             }
 
-            Err(err) => if err.kind() != ErrorKind::NotFound {
-                return Err(err.into());
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    return Err(err.into());
+                }
             }
         }
 
@@ -940,7 +840,13 @@ impl Filesystem {
     }
 
     /// when inode and path need fix, will return true
-    fn check_and_fix_inode_and_path(&mut self, inode: Inode, entry_path: &EntryPath, path: impl AsRef<Path>, metadata: &Metadata) -> bool {
+    fn check_and_fix_inode_and_path(
+        &mut self,
+        inode: Inode,
+        entry_path: &EntryPath,
+        path: impl AsRef<Path>,
+        metadata: &Metadata,
+    ) -> bool {
         if metadata.is_file() {
             if let EntryPath::Dir(_) = entry_path {
                 let path = path.as_ref();
@@ -950,7 +856,8 @@ impl Filesystem {
 
                 let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
-                self.inode_to_path.insert(new_inode, EntryPath::File(path.to_path_buf()));
+                self.inode_to_path
+                    .insert(new_inode, EntryPath::File(path.to_path_buf()));
                 self.path_to_inode.insert(path.to_path_buf(), new_inode);
 
                 return true;
@@ -963,7 +870,8 @@ impl Filesystem {
 
             let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
-            self.inode_to_path.insert(new_inode, EntryPath::Dir(path.to_path_buf()));
+            self.inode_to_path
+                .insert(new_inode, EntryPath::Dir(path.to_path_buf()));
             self.path_to_inode.insert(path.to_path_buf(), new_inode);
 
             return true;
@@ -972,40 +880,47 @@ impl Filesystem {
         false
     }
 
-    async fn get_metadata_with_inode_and_path(&mut self, inode: Inode, path: impl AsRef<Path>) -> Result<Metadata> {
+    async fn get_metadata_with_inode_and_path(
+        &mut self,
+        inode: Inode,
+        path: impl AsRef<Path>,
+    ) -> Result<Metadata> {
         let path = path.as_ref();
 
         match fs::metadata(path).await {
-            Err(err) => if let ErrorKind::NotFound = err.kind() {
-                self.inode_to_path.remove(&inode);
-                self.path_to_inode.remove(path);
+            Err(err) => {
+                if let ErrorKind::NotFound = err.kind() {
+                    self.inode_to_path.remove(&inode);
+                    self.path_to_inode.remove(path);
 
-                Err(libc::ENOENT.into())
-            } else {
-                Err(err.into())
-            },
+                    Err(libc::ENOENT.into())
+                } else {
+                    Err(err.into())
+                }
+            }
 
-            Ok(metadata) => Ok(metadata)
+            Ok(metadata) => Ok(metadata),
         }
     }
 }
 
-/*
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use async_std::fs;
     use async_std::future::timeout;
+    use async_std::sync::channel;
     use async_std::sync::Mutex;
     use async_std::task;
     use tempfile;
 
     use crate::log_init;
-    use crate::server::filesystem::file_handle::FileHandleKind;
     use crate::server::filesystem::LockKind;
+    use crate::Errno;
 
     use super::*;
 
@@ -1015,20 +930,26 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let root = filesystem.inode_map.read().await.get(&1).unwrap().clone();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let root_dir = if let Entry::Dir(dir) = root {
-            dir
-        } else {
-            panic!("root is not Dir");
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::GetAttr {
+            inode: 1,
+            response: tx,
         };
 
-        assert_eq!(root_dir.get_inode().await, 1);
-        assert_eq!(root_dir.get_name().await, OsString::from("/"));
-        assert_eq!(root_dir.get_real_path().await, OsString::from("/"));
-        assert_eq!(root_dir.get_parent_inode().await, 1);
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 1);
+        assert_eq!(attr.kind, FileType::Directory);
+        assert_eq!(attr.perm, 0o755);
     }
 
     #[async_std::test]
@@ -1037,16 +958,28 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let dir_attr = filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        assert_eq!(dir_attr.ino, 2);
-        assert_eq!(dir_attr.kind, FileType::Directory);
-        assert_eq!(dir_attr.perm, 0o755);
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 2);
+        assert_eq!(attr.kind, FileType::Directory);
+        assert_eq!(attr.perm, 0o755);
     }
 
     #[async_std::test]
@@ -1055,52 +988,29 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        assert_eq!(file_handle.get_id(), 1);
+        task::spawn(async move { filesystem.run().await });
 
-        let attr = file_handle.get_attr().await.unwrap();
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (_, attr) = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
-    }
-
-    #[async_std::test]
-    async fn get_dir_name() {
-        log_init(true);
-
-        let tmp_dir = tempfile::TempDir::new().unwrap();
-
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
-
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o644)
-            .await
-            .unwrap();
-
-        assert_eq!(filesystem.get_name(2).await, Ok(OsString::from("test")));
-    }
-
-    #[async_std::test]
-    async fn get_file_name() {
-        log_init(true);
-
-        let tmp_dir = tempfile::TempDir::new().unwrap();
-
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
-
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
-            .await
-            .unwrap();
-
-        assert_eq!(filesystem.get_name(2).await, Ok(OsString::from("test")));
     }
 
     #[async_std::test]
@@ -1109,14 +1019,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let attr = filesystem.lookup(1, OsStr::new("test")).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        // create dir
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1129,14 +1062,38 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let attr = filesystem.lookup(1, OsStr::new("test")).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        // create file
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1149,14 +1106,36 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let attr = filesystem.get_attr(2).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        // create dir
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::GetAttr {
+            inode: 2,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1169,14 +1148,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let attr = filesystem.get_attr(2).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        // create dir
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::GetAttr {
+            inode: 2,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1189,27 +1191,46 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let set_attr = SetAttr {
-            ctime: None,
-            mtime: None,
-            atime: None,
-            flags: None,
-            uid: None,
-            gid: None,
-            size: None,
-            mode: Some(0o700),
+        task::spawn(async move { filesystem.run().await });
+
+        // create dir
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
         };
 
-        filesystem.set_attr(2, set_attr).await.unwrap();
+        fs_tx.send(req).await;
 
-        let attr = filesystem.get_attr(2).await.unwrap();
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::SetAttr {
+            inode: 2,
+            new_attr: SetAttr {
+                ctime: None,
+                mtime: None,
+                atime: None,
+                flags: None,
+                uid: None,
+                gid: None,
+                size: None,
+                mode: Some(0o700),
+            },
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1222,24 +1243,50 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        debug!("dir created");
+        task::spawn(async move { filesystem.run().await });
 
-        filesystem
-            .remove_entry(1, OsStr::new("test"), true)
-            .await
-            .unwrap();
+        // create dir
+        let (tx, rx) = channel(1);
 
-        assert_eq!(
-            filesystem.lookup(1, OsStr::new("test")).await,
-            Err(Errno::from(libc::ENOENT))
-        );
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::RemoveEntry {
+            parent: 1,
+            name: OsString::from("test"),
+            is_dir: true,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        assert_eq!(rx.recv().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 
     #[async_std::test]
@@ -1248,22 +1295,51 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .remove_entry(1, OsStr::new("test"), false)
-            .await
-            .unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        assert_eq!(
-            filesystem.lookup(1, OsStr::new("test")).await,
-            Err(Errno::from(libc::ENOENT))
-        );
+        // create dir
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::RemoveEntry {
+            parent: 1,
+            name: OsString::from("test"),
+            is_dir: false,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        assert_eq!(rx.recv().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 
     #[async_std::test]
@@ -1272,21 +1348,53 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .rename(1, OsStr::new("test"), 1, OsStr::new("new-test"))
-            .await
-            .unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        let attr = filesystem.lookup(1, OsStr::new("new-test")).await.unwrap();
+        // create dir
+        let (tx, rx) = channel(1);
 
-        assert_eq!(attr.ino, 2);
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Rename {
+            old_parent: 1,
+            old_name: OsString::from("test"),
+            new_parent: 1,
+            new_name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 3);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
@@ -1297,21 +1405,54 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .rename(1, OsStr::new("test"), 1, OsStr::new("new-test"))
-            .await
-            .unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        let attr = filesystem.lookup(1, OsStr::new("new-test")).await.unwrap();
+        // create dir
+        let (tx, rx) = channel(1);
 
-        assert_eq!(attr.ino, 2);
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Rename {
+            old_parent: 1,
+            old_name: OsString::from("test"),
+            new_parent: 1,
+            new_name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 3);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
@@ -1322,30 +1463,78 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("old"), 0o755)
-            .await
-            .unwrap(); // inode 2
-        filesystem
-            .create_dir(1, OsStr::new("new"), 0o755)
-            .await
-            .unwrap(); // inode 3
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .create_dir(2, OsStr::new("test"), 0o755)
-            .await
-            .unwrap(); // inode 4
+        task::spawn(async move { filesystem.run().await });
 
-        filesystem
-            .rename(2, OsStr::new("test"), 3, OsStr::new("test"))
-            .await
-            .unwrap();
+        let (tx, rx) = channel(1);
 
-        let attr = filesystem.lookup(3, OsStr::new("test")).await.unwrap();
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("old"),
+            mode: 0o755,
+            response: tx,
+        }; // inode 2
 
-        assert_eq!(attr.ino, 4);
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("new"),
+            mode: 0o755,
+            response: tx,
+        }; // inode 3
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 2,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Rename {
+            old_parent: 2,
+            old_name: OsString::from("test"),
+            new_parent: 3,
+            new_name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 3,
+            name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 5);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
@@ -1356,30 +1545,79 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("old"), 0o755)
-            .await
-            .unwrap(); // inode 2
-        filesystem
-            .create_dir(1, OsStr::new("new"), 0o755)
-            .await
-            .unwrap(); // inode 3
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .create_file(2, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap(); // inode 4
+        task::spawn(async move { filesystem.run().await });
 
-        filesystem
-            .rename(2, OsStr::new("test"), 3, OsStr::new("test"))
-            .await
-            .unwrap();
+        let (tx, rx) = channel(1);
 
-        let attr = filesystem.lookup(3, OsStr::new("test")).await.unwrap();
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("old"),
+            mode: 0o755,
+            response: tx,
+        }; // inode 2
 
-        assert_eq!(attr.ino, 4);
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("new"),
+            mode: 0o755,
+            response: tx,
+        }; // inode 3
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 2,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Rename {
+            old_parent: 2,
+            old_name: OsString::from("test"),
+            new_parent: 3,
+            new_name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 3,
+            name: OsString::from("new-test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 5);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
@@ -1390,84 +1628,56 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test-1"), 0o755)
-            .await
-            .unwrap(); // inode 2
-        filesystem
-            .create_dir(1, OsStr::new("test-2"), 0o755)
-            .await
-            .unwrap(); // inode 3
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let child_info = filesystem.read_dir(1, 0).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        assert_eq!(child_info.len(), 4); // include . and ..
+        let (tx, rx) = channel(1);
 
-        let (inode, _, kind, name) = &child_info[0];
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::ReadDir {
+            inode: 1,
+            offset: 0,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let children = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(children.len(), 3);
+
+        let (inode, _, kind, name) = &children[0];
 
         assert_eq!(*inode, 1);
         assert_eq!(*kind, FileType::Directory);
         assert_eq!(*name, OsString::from("."));
 
-        let (inode, _, kind, name) = &child_info[1];
+        let (inode, _, kind, name) = &children[1];
 
         assert_eq!(*inode, 1);
         assert_eq!(*kind, FileType::Directory);
         assert_eq!(*name, OsString::from(".."));
 
-        let (inode, _, kind, name) = &child_info[2];
-
-        assert!(*inode == 2 || *inode == 3);
-        assert_eq!(*kind, FileType::Directory);
-        assert!(*name == OsString::from("test-1") || *name == OsString::from("test-2"));
-
-        let (_, _, kind, name) = &child_info[3];
-
-        assert!(*inode == 2 || *inode == 3);
-        assert_eq!(*kind, FileType::Directory);
-        assert!(*name == OsString::from("test-1") || *name == OsString::from("test-2"));
-    }
-
-    #[async_std::test]
-    async fn read_dir_deeply() {
-        log_init(true);
-
-        let tmp_dir = tempfile::TempDir::new().unwrap();
-
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
-
-        filesystem
-            .create_dir(1, OsStr::new("test-1"), 0o755)
-            .await
-            .unwrap(); // inode 2
-        filesystem
-            .create_dir(2, OsStr::new("test-2"), 0o755)
-            .await
-            .unwrap(); // inode 3
-
-        let child_info = filesystem.read_dir(2, 0).await.unwrap();
-
-        assert_eq!(child_info.len(), 3); // include . and ..
-
-        let (inode, _, kind, name) = &child_info[0];
+        let (inode, _, kind, name) = &children[2];
 
         assert_eq!(*inode, 2);
         assert_eq!(*kind, FileType::Directory);
-        assert_eq!(*name, OsString::from("."));
-
-        let (inode, _, kind, name) = &child_info[1];
-
-        assert_eq!(*inode, 1);
-        assert_eq!(*kind, FileType::Directory);
-        assert_eq!(*name, OsString::from(".."));
-
-        let (inode, _, kind, name) = &child_info[2];
-
-        assert_eq!(*inode, 3);
-        assert_eq!(*kind, FileType::Directory);
-        assert_eq!(*name, OsString::from("test-2"));
+        assert_eq!(*name, OsString::from("test"));
     }
 
     #[async_std::test]
@@ -1476,14 +1686,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDONLY as u32)
-            .await
-            .unwrap(); // file handle id 1 used
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(
@@ -1504,14 +1737,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap(); // file handle id 1 used
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle = filesystem.open(2, libc::O_RDONLY as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDONLY as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(file_handle.get_file_handle_kind(), FileHandleKind::ReadOnly);
@@ -1529,14 +1785,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap(); // file handle id 1 used
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle = filesystem.open(2, libc::O_WRONLY as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_WRONLY as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(
@@ -1557,12 +1836,25 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
 
         let written = file_handle.write(b"test", 0).await.unwrap();
         file_handle.flush().await.unwrap();
@@ -1577,12 +1869,25 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
 
         let read = file_handle.read(&mut vec![0; 0], 0).await.unwrap();
         assert_eq!(read, 0);
@@ -1603,31 +1908,65 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        file_handle.write(b"test", 0).await.unwrap();
-        file_handle.flush().await.unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        let set_attr = SetAttr {
-            mode: Some(0o600),
-            uid: None,
-            gid: None,
-            size: Some(2),
-            atime: None,
-            mtime: None,
-            ctime: None,
-            flags: None,
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
         };
 
-        let attr = filesystem.set_attr(2, set_attr).await.unwrap();
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(file_handle.write(b"test", 0).await, Ok(b"test".len()));
+
+        file_handle.flush().await.unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::SetAttr {
+            inode: 2,
+            new_attr: SetAttr {
+                mode: Some(0o600),
+                uid: None,
+                gid: None,
+                size: Some(2),
+                atime: None,
+                mtime: None,
+                ctime: None,
+                flags: None,
+            },
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.perm, 0o600);
         assert_eq!(attr.size, 2);
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDONLY as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let mut file_handle = rx.recv().await.unwrap().unwrap();
 
         let mut buf = vec![0; 4];
 
@@ -1642,14 +1981,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1681,14 +2043,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1717,14 +2102,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle2 = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
         assert_eq!(file_handle2.try_set_lock(true).await, Ok(()));
@@ -1736,14 +2144,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle2 = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
 
@@ -1759,14 +2190,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1804,14 +2258,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle2 = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.try_set_lock(false).await, Ok(()));
         assert_eq!(
@@ -1830,14 +2307,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1855,14 +2355,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1880,14 +2403,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1916,14 +2462,37 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        let mut file_handle2 = filesystem.open(2, libc::O_RDWR as u32).await.unwrap();
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Open {
+            inode: 2,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1960,12 +2529,25 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let (mut file_handle, _) = filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
 
@@ -2013,12 +2595,23 @@ mod tests {
         let perm = fs::metadata(tmp_file.path()).await.unwrap().permissions();
         let perm = perm.mode() ^ libc::S_IFREG;
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        let attr = filesystem
-            .lookup(1, tmp_file.path().file_name().unwrap())
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: tmp_file.path().file_name().unwrap().to_os_string(),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -2032,26 +2625,65 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_dir(1, OsStr::new("test"), 0o755)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .create_dir(1, OsStr::new("exist"), 0o755)
-            .await
-            .unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        filesystem
-            .rename(1, OsStr::new("test"), 1, OsStr::new("exist"))
-            .await
-            .unwrap();
+        let (tx, rx) = channel(1);
 
-        let attr = filesystem.lookup(1, OsStr::new("exist")).await.unwrap();
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
 
-        assert_eq!(attr.ino, 2);
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("exist"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Rename {
+            old_parent: 1,
+            old_name: OsString::from("test"),
+            new_parent: 1,
+            new_name: OsString::from("exist"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("exist"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
@@ -2063,28 +2695,68 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        let (fs_tx, fs_rx) = channel(1);
 
-        filesystem
-            .create_file(1, OsStr::new("test"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
-        filesystem
-            .create_file(1, OsStr::new("exist"), 0o644, libc::O_RDWR as u32)
-            .await
-            .unwrap();
+        task::spawn(async move { filesystem.run().await });
 
-        filesystem
-            .rename(1, OsStr::new("test"), 1, OsStr::new("exist"))
-            .await
-            .unwrap();
+        let (tx, rx) = channel(1);
 
-        let attr = filesystem.lookup(1, OsStr::new("exist")).await.unwrap();
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
 
-        assert_eq!(attr.ino, 2);
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("exist"),
+            mode: 0o644,
+            flags: libc::O_RDWR as u32,
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Rename {
+            old_parent: 1,
+            old_name: OsString::from("test"),
+            new_parent: 1,
+            new_name: OsString::from("exist"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        rx.recv().await.unwrap().unwrap();
+
+        let (tx, rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("exist"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await;
+
+        let attr = rx.recv().await.unwrap().unwrap();
+
+        assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 }
-*/

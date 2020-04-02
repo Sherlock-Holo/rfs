@@ -5,8 +5,8 @@ use fuse::{FileAttr, FileType};
 
 use crate::Result;
 
-use super::{FileHandle, SetAttr};
 use super::inode::Inode;
+use super::{FileHandle, SetAttr};
 
 pub enum Request {
     Lookup {
@@ -18,11 +18,6 @@ pub enum Request {
     GetAttr {
         inode: Inode,
         response: Sender<Result<FileAttr>>,
-    },
-
-    GetName {
-        inode: Inode,
-        response: Sender<Result<OsString>>,
     },
 
     SetAttr {
