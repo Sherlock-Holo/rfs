@@ -637,7 +637,13 @@ impl Filesystem {
 
         let fh_id = self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed);
 
-        Ok(FileHandle::new(fh_id, inode, sys_file, fh_kind))
+        Ok(FileHandle::new(
+            fh_id,
+            #[cfg(features = "test")]
+            inode,
+            sys_file,
+            fh_kind,
+        ))
     }
 
     async fn read_dir(
@@ -834,7 +840,13 @@ impl Filesystem {
 
         let fh_id = self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed);
 
-        let file_handle = FileHandle::new(fh_id, new_inode, sys_file, FileHandleKind::ReadWrite);
+        let file_handle = FileHandle::new(
+            fh_id,
+            #[cfg(features = "test")]
+            new_inode,
+            sys_file,
+            FileHandleKind::ReadWrite,
+        );
 
         Ok((file_handle, attr))
     }
@@ -904,6 +916,7 @@ impl Filesystem {
     }
 }
 
+#[cfg(features = "test")]
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

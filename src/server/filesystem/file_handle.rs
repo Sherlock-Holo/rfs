@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::ops::Deref;
 use std::os::raw::c_int;
+#[cfg(features = "test")]
 use std::os::unix::fs::MetadataExt;
+#[cfg(features = "test")]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
+#[cfg(features = "test")]
 use std::time::{Duration, UNIX_EPOCH};
 
 use async_notify::Notify;
@@ -14,6 +17,7 @@ use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
 use async_std::task;
 use async_std::task::JoinHandle;
+#[cfg(features = "test")]
 use fuse::{FileAttr, FileType};
 use futures_util::future::FutureExt;
 use futures_util::select;
@@ -24,6 +28,7 @@ use nix::fcntl::FlockArg;
 use crate::errno::Errno;
 use crate::Result;
 
+#[cfg(features = "test")]
 use super::inode::Inode;
 
 pub type LockTable = Arc<Mutex<BTreeMap<u64, Notify>>>;
@@ -44,6 +49,8 @@ pub enum LockKind {
 
 pub struct FileHandle {
     id: u64,
+
+    #[cfg(features = "test")]
     inode: Inode,
     sys_file: SysFile,
 
@@ -57,9 +64,15 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    pub fn new(id: u64, inode: Inode, sys_file: SysFile, kind: FileHandleKind) -> Self {
+    pub fn new(
+        id: u64,
+        #[cfg(features = "test")] inode: Inode,
+        sys_file: SysFile,
+        kind: FileHandleKind,
+    ) -> Self {
         Self {
             id,
+            #[cfg(features = "test")]
             inode,
             sys_file,
             kind,
@@ -104,6 +117,7 @@ impl FileHandle {
         Ok(data.len())
     }
 
+    #[cfg(features = "test")]
     pub async fn get_attr(&self) -> Result<FileAttr> {
         let metadata = self.sys_file.metadata().await?;
 
@@ -294,11 +308,11 @@ impl FileHandle {
         self.id
     }
 
+    #[cfg(features = "test")]
     pub fn get_file_handle_kind(&self) -> FileHandleKind {
         self.kind
     }
 
-    //#[inline]
     pub async fn get_lock_kind(&self) -> LockKind {
         self.lock_kind.read().await.deref().clone()
     }
