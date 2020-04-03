@@ -1,12 +1,12 @@
 use std::convert::TryInto;
 use std::env::args;
 use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use async_std::fs;
-use async_std::path::Path;
 use async_std::task;
 use log::info;
 use nix::unistd;

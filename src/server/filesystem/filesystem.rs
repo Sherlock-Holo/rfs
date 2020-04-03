@@ -4,16 +4,16 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_std::fs;
 use async_std::fs::{DirBuilder, Metadata, OpenOptions};
-use async_std::path::{Path, PathBuf};
 use async_std::sync::Receiver;
 use fuse::{FileAttr, FileType};
 use futures_util::StreamExt;
 use log::{debug, error, info};
-use nix::{sched, unistd};
+use nix::unistd;
 
 use crate::path::PathClean;
 use crate::server::filesystem::attr::metadata_to_file_attr;
@@ -101,15 +101,11 @@ impl Filesystem {
     }
 
     async fn chroot<P: AsRef<Path>>(root: P) -> Result<()> {
-        env::set_current_dir(root.as_ref().to_path_buf())?;
-
-        unistd::chroot(".")?;
+        unistd::chroot(root.as_ref().as_os_str())?;
 
         info!("chroot {:?} success", root.as_ref());
 
         env::set_current_dir("/")?;
-
-        sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)?;
 
         Ok(())
     }

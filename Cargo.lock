@@ -46,9 +46,9 @@ dependencies = [
 
 [[package]]
 name = "async-signals"
-version = "0.3.0-alpha.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dceb74d35afa7635cc80bd9a0c1d6defda3b193f03831eb6d0d292babd81e8e0"
+checksum = "0ee6b9f18a82c4d4cd7ce11cd8cc3a21f486f6009f490b84ee271d2871179bf2"
 dependencies = [
  "futures-util",
  "lazy_static",

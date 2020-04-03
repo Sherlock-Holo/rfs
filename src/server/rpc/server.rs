@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_std::fs;
-use async_std::path::Path;
 use async_std::sync::RwLock;
 use async_std::sync::{channel, Sender};
 use async_std::task;
@@ -61,9 +61,9 @@ impl Server {
             info!("enable compress support");
         }
 
-        let cert = fs::read(cert_path).await?;
-        let key = fs::read(key_path).await?;
-        let client_ca = fs::read(client_ca_path).await?;
+        let cert = fs::read(cert_path.as_ref()).await?;
+        let key = fs::read(key_path.as_ref()).await?;
+        let client_ca = fs::read(client_ca_path.as_ref()).await?;
 
         let server_identity = Identity::from_pem(cert, key);
 

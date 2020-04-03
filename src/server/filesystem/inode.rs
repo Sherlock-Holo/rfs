@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-
-use async_std::path::PathBuf;
+use std::path::PathBuf;
 
 use super::entry::EntryPath;
 
