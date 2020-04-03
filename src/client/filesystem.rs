@@ -15,7 +15,7 @@ use fuse::{
     FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
-use futures_util::StreamExt;
+use futures::StreamExt;
 use libc::c_int;
 use log::{debug, error, info, warn};
 use nix::mount;

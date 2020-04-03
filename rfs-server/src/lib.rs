@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use async_signals::Signals;
 use async_std::fs;
-use futures_util::future::FutureExt;
-use futures_util::{select, StreamExt};
+use futures::future::FutureExt;
+use futures::{select, StreamExt};
 use log::{debug, info};
 use nix::libc;
 use serde::Deserialize;
@@ -177,7 +177,7 @@ mod tokio_runtime {
     use std::pin::Pin;
     use std::thread;
 
-    use futures_util::future::{pending, poll_fn};
+    use futures::future::{pending, poll_fn};
     use tokio::runtime::{Handle, Runtime};
 
     use lazy_static::lazy_static;

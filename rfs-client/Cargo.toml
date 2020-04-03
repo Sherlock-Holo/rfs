@@ -15,7 +15,7 @@ structopt = "0.3"
 anyhow = "1.0"
 log = "0.4"
 tonic = { version = "0.1", features = ["tls"] }
-futures-util = "0.3"
+futures = "0.3"
 lazy_static = "1"
 nix = "0.17"
 

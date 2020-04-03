@@ -19,8 +19,8 @@ use async_std::task;
 use async_std::task::JoinHandle;
 #[cfg(features = "test")]
 use fuse::{FileAttr, FileType};
-use futures_util::future::FutureExt;
-use futures_util::select;
+use futures::future::FutureExt;
+use futures::select;
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::FlockArg;

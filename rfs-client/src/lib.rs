@@ -186,7 +186,7 @@ mod tokio_runtime {
     use std::pin::Pin;
     use std::thread;
 
-    use futures_util::future::{pending, poll_fn};
+    use futures::future::{pending, poll_fn};
     use tokio::runtime::{Handle, Runtime};
 
     use lazy_static::lazy_static;

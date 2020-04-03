@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use async_std::fs;
 use async_std::sync::RwLock;
-use async_std::sync::{channel, Sender};
 use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
-use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures::channel::mpsc::{channel, Sender};
+use futures::stream::FuturesUnordered;
+use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
@@ -179,7 +179,7 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::ReadDir {
             inode: request.inode,
@@ -187,10 +187,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -228,7 +232,7 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::Lookup {
             parent: request.inode,
@@ -236,10 +240,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -261,7 +269,7 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::CreateDir {
             parent: request.inode,
@@ -270,10 +278,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -299,7 +311,7 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::CreateFile {
             parent: request.inode,
@@ -309,10 +321,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -344,7 +360,7 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::RemoveEntry {
             parent: request.inode,
@@ -353,10 +369,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -374,7 +394,7 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::RemoveEntry {
             parent: request.inode,
@@ -383,10 +403,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -404,7 +428,7 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::Rename {
             old_parent: request.old_parent,
@@ -414,10 +438,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -438,7 +466,7 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::Open {
             inode: request.inode,
@@ -446,10 +474,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -752,17 +784,21 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::GetAttr {
             inode: request.inode,
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 
@@ -825,7 +861,7 @@ impl Rfs for Server {
             },
         };
 
-        let (sender, receiver) = channel(1);
+        let (sender, mut receiver) = channel(1);
 
         let req = FSRequest::SetAttr {
             inode: request.inode,
@@ -833,10 +869,14 @@ impl Rfs for Server {
             response: sender,
         };
 
-        self.request_sender.send(req).await;
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
 
         let result = receiver
-            .recv()
+            .next()
             .await
             .ok_or(Status::aborted("server filesystem stopped"))?;
 

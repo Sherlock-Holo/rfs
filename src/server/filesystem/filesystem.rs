@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_std::fs;
 use async_std::fs::{DirBuilder, Metadata, OpenOptions};
-use async_std::sync::Receiver;
 use fuse::{FileAttr, FileType};
-use futures_util::StreamExt;
+use futures::channel::mpsc::Receiver;
+use futures::stream::StreamExt;
 use log::{debug, error, info};
 use nix::unistd;
 
@@ -112,49 +112,52 @@ impl Filesystem {
     }
 
     pub async fn run(&mut self) {
-        while let Some(request) = self.receiver.recv().await {
+        while let Some(request) = self.receiver.next().await {
             match request {
                 Request::Lookup {
                     parent,
                     name,
-                    response,
+                    mut response,
                 } => {
                     let result = self.lookup(parent, &name).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
-                Request::GetAttr { inode, response } => {
+                Request::GetAttr {
+                    inode,
+                    mut response,
+                } => {
                     let result = self.get_attr(inode).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::SetAttr {
                     inode,
                     new_attr,
-                    response,
+                    mut response,
                 } => {
                     let result = self.set_attr(inode, new_attr).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::CreateDir {
                     parent,
                     name,
                     mode,
-                    response,
+                    mut response,
                 } => {
                     let result = self.create_dir(parent, &name, mode).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::RemoveEntry {
                     parent,
                     name,
                     is_dir,
-                    response,
+                    mut response,
                 } => {
                     let result = self.remove_entry(parent, &name, is_dir).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::Rename {
@@ -162,30 +165,30 @@ impl Filesystem {
                     old_name,
                     new_parent,
                     new_name,
-                    response,
+                    mut response,
                 } => {
                     let result = self
                         .rename(old_parent, &old_name, new_parent, &new_name)
                         .await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::Open {
                     inode,
                     flags,
-                    response,
+                    mut response,
                 } => {
                     let result = self.open(inode, flags).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::ReadDir {
                     inode,
                     offset,
-                    response,
+                    mut response,
                 } => {
                     let result = self.read_dir(inode, offset).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
 
                 Request::CreateFile {
@@ -193,10 +196,10 @@ impl Filesystem {
                     name,
                     mode,
                     flags,
-                    response,
+                    mut response,
                 } => {
                     let result = self.create_file(parent, &name, mode, flags).await;
-                    response.send(result).await;
+                    let _ = response.try_send(result);
                 }
             }
         }
@@ -929,9 +932,10 @@ mod tests {
 
     use async_std::fs;
     use async_std::future::timeout;
-    use async_std::sync::channel;
     use async_std::sync::Mutex;
     use async_std::task;
+    use futures::channel::mpsc::channel;
+    use futures::SinkExt;
     use tempfile;
 
     use crate::log_init;
@@ -946,22 +950,22 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::GetAttr {
             inode: 1,
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 1);
         assert_eq!(attr.kind, FileType::Directory);
@@ -974,13 +978,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -989,9 +993,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1004,13 +1008,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1020,9 +1024,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (_, attr) = rx.recv().await.unwrap().unwrap();
+        let (_, attr) = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1035,14 +1039,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1051,11 +1055,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -1063,9 +1067,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1078,14 +1082,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create file
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1095,11 +1099,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -1107,9 +1111,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1122,14 +1126,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1138,20 +1142,20 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::GetAttr {
             inode: 2,
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1164,14 +1168,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1181,20 +1185,20 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::GetAttr {
             inode: 2,
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1207,14 +1211,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1223,11 +1227,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::SetAttr {
             inode: 2,
@@ -1244,9 +1248,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1259,14 +1263,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1275,11 +1279,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::RemoveEntry {
             parent: 1,
@@ -1288,11 +1292,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -1300,9 +1304,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        assert_eq!(rx.recv().await.unwrap(), Err(Errno::from(libc::ENOENT)))
+        assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 
     #[async_std::test]
@@ -1311,14 +1315,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1328,11 +1332,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::RemoveEntry {
             parent: 1,
@@ -1341,11 +1345,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -1353,9 +1357,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        assert_eq!(rx.recv().await.unwrap(), Err(Errno::from(libc::ENOENT)))
+        assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 
     #[async_std::test]
@@ -1364,14 +1368,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1380,11 +1384,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Rename {
             old_parent: 1,
@@ -1394,11 +1398,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -1406,9 +1410,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 3);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1421,14 +1425,14 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
         // create dir
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1438,11 +1442,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Rename {
             old_parent: 1,
@@ -1452,11 +1456,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -1464,9 +1468,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 3);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1479,13 +1483,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1494,11 +1498,11 @@ mod tests {
             response: tx,
         }; // inode 2
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1507,11 +1511,11 @@ mod tests {
             response: tx,
         }; // inode 3
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 2,
@@ -1520,11 +1524,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Rename {
             old_parent: 2,
@@ -1534,11 +1538,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 3,
@@ -1546,9 +1550,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 5);
         assert_eq!(attr.kind, FileType::Directory);
@@ -1561,13 +1565,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1576,11 +1580,11 @@ mod tests {
             response: tx,
         }; // inode 2
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1589,11 +1593,11 @@ mod tests {
             response: tx,
         }; // inode 3
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 2,
@@ -1603,11 +1607,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Rename {
             old_parent: 2,
@@ -1617,11 +1621,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 3,
@@ -1629,9 +1633,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 5);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -1644,13 +1648,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -1659,11 +1663,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::ReadDir {
             inode: 1,
@@ -1671,9 +1675,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let children = rx.recv().await.unwrap().unwrap();
+        let children = rx.next().await.unwrap().unwrap();
 
         assert_eq!(children.len(), 3);
 
@@ -1702,13 +1706,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1718,11 +1722,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -1730,9 +1734,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle = rx.recv().await.unwrap().unwrap();
+        let file_handle = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(
@@ -1753,13 +1757,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1769,11 +1773,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -1781,9 +1785,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle = rx.recv().await.unwrap().unwrap();
+        let file_handle = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(file_handle.get_file_handle_kind(), FileHandleKind::ReadOnly);
@@ -1801,13 +1805,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1817,11 +1821,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -1829,9 +1833,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle = rx.recv().await.unwrap().unwrap();
+        let file_handle = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(
@@ -1852,13 +1856,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1868,9 +1872,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
         let written = file_handle.write(b"test", 0).await.unwrap();
         file_handle.flush().await.unwrap();
@@ -1885,13 +1889,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1901,9 +1905,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
         let read = file_handle.read(&mut vec![0; 0], 0).await.unwrap();
         assert_eq!(read, 0);
@@ -1924,13 +1928,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -1940,15 +1944,15 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.write(b"test", 0).await, Ok(b"test".len()));
 
         file_handle.flush().await.unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::SetAttr {
             inode: 2,
@@ -1965,14 +1969,14 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.perm, 0o600);
         assert_eq!(attr.size, 2);
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -1980,9 +1984,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let mut file_handle = rx.recv().await.unwrap().unwrap();
+        let mut file_handle = rx.next().await.unwrap().unwrap();
 
         let mut buf = vec![0; 4];
 
@@ -1997,13 +2001,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2013,11 +2017,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2025,9 +2029,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
+        let mut file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2059,13 +2063,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2075,11 +2079,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2087,9 +2091,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
+        let mut file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2118,13 +2122,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2134,11 +2138,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2146,9 +2150,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle2 = rx.recv().await.unwrap().unwrap();
+        let file_handle2 = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
         assert_eq!(file_handle2.try_set_lock(true).await, Ok(()));
@@ -2160,13 +2164,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2176,11 +2180,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2188,9 +2192,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle2 = rx.recv().await.unwrap().unwrap();
+        let file_handle2 = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
 
@@ -2206,13 +2210,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2222,11 +2226,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2234,9 +2238,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
+        let mut file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2274,13 +2278,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2290,11 +2294,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2302,9 +2306,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle2 = rx.recv().await.unwrap().unwrap();
+        let file_handle2 = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.try_set_lock(false).await, Ok(()));
         assert_eq!(
@@ -2323,13 +2327,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2339,11 +2343,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2351,9 +2355,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle2 = rx.recv().await.unwrap().unwrap();
+        let file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2371,13 +2375,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2387,11 +2391,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2399,9 +2403,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let file_handle2 = rx.recv().await.unwrap().unwrap();
+        let file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2419,13 +2423,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2435,11 +2439,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2447,9 +2451,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
+        let mut file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2478,13 +2482,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2494,11 +2498,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Open {
             inode: 2,
@@ -2506,9 +2510,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let mut file_handle2 = rx.recv().await.unwrap().unwrap();
+        let mut file_handle2 = rx.next().await.unwrap().unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2545,13 +2549,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2561,9 +2565,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let (mut file_handle, _) = rx.recv().await.unwrap().unwrap();
+        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
 
@@ -2611,13 +2615,13 @@ mod tests {
         let perm = fs::metadata(tmp_file.path()).await.unwrap().permissions();
         let perm = perm.mode() ^ libc::S_IFREG;
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -2625,9 +2629,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
@@ -2641,13 +2645,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -2656,11 +2660,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateDir {
             parent: 1,
@@ -2669,11 +2673,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Rename {
             old_parent: 1,
@@ -2683,11 +2687,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -2695,9 +2699,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::Directory);
@@ -2711,13 +2715,13 @@ mod tests {
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (fs_tx, fs_rx) = channel(1);
+        let (mut fs_tx, fs_rx) = channel(1);
 
         let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
 
         task::spawn(async move { filesystem.run().await });
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2727,11 +2731,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
             parent: 1,
@@ -2741,11 +2745,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Rename {
             old_parent: 1,
@@ -2755,11 +2759,11 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        rx.recv().await.unwrap().unwrap();
+        rx.next().await.unwrap().unwrap();
 
-        let (tx, rx) = channel(1);
+        let (tx, mut rx) = channel(1);
 
         let req = Request::Lookup {
             parent: 1,
@@ -2767,9 +2771,9 @@ mod tests {
             response: tx,
         };
 
-        fs_tx.send(req).await;
+        fs_tx.send(req).await.unwrap();
 
-        let attr = rx.recv().await.unwrap().unwrap();
+        let attr = rx.next().await.unwrap().unwrap();
 
         assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::RegularFile);

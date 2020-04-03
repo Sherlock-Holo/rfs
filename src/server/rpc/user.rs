@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_std::sync::{Mutex, RwLock};
 use async_std::task::JoinHandle;
 use chrono::prelude::*;
-use futures_util::future::FutureExt;
-use futures_util::select;
+use futures::future::FutureExt;
+use futures::select;
 use log::{debug, warn};
 use uuid::Uuid;
 
