@@ -1,6 +1,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
+use std::os::raw::c_int;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
@@ -312,29 +313,27 @@ impl Filesystem {
         }
 
         if let Some(size) = set_attr.size {
-            if entry_path.is_file() {
-                let truncate = size == 0;
-
-                let file = fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .truncate(truncate)
-                    .open(path)
-                    .await?;
-
-                if size > 0 {
-                    debug!("set attr size {}", size);
-
-                    if let Err(err) = file.set_len(size).await {
-                        error!("set inode {} size {} failed", inode, size);
-
-                        return Err(err.into());
-                    }
-
-                    debug!("set inode {} size success", inode);
-                }
-            } else {
+            if entry_path.is_dir() {
                 return Err(libc::EISDIR.into());
+            }
+
+            let truncate = size == 0;
+
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(truncate)
+                .open(path)
+                .await?;
+
+            if size > 0 {
+                debug!("set attr size {}", size);
+
+                if let Err(err) = file.set_len(size).await {
+                    error!("set inode {} size {} failed", inode, size);
+
+                    return Err(err.into());
+                }
             }
         }
 
@@ -392,6 +391,11 @@ impl Filesystem {
                     return Err(err.into());
                 }
             }
+        }
+
+        // clean old record
+        if let Some(inode) = self.path_to_inode.remove(&create_path) {
+            self.inode_to_path.remove(&inode);
         }
 
         DirBuilder::new().mode(mode).create(&create_path).await?;
@@ -480,41 +484,43 @@ impl Filesystem {
         let old_name = old_name.clean()?;
         let new_name = new_name.clean()?;
 
-        // op means old parent
-        // oc means old child
-        // np means new parent
-        // nc means new child
-
         debug!(
             "rename {:?} from {} to {} as {:?}",
             old_name, old_parent, new_parent, new_name
         );
 
-        let op_entry_path = match self.inode_to_path.get(&old_parent) {
+        let old_parent_entry_path = match self.inode_to_path.get(&old_parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
 
-        let op_path = op_entry_path.get_path();
+        let old_parent_path = old_parent_entry_path.get_path();
 
-        let op_metadata = self
-            .get_metadata_with_inode_and_path(old_parent, op_path)
+        let old_parent_metadata = self
+            .get_metadata_with_inode_and_path(old_parent, old_parent_path)
             .await?;
 
-        if self.check_and_fix_inode_and_path(old_parent, &op_entry_path, op_path, &op_metadata) {
+        if self.check_and_fix_inode_and_path(
+            old_parent,
+            &old_parent_entry_path,
+            old_parent_path,
+            &old_parent_metadata,
+        ) {
             return Err(libc::ENOENT.into());
         }
 
-        if op_metadata.is_file() {
+        if old_parent_metadata.is_file() {
             return Err(libc::ENOTDIR.into());
         }
 
-        let oc_path = op_path.to_path_buf().apply(|path| path.push(old_name));
+        let old_child_path = old_parent_path
+            .to_path_buf()
+            .apply(|path| path.push(old_name));
 
-        let oc_metadata = match fs::metadata(&oc_path).await {
+        let old_child_metadata = match fs::metadata(&old_child_path).await {
             Err(err) => {
                 return if err.kind() == ErrorKind::NotFound {
-                    if let Some(inode) = self.path_to_inode.remove(&oc_path) {
+                    if let Some(inode) = self.path_to_inode.remove(&old_child_path) {
                         self.inode_to_path.remove(&inode);
                     }
 
@@ -527,59 +533,59 @@ impl Filesystem {
             Ok(metadata) => metadata,
         };
 
-        let np_entry_path = match self.inode_to_path.get(&new_parent) {
+        let new_parent_entry_path = match self.inode_to_path.get(&new_parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
 
-        let np_path = np_entry_path.get_path();
+        let new_parent_path = new_parent_entry_path.get_path();
 
-        let np_metadata = self
-            .get_metadata_with_inode_and_path(new_parent, np_path)
+        let new_parent_metadata = self
+            .get_metadata_with_inode_and_path(new_parent, new_parent_path)
             .await?;
 
-        if self.check_and_fix_inode_and_path(new_parent, &np_entry_path, np_path, &np_metadata) {
+        if self.check_and_fix_inode_and_path(
+            new_parent,
+            &new_parent_entry_path,
+            new_parent_path,
+            &new_parent_metadata,
+        ) {
             return Err(libc::ENOENT.into());
         }
 
-        if np_metadata.is_file() {
+        if new_parent_metadata.is_file() {
             return Err(libc::ENOTDIR.into());
         }
 
-        let nc_path = np_path.to_path_buf().apply(|path| path.push(new_name));
+        let new_child_path = new_parent_path
+            .to_path_buf()
+            .apply(|path| path.push(new_name));
 
-        /*if let Err(err) = fs::metadata(&nc_path).await {
-            if err.kind() != ErrorKind::NotFound {
-                return Err(err.into());
-            }
-        } else {
-            return Err(libc::EEXIST.into());
-        }*/
-
-        fs::rename(&oc_path, &nc_path).await?;
+        fs::rename(&old_child_path, &new_child_path).await?;
 
         // no matter exist or not, remove old child inode and path record
-        if let Some(inode) = self.path_to_inode.remove(&oc_path) {
+        if let Some(inode) = self.path_to_inode.remove(&old_child_path) {
             self.inode_to_path.remove(&inode);
         }
 
         // no matter exist or not, remove new child inode and path record
-        if let Some(inode) = self.path_to_inode.remove(&nc_path) {
+        if let Some(inode) = self.path_to_inode.remove(&new_child_path) {
             self.inode_to_path.remove(&inode);
         }
 
-        let nc_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+        let new_child_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
-        debug!("new child inode {}", nc_inode);
+        debug!("new child inode {}", new_child_inode);
 
-        let nc_entry_path = if oc_metadata.is_file() {
-            EntryPath::File(nc_path.clone())
+        let new_child_entry_path = if old_child_metadata.is_file() {
+            EntryPath::File(new_child_path.clone())
         } else {
-            EntryPath::Dir(nc_path.clone())
+            EntryPath::Dir(new_child_path.clone())
         };
 
-        self.inode_to_path.insert(nc_inode, nc_entry_path);
-        self.path_to_inode.insert(nc_path, nc_inode);
+        self.inode_to_path
+            .insert(new_child_inode, new_child_entry_path);
+        self.path_to_inode.insert(new_child_path, new_child_inode);
 
         Ok(())
     }
@@ -606,12 +612,14 @@ impl Filesystem {
 
         let mut options = fs::OpenOptions::new();
 
-        let fh_kind = if flags & libc::O_RDWR as u32 > 0 {
+        let flags = flags as c_int;
+
+        let fh_kind = if flags & libc::O_RDWR > 0 {
             options.write(true);
             options.read(true);
 
             FileHandleKind::ReadWrite
-        } else if flags & libc::O_WRONLY as u32 > 0 {
+        } else if flags & libc::O_WRONLY > 0 {
             options.write(true);
             options.read(false);
 
@@ -623,7 +631,7 @@ impl Filesystem {
             FileHandleKind::ReadOnly
         };
 
-        if flags & libc::O_TRUNC as u32 > 0 {
+        if flags & libc::O_TRUNC > 0 {
             debug!("open {:?} flags have truncate", path);
 
             options.truncate(true);
@@ -631,10 +639,8 @@ impl Filesystem {
 
         let sys_file = options.open(path).await?;
 
-        let fh_id = self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed);
-
         Ok(FileHandle::new(
-            fh_id,
+            self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
             #[cfg(features = "test")]
             inode,
             sys_file,
@@ -746,8 +752,6 @@ impl Filesystem {
             }
         }
 
-        debug!("fs::read_dir done");
-
         Ok(children
             .into_iter()
             .enumerate()
@@ -823,6 +827,11 @@ impl Filesystem {
             .open(&create_path)
             .await?;
 
+        // clean old record
+        if let Some(inode) = self.path_to_inode.remove(&create_path) {
+            self.inode_to_path.remove(&inode);
+        }
+
         let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
         let entry_path = EntryPath::File(create_path.clone());
@@ -834,10 +843,8 @@ impl Filesystem {
 
         let attr = metadata_to_file_attr(new_inode, metadata)?;
 
-        let fh_id = self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed);
-
         let file_handle = FileHandle::new(
-            fh_id,
+            self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
             #[cfg(features = "test")]
             new_inode,
             sys_file,
