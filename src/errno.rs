@@ -40,7 +40,7 @@ impl From<IoError> for Errno {
             return Errno(errno, Backtrace::capture());
         }
 
-        return Errno(libc::EINVAL, Backtrace::capture());
+        Errno(libc::EINVAL, Backtrace::capture())
     }
 }
 
