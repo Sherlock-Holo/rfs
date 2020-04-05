@@ -542,7 +542,7 @@ impl Rfs for Server {
                         Err(err) => {
                             warn!("get compressed read data failed {}", err);
 
-                            return (data, false);
+                            (data, false)
                         }
 
                         Ok(data) => (data, true),

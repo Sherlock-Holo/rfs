@@ -251,7 +251,7 @@ impl User {
                     err
                 );
 
-                return false;
+                false
             }
 
             Ok(no_response_time) => no_response_time > interval,
