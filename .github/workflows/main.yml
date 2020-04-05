@@ -8,6 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+
+      - name: install fuse build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse-dev pkg-config
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -23,6 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
+      - name: install fuse build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse-dev pkg-config
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -31,7 +42,7 @@ jobs:
       #      - uses: actions-rs/cargo@v1
       #        with:
       #          command: test
-      #          args: --jobs 1 -- --nocapture
+      #          args: --jobs 1 -- --nocsudo apture
 
       - name: test
         run: ./test.sh
@@ -41,6 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+
+      - name: install fuse build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse-dev pkg-config
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -57,6 +74,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+
+      - name: install fuse build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse-dev pkg-config
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -66,13 +89,19 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-            args: -- -D warnings
+#          args: -- -D warnings
 
-  build client:
+  build-client:
     name: build client
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+
+      - name: install fuse build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse-dev pkg-config
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -87,11 +116,17 @@ jobs:
           name: rfs-client
           path: rfs-client/rfs-client
 
-  build server:
+  build-server:
     name: build server
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+
+      - name: install fuse build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse-dev pkg-config
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
