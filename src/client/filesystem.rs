@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -8,13 +9,14 @@ use anyhow::Result;
 use async_notify::Notify;
 use async_signals::Signals;
 use async_std::future::timeout;
-use async_std::sync;
-use async_std::sync::{RwLock, Sender};
 use async_std::task;
+use atomic_value::AtomicValue;
 use fuse::{
     FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
+use futures::channel::oneshot;
+use futures::channel::oneshot::Sender;
 use futures::StreamExt;
 use libc::c_int;
 use log::{debug, error, info, warn};
@@ -39,7 +41,7 @@ const MIN_COMPRESS_SIZE: usize = 2048;
 
 pub struct Filesystem {
     uuid: Option<Uuid>,
-    client: Arc<RwLock<RfsClient<Channel>>>,
+    client: Arc<AtomicValue<RfsClient<Channel>>>,
     id_sender: Option<Sender<Uuid>>,
     tokio_handle: Option<tokio::runtime::Handle>,
     failed_notify: Option<Notify>,
@@ -69,7 +71,7 @@ impl Filesystem {
 
         info!("server connected");
 
-        let client = Arc::new(RwLock::new(RfsClient::new(channel)));
+        let client = Arc::new(AtomicValue::new(RfsClient::new(channel)));
 
         Ok(Filesystem {
             uuid: None,
@@ -121,7 +123,7 @@ impl Filesystem {
             }
         });
 
-        let (sender, receiver) = sync::channel(1);
+        let (sender, receiver) = oneshot::channel();
 
         self.id_sender.replace(sender);
 
@@ -129,14 +131,14 @@ impl Filesystem {
 
         fuse::mount(self, mount_point, &opts)?;
 
-        if let Some(uuid) = receiver.recv().await {
+        if let Ok(uuid) = receiver.await {
             let req = TonicRequest::new(LogoutRequest {
                 uuid: uuid.to_hyphenated().to_string(),
             });
 
             info!("sending logout request");
 
-            let mut client = client.read().await.clone();
+            let mut client = client.load().deref().clone();
 
             match timeout(Duration::from_secs(10), client.logout(req)).await {
                 Err(err) => {
@@ -177,7 +179,7 @@ impl Filesystem {
     }
 
     async fn reconnect_loop(
-        client: Arc<RwLock<RfsClient<Channel>>>,
+        client: Arc<AtomicValue<RfsClient<Channel>>>,
         uri: Uri,
         tls_cfg: ClientTlsConfig,
         handle: tokio::runtime::Handle,
@@ -215,13 +217,17 @@ impl Filesystem {
                 };
             };
 
-            *client.write().await = RfsClient::new(channel);
+            client.store(RfsClient::new(channel));
 
             info!("reconnect success");
         }
     }
 
-    async fn ping_loop(client: Arc<RwLock<RfsClient<Channel>>>, uuid: Uuid, failed_notify: Notify) {
+    async fn ping_loop(
+        client: Arc<AtomicValue<RfsClient<Channel>>>,
+        uuid: Uuid,
+        failed_notify: Notify,
+    ) {
         let mut rpc_timeout = INITIAL_TIMEOUT;
 
         'outer: loop {
@@ -235,7 +241,7 @@ impl Filesystem {
                     }),
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 if timeout(rpc_timeout, client.ping(ping_req)).await.is_ok() {
                     rpc_timeout = INITIAL_TIMEOUT;
@@ -260,7 +266,7 @@ impl Filesystem {
 impl FuseFilesystem for Filesystem {
     fn init(&mut self, _req: &Request) -> Result<(), libc::c_int> {
         task::block_on(async {
-            let mut client = self.client.read().await.clone();
+            let mut client = self.client.load().deref().clone();
 
             for _ in 0..3 {
                 let req = TonicRequest::new(RegisterRequest {
@@ -301,10 +307,10 @@ impl FuseFilesystem for Filesystem {
                         }
 
                         self.id_sender
-                            .as_ref()
+                            .take()
                             .expect("id sender must be initialize")
                             .send(uuid)
-                            .await;
+                            .expect("won't failed");
 
                         let failed_notify =
                             self.failed_notify.clone().expect("not None in rpc mode");
@@ -367,7 +373,7 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.lookup(rpc_req)).await {
                     Err(err) => {
@@ -453,7 +459,7 @@ impl FuseFilesystem for Filesystem {
                     inode,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.get_attr(rpc_req)).await {
                     Err(err) => {
@@ -573,7 +579,7 @@ impl FuseFilesystem for Filesystem {
                     }),
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.set_attr(rpc_req)).await {
                     Err(err) => {
@@ -672,7 +678,7 @@ impl FuseFilesystem for Filesystem {
                     mode,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.mkdir(rpc_req)).await {
                     Err(err) => {
@@ -763,7 +769,7 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.unlink(rpc_req)).await {
                     Err(err) => {
@@ -840,7 +846,7 @@ impl FuseFilesystem for Filesystem {
                     name: name.to_string(),
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.rm_dir(rpc_req)).await {
                     Err(err) => {
@@ -936,7 +942,7 @@ impl FuseFilesystem for Filesystem {
                     new_name: new_name.to_string(),
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.rename(rpc_req)).await {
                     Err(err) => {
@@ -1006,7 +1012,7 @@ impl FuseFilesystem for Filesystem {
                     flags,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.open_file(rpc_req)).await {
                     Err(err) => {
@@ -1092,7 +1098,7 @@ impl FuseFilesystem for Filesystem {
                     size: size as u64,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.read_file(rpc_req)).await {
                     Err(err) => {
@@ -1235,7 +1241,7 @@ impl FuseFilesystem for Filesystem {
                     compressed,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.write_file(rpc_req)).await {
                     Err(err) => {
@@ -1311,7 +1317,7 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.flush(rpc_req)).await {
                     Err(err) => {
@@ -1387,7 +1393,7 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.close_file(rpc_req)).await {
                     Err(err) => {
@@ -1454,7 +1460,7 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.sync_file(rpc_req)).await {
                     Err(err) => {
@@ -1530,7 +1536,7 @@ impl FuseFilesystem for Filesystem {
                     inode,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.read_dir(rpc_req)).await {
                     Err(err) => {
@@ -1679,7 +1685,7 @@ impl FuseFilesystem for Filesystem {
                     flags,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.create_file(rpc_req)).await {
                     Err(err) => {
@@ -1772,7 +1778,7 @@ impl FuseFilesystem for Filesystem {
                     file_handle_id: fh,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.get_lock(rpc_req)).await {
                     Err(err) => {
@@ -1874,7 +1880,7 @@ impl FuseFilesystem for Filesystem {
                         block: false,
                     });
 
-                    let mut client = client.read().await.clone();
+                    let mut client = client.load().deref().clone();
 
                     match client.release_lock(rpc_req).await {
                         Err(err) => {
@@ -1939,7 +1945,7 @@ impl FuseFilesystem for Filesystem {
                     block: sleep,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 match client.set_lock(rpc_req).await {
                     Err(err) => {
@@ -2001,7 +2007,7 @@ impl FuseFilesystem for Filesystem {
                     unique,
                 });
 
-                let mut client = client.read().await.clone();
+                let mut client = client.load().deref().clone();
 
                 let result = match timeout(rpc_timeout, client.interrupt(rpc_req)).await {
                     Err(err) => {
