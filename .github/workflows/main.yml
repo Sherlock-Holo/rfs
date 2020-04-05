@@ -1,0 +1,107 @@
+on: [push, pull_request]
+
+name: CI
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: nightly
+          override: true
+      #      - uses: actions-rs/cargo@v1
+      #        with:
+      #          command: test
+      #          args: --jobs 1 -- --nocapture
+
+      - name: test
+        run: ./test.sh
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: nightly
+          override: true
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: stable
+          override: true
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+            args: -- -D warnings
+
+  build client:
+    name: build client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: nightly
+          override: true
+
+      - name: build
+        run: cd rfs-client && cargo build --release -Z unstable-options --out-dir .
+
+      - uses: actions/upload-artifact@v1
+        with:
+          name: rfs-client
+          path: rfs-client/rfs-client
+
+  build server:
+    name: build server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: nightly
+          override: true
+
+      - name: build
+        run: cd rfs-server && cargo build --release -Z unstable-options --out-dir .
+
+      - uses: actions/upload-artifact@v1
+        with:
+          name: rfs-server
+          path: rfs-server/rfs-server
