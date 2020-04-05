@@ -11,16 +11,14 @@ rfs = { path = ".." }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.8"
-serde_json = "1.0"
 structopt = "0.3"
 futures = "0.3"
 log = "0.4"
 nix = "0.17"
-rand = { version = "0.7", default-features = false, features = ["getrandom"] }
 anyhow = "1.0"
 scopeguard = "1.1"
 lazy_static = "1"
-async-signals = "0.3.0-alpha.0"
+async-signals = "0.3.0"
 
 [dependencies.tokio]
 version = "0.2"
