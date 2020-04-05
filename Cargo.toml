@@ -35,10 +35,7 @@ async-notify = "0.1"
 tokio = "0.2"
 async-signals = "0.3"
 snap = "1"
-
-[dependencies.atomic_value]
-branch = "master"
-git = "https://github.com/Sherlock-Holo/atomic_value"
+atomic_value = "0.1"
 
 [dependencies.fuse]
 branch = "master"

@@ -127,7 +127,8 @@ dependencies = [
 [[package]]
 name = "atomic_value"
 version = "0.1.0"
-source = "git+https://github.com/Sherlock-Holo/atomic_value#c75e62f61c7c5f3c6635beae25427c3fe944f2d2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd34a9799123e5091887a741084637dee0bb0702a8e57050e9788e5a38ab4edd"
 
 [[package]]
 name = "atty"
@@ -1269,9 +1270,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.50"
+version = "1.0.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78a7a12c167809363ec3bd7329fc0a3369056996de43c4b37ef3cd54a6ce4867"
+checksum = "da07b57ee2623368351e9a0488bb0b261322a15a6e0ae53e243cbdc0f4208da9"
 dependencies = [
  "itoa",
  "ryu",
