@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "rfs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-notify",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "rfs-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-std",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "rfs-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-signals",
