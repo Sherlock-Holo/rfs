@@ -14,7 +14,7 @@ serde_yaml = "0.8"
 structopt = "0.3"
 anyhow = "1.0"
 log = "0.4"
-tonic = { version = "0.1", features = ["tls"] }
+tonic = { version = "0.2", features = ["tls"] }
 futures = "0.3"
 lazy_static = "1"
 nix = "0.17"

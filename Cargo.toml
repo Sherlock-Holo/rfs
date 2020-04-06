@@ -26,7 +26,7 @@ nix = "0.17"
 libc = "0.2"
 path-clean = "0.1"
 futures = "0.3"
-tonic = { version = "0.1", features = ["transport", "tls", "tls-roots"] }
+tonic = { version = "0.2", features = ["transport", "tls", "tls-roots"] }
 prost = "0.6"
 prost-types = "0.6"
 serde = { version = "1.0", features = ["derive"] }
@@ -54,4 +54,4 @@ features = ["attributes"]
 tempfile = "3.1"
 
 [build-dependencies]
-tonic-build = "0.1"
+tonic-build = "0.2"
