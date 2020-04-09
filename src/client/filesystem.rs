@@ -1217,7 +1217,7 @@ impl FuseFilesystem for Filesystem {
                                 if compressed_data.len() < data.len() {
                                     (compressed_data, true)
                                 } else {
-                                    debug!("compress is bad");
+                                    debug!("compressed data is bigger than original data");
 
                                     (data.to_vec(), false)
                                 }

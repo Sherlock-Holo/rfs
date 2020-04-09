@@ -575,19 +575,10 @@ impl Filesystem {
 
         fs::rename(&old_child_path, &new_child_path).await?;
 
-        // no matter exist or not, remove old child inode and path record
-        if let Some(inode) = self.path_to_inode.remove(&old_child_path) {
-            self.inode_to_path.remove(&inode);
-        }
-
         // no matter exist or not, remove new child inode and path record
         if let Some(inode) = self.path_to_inode.remove(&new_child_path) {
             self.inode_to_path.remove(&inode);
         }
-
-        let new_child_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
-
-        debug!("new child inode {}", new_child_inode);
 
         let new_child_entry_path = if old_child_metadata.is_file() {
             EntryPath::File(new_child_path.clone())
@@ -595,9 +586,22 @@ impl Filesystem {
             EntryPath::Dir(new_child_path.clone())
         };
 
-        self.inode_to_path
-            .insert(new_child_inode, new_child_entry_path);
-        self.path_to_inode.insert(new_child_path, new_child_inode);
+        if let Some(inode) = self.path_to_inode.remove(&old_child_path) {
+            self.path_to_inode.insert(new_child_path, inode);
+
+            self.inode_to_path.entry(inode).and_modify(|path| {
+                *path = new_child_entry_path;
+            });
+        } else {
+            // server side other people add a new 'old child', rfs server doesn't know it, to fix
+            // it, we only can add a new inode and entry path
+
+            let new_child_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
+
+            self.inode_to_path
+                .insert(new_child_inode, new_child_entry_path);
+            self.path_to_inode.insert(new_child_path, new_child_inode);
+        }
 
         Ok(())
     }
@@ -847,6 +851,11 @@ impl Filesystem {
         let new_inode = self.inode_gen.fetch_add(1, Ordering::Relaxed);
 
         let entry_path = EntryPath::File(create_path.clone());
+
+        debug!(
+            "create file inode {}, entry path {:?}",
+            new_inode, entry_path
+        );
 
         self.inode_to_path.insert(new_inode, entry_path);
         self.path_to_inode.insert(create_path.clone(), new_inode);
