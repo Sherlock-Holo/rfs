@@ -31,9 +31,10 @@ use crate::server::filesystem::inode::PathToInode;
 use crate::{Apply, Result};
 
 mod attr;
+mod dir;
 mod entry;
+mod file;
 mod file_handle;
-
 mod inode;
 mod request;
 

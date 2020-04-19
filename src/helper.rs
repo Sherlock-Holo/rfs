@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse::{FileAttr, FileType};
@@ -103,16 +105,39 @@ fn get_blocks(size: u64) -> u64 {
     }
 }
 
+/// compare_collection will find out which item that old collection doesn't have
+pub fn compare_collection<Item: Eq + Hash>(
+    old: impl IntoIterator<Item = Item>,
+    new: impl IntoIterator<Item = Item>,
+) -> Vec<Item> {
+    let old = old.into_iter().collect::<HashSet<Item>>();
+
+    new.into_iter().filter(|name| old.contains(name)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test() {
+    fn apply_test() {
         let x = 100.apply(|myself| {
             *myself += 1;
         });
 
         assert_eq!(x, 101);
+    }
+
+    #[test]
+    fn compare_collection_test() {
+        let old = vec![1, 2, 3, 4, 5];
+        let new = vec![2, 4, 6, 8, 10];
+
+        assert_eq!(compare_collection(old, new), vec![2, 4]);
+
+        let old = vec![1, 2, 3, 4, 5];
+        let new = vec![2, 4, 6, 8, 10];
+
+        assert_eq!(compare_collection(old.iter(), new.iter()), vec![&2, &4])
     }
 }
