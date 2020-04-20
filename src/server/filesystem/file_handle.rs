@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
-use std::ops::Deref;
 use std::os::raw::c_int;
 #[cfg(features = "test")]
 use std::os::unix::fs::MetadataExt;
@@ -314,7 +313,7 @@ impl FileHandle {
     }
 
     pub async fn get_lock_kind(&self) -> LockKind {
-        self.lock_kind.read().await.deref().clone()
+        *self.lock_kind.read().await
     }
 }
 

@@ -87,15 +87,7 @@ impl Filesystem {
 
         let root = Entry::from(Dir::new_root());
 
-        inode_map.insert(1, root.clone());
-
-        /*let mut inode_to_path = InodeToPath::new();
-        let mut path_to_inode = PathToInode::new();
-
-        let root_path = PathBuf::from("/");
-
-        inode_to_path.insert(1, EntryPath::Dir(root_path.clone()));
-        path_to_inode.insert(root_path, 1);*/
+        inode_map.insert(1, root);
 
         Ok(Self {
             inode_gen: 1,

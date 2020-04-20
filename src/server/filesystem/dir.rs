@@ -203,10 +203,10 @@ impl Dir {
                 fs::metadata(&dir.get_absolute_path()).await?,
             )?
         } else {
-            current_dir_attr.clone()
+            current_dir_attr
         };
 
-        child_info.extend_from_slice(&vec![
+        child_info.extend_from_slice(&[
             (
                 inner.inode,
                 FileType::Directory,
