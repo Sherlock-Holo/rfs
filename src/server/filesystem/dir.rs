@@ -14,7 +14,7 @@ use async_std::sync::Mutex;
 use fuse::{FileAttr, FileType};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
-use log::warn;
+use log::{debug, warn};
 
 use crate::errno::Errno;
 use crate::helper::compare_collection;
@@ -183,6 +183,8 @@ impl Dir {
 
         // remove not exist child entry
         for name in need_delete_name {
+            debug!("clean not exist child entry {:?} in {}", name, inner.inode);
+
             match inner.children.remove(&name).expect("checked") {
                 Entry::File(file) => {
                     inode_map.remove(&file.get_inode());
@@ -193,6 +195,31 @@ impl Dir {
         }
 
         let mut child_info = Vec::with_capacity(entries.len());
+
+        let current_dir_attr = metadata_to_file_attr(inner.inode, fs::metadata(&path).await?)?;
+        let parent_dir_attr = if let Some(dir) = &inner.parent {
+            metadata_to_file_attr(
+                dir.get_inode(),
+                fs::metadata(&dir.get_absolute_path()).await?,
+            )?
+        } else {
+            current_dir_attr.clone()
+        };
+
+        child_info.extend_from_slice(&vec![
+            (
+                inner.inode,
+                FileType::Directory,
+                OsString::from("."),
+                current_dir_attr,
+            ),
+            (
+                parent_dir_attr.ino,
+                FileType::Directory,
+                OsString::from(".."),
+                parent_dir_attr,
+            ),
+        ]);
 
         // insert new child entry, update same name but type not same child entry and collect child
         // entry info.
@@ -252,9 +279,6 @@ impl Dir {
                         let name = dir.name.to_os_string();
 
                         drop(dir);
-                        /*let inode = dir.0.try_lock().unwrap().inode;
-
-                        let name = dir.0.try_lock().unwrap().name.to_os_string();*/
 
                         let dir = inner.children.remove(&name).expect("checked");
 
@@ -549,6 +573,9 @@ impl Dir {
         let new_name = new_name.as_ref();
 
         let old_path = self.get_absolute_path().apply(|path| path.push(name));
+        let new_path = new_parent
+            .get_absolute_path()
+            .apply(|path| path.push(new_name));
 
         let mut inner = self.0.try_lock().unwrap();
 
@@ -576,9 +603,6 @@ impl Dir {
             None => {
                 // old parent doesn't have this child entry, we can rename directly and only add
                 // child entry to new parent
-                let new_path = new_parent
-                    .get_absolute_path()
-                    .apply(|path| path.push(new_name));
 
                 fs::rename(&old_path, &new_path).await?;
 
@@ -634,6 +658,8 @@ impl Dir {
                     inner.children.insert(name.to_os_string(), entry.clone());
                     inode_map.insert(new_inode, entry);
                 }
+
+                fs::rename(&old_path, &new_path).await?;
 
                 let mut entry = inner.children.remove(name).expect("checked");
 
