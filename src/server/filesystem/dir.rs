@@ -103,8 +103,7 @@ impl Dir {
 
             Some(entry) => {
                 // child entry type isn't right, fix it
-                if (metadata.is_dir() && entry.is_file()) || (metadata.is_file() && entry.is_dir())
-                {
+                if is_kind_wrong(&metadata, entry) {
                     let inode = entry.get_inode();
 
                     if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
@@ -271,36 +270,38 @@ impl Dir {
                                 metadata_to_file_attr(inode, metadata.clone())?,
                             ));
                         }
-                    } else if let Entry::Dir(dir) = entry {
-                        need_update = true;
-
-                        let dir = dir.0.try_lock().unwrap();
-                        let inode = dir.inode;
-                        let name = dir.name.to_os_string();
-
-                        drop(dir);
-
-                        let dir = inner.children.remove(&name).expect("checked");
-
-                        if let Entry::Dir(mut dir) = dir {
-                            dir.delete_children(inode_map);
-                        }
-
-                        inode_map.remove(&inode);
                     } else {
-                        let inode = if let Entry::File(file) = entry {
-                            file.get_inode()
-                        } else {
-                            unreachable!()
-                        };
+                        if let Entry::Dir(dir) = entry {
+                            need_update = true;
 
-                        // collect
-                        child_info.push((
-                            inode,
-                            FileType::RegularFile,
-                            name.to_os_string(),
-                            metadata_to_file_attr(inode, metadata.clone())?,
-                        ));
+                            let dir = dir.0.try_lock().unwrap();
+                            let inode = dir.inode;
+                            let name = dir.name.to_os_string();
+
+                            drop(dir);
+
+                            let dir = inner.children.remove(&name).expect("checked");
+
+                            if let Entry::Dir(mut dir) = dir {
+                                dir.delete_children(inode_map);
+                            }
+
+                            inode_map.remove(&inode);
+                        } else {
+                            let inode = if let Entry::File(file) = entry {
+                                file.get_inode()
+                            } else {
+                                unreachable!()
+                            };
+
+                            // collect
+                            child_info.push((
+                                inode,
+                                FileType::RegularFile,
+                                name.to_os_string(),
+                                metadata_to_file_attr(inode, metadata.clone())?,
+                            ));
+                        }
                     }
 
                     if !need_update {

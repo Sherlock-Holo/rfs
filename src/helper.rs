@@ -112,7 +112,7 @@ pub fn compare_collection<Item: Eq + Hash>(
 ) -> Vec<Item> {
     let old = old.into_iter().collect::<HashSet<Item>>();
 
-    new.into_iter().filter(|name| old.contains(name)).collect()
+    new.into_iter().filter(|name| !old.contains(name)).collect()
 }
 
 #[cfg(test)]
