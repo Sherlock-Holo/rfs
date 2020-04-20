@@ -363,13 +363,7 @@ impl Filesystem {
 
         if let Entry::Dir(mut dir) = entry {
             let attr = dir
-                .create_file(
-                    name,
-                    mode,
-                    flags as i32,
-                    &mut self.inode_map,
-                    &mut self.inode_gen,
-                )
+                .create_file(name, mode, flags, &mut self.inode_map, &mut self.inode_gen)
                 .await?
                 .get_attr()
                 .await?;

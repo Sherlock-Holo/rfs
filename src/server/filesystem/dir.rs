@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_std::fs;
-use async_std::fs::{DirBuilder, OpenOptions};
+use async_std::fs::{DirBuilder, Metadata, OpenOptions};
 use async_std::sync::Mutex;
 use fuse::{FileAttr, FileType};
 use futures::stream::FuturesOrdered;
@@ -384,8 +384,7 @@ impl Dir {
 
             Some(entry) => {
                 // child entry type isn't right, fix it
-                if (metadata.is_dir() && entry.is_file()) || (metadata.is_file() && entry.is_dir())
-                {
+                if is_kind_wrong(&metadata, entry) {
                     let inode = entry.get_inode();
 
                     if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
@@ -471,6 +470,8 @@ impl Dir {
     ) -> Result<Entry> {
         let name = name.as_ref();
 
+        debug!("create mode {} flags {}", mode, flags);
+
         let child_path = self.get_absolute_path().apply(|path| path.push(name));
 
         let mut inner = self.0.try_lock().unwrap();
@@ -479,9 +480,7 @@ impl Dir {
             Ok(metadata) => {
                 if let Some(entry) = inner.children.get(name) {
                     // child entry type isn't right, fix it
-                    if (metadata.is_dir() && entry.is_file())
-                        || (metadata.is_file() && entry.is_dir())
-                    {
+                    if is_kind_wrong(&metadata, entry) {
                         let inode = entry.get_inode();
 
                         if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
@@ -540,6 +539,7 @@ impl Dir {
         } else {
             let sys_file: async_std::fs::File = OpenOptions::new()
                 .create_new(true)
+                .write(true)
                 .mode(mode)
                 .custom_flags(flags)
                 .open(&child_path)
@@ -577,6 +577,8 @@ impl Dir {
             .get_absolute_path()
             .apply(|path| path.push(new_name));
 
+        let inplace_rename = self.get_inode() == new_parent.get_inode();
+
         let mut inner = self.0.try_lock().unwrap();
 
         let metadata = match fs::metadata(&old_path).await {
@@ -611,7 +613,11 @@ impl Dir {
 
                 fs::set_permissions(&new_path, permissions).await?;*/
 
-                let mut new_inner = new_parent.0.try_lock().unwrap();
+                let mut new_inner = if inplace_rename {
+                    inner
+                } else {
+                    new_parent.0.try_lock().unwrap()
+                };
 
                 // try to clean old exist child entry
                 if let Some(entry) = new_inner.children.remove(new_name) {
@@ -639,8 +645,7 @@ impl Dir {
             }
 
             Some(entry) => {
-                if (metadata.is_dir() && entry.is_file()) || (metadata.is_file() && entry.is_dir())
-                {
+                if is_kind_wrong(&metadata, entry) {
                     let inode = entry.get_inode();
 
                     if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
@@ -663,7 +668,11 @@ impl Dir {
 
                 let mut entry = inner.children.remove(name).expect("checked");
 
-                let mut new_inner = new_parent.0.try_lock().unwrap();
+                let mut new_inner = if inplace_rename {
+                    inner
+                } else {
+                    new_parent.0.try_lock().unwrap()
+                };
 
                 // try to clean old exist child entry
                 if let Some(entry) = new_inner.children.remove(new_name) {
@@ -755,4 +764,8 @@ impl Dir {
             }
         }
     }
+}
+
+fn is_kind_wrong(metadata: &Metadata, entry: &Entry) -> bool {
+    (metadata.is_dir() && entry.is_file()) || (metadata.is_file() && entry.is_dir())
 }
