@@ -1,34 +1,24 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::ErrorKind;
-use std::os::raw::c_int;
-use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
-use async_std::fs;
-use async_std::fs::{DirBuilder, Metadata, OpenOptions};
 use fuse::{FileAttr, FileType};
 use futures::channel::mpsc::Receiver;
 use futures::stream::StreamExt;
-use log::{debug, error, info};
+use log::{debug, info};
 use nix::unistd;
 
 pub use attr::SetAttr;
-use entry::EntryPath;
+use dir::Dir;
+use entry::Entry;
 pub use file_handle::FileHandle;
 pub use file_handle::LockKind;
 pub use file_handle::LockTable;
-use inode::{Inode, InodeToPath};
+use inode::{Inode, InodeMap};
 pub use request::Request;
 
 use crate::path::PathClean;
-use crate::server::filesystem::attr::metadata_to_file_attr;
-use crate::server::filesystem::file_handle::FileHandleKind;
-use crate::server::filesystem::inode::PathToInode;
-use crate::{Apply, Result};
+use crate::Result;
 
 mod attr;
 mod dir;
@@ -39,10 +29,9 @@ mod inode;
 mod request;
 
 pub struct Filesystem {
-    inode_to_path: InodeToPath,
-    path_to_inode: PathToInode,
-    inode_gen: AtomicU64,
-    file_handle_id_gen: AtomicU64,
+    inode_map: InodeMap,
+    inode_gen: Inode,
+    file_handle_id_gen: u64,
     receiver: Receiver<Request>,
 }
 
@@ -94,19 +83,24 @@ impl Filesystem {
 
         Self::chroot(&root).await?;
 
-        let mut inode_to_path = InodeToPath::new();
+        let mut inode_map = InodeMap::new();
+
+        let root = Entry::from(Dir::new_root());
+
+        inode_map.insert(1, root.clone());
+
+        /*let mut inode_to_path = InodeToPath::new();
         let mut path_to_inode = PathToInode::new();
 
         let root_path = PathBuf::from("/");
 
         inode_to_path.insert(1, EntryPath::Dir(root_path.clone()));
-        path_to_inode.insert(root_path, 1);
+        path_to_inode.insert(root_path, 1);*/
 
         Ok(Self {
-            inode_to_path,
-            path_to_inode,
-            inode_gen: AtomicU64::new(2),
-            file_handle_id_gen: AtomicU64::new(1),
+            inode_gen: 1,
+            file_handle_id_gen: 0,
+            inode_map,
             receiver,
         })
     }
@@ -220,7 +214,19 @@ impl Filesystem {
 
         debug!("lookup name {:?} in parent {}", name, parent);
 
-        let entry_path = match self.inode_to_path.get(&parent) {
+        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+
+        if let Entry::Dir(mut dir) = entry {
+            let child_entry = dir
+                .lookup(&name, &mut self.inode_map, &mut self.inode_gen)
+                .await?;
+
+            child_entry.get_attr().await
+        } else {
+            Err(libc::ENOTDIR.into())
+        }
+
+        /*let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -283,11 +289,16 @@ impl Filesystem {
             }
         };
 
-        metadata_to_file_attr(inode, metadata)
+        metadata_to_file_attr(inode, metadata)*/
     }
 
     async fn get_attr(&mut self, inode: Inode) -> Result<FileAttr> {
-        let entry_path = match self.inode_to_path.get(&inode) {
+        self.inode_map
+            .get(&inode)
+            .ok_or(libc::ENOENT)?
+            .get_attr()
+            .await
+        /*let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -300,11 +311,16 @@ impl Filesystem {
             return Err(libc::ENOENT.into());
         }
 
-        metadata_to_file_attr(inode, metadata)
+        metadata_to_file_attr(inode, metadata)*/
     }
 
     async fn set_attr(&mut self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
-        let entry_path = match self.inode_to_path.get(&inode) {
+        self.inode_map
+            .get(&inode)
+            .ok_or(libc::ENOENT)?
+            .set_attr(set_attr)
+            .await
+        /*let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -350,7 +366,7 @@ impl Filesystem {
             }
         }
 
-        self.get_attr(inode).await
+        self.get_attr(inode).await*/
     }
 
     async fn create_dir(&mut self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
@@ -358,7 +374,18 @@ impl Filesystem {
 
         debug!("create dir name {:?} in parent {}", name, parent);
 
-        let entry_path = match self.inode_to_path.get(&parent) {
+        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+
+        if let Entry::Dir(mut dir) = entry {
+            dir.create_dir(name, mode, &mut self.inode_map, &mut self.inode_gen)
+                .await?
+                .get_attr()
+                .await
+        } else {
+            Err(libc::ENOTDIR.into())
+        }
+
+        /*let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -422,7 +449,7 @@ impl Filesystem {
 
         let metadata = fs::metadata(create_path).await?;
 
-        metadata_to_file_attr(new_inode, metadata)
+        metadata_to_file_attr(new_inode, metadata)*/
     }
 
     async fn remove_entry(&mut self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
@@ -433,7 +460,22 @@ impl Filesystem {
             name, parent, is_dir
         );
 
-        let entry_path = match self.inode_to_path.get(&parent) {
+        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+
+        if let Entry::Dir(mut dir) = entry {
+            let kind = if is_dir {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            };
+
+            dir.remove_child(name, kind, &mut self.inode_map, &mut self.inode_gen)
+                .await
+        } else {
+            Err(libc::ENOTDIR.into())
+        }
+
+        /*let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -482,9 +524,7 @@ impl Filesystem {
 
         if let Some(inode) = self.path_to_inode.remove(&remove_path) {
             self.inode_to_path.remove(&inode);
-        }
-
-        Ok(())
+        }*/
     }
 
     async fn rename(
@@ -502,7 +542,26 @@ impl Filesystem {
             old_name, old_parent, new_parent, new_name
         );
 
-        let old_parent_entry_path = match self.inode_to_path.get(&old_parent) {
+        let old_parent = self.inode_map.get(&old_parent).ok_or(libc::ENOENT)?.clone();
+        let new_parent = self.inode_map.get(&new_parent).ok_or(libc::ENOENT)?.clone();
+
+        if let Entry::Dir(mut old_parent) = old_parent {
+            if let Entry::Dir(mut new_parent) = new_parent {
+                return old_parent
+                    .move_child_to_new_parent(
+                        old_name,
+                        &mut new_parent,
+                        new_name,
+                        &mut self.inode_map,
+                        &mut self.inode_gen,
+                    )
+                    .await;
+            }
+        }
+
+        Err(libc::ENOTDIR.into())
+
+        /*let old_parent_entry_path = match self.inode_to_path.get(&old_parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -604,11 +663,11 @@ impl Filesystem {
             self.path_to_inode.insert(new_child_path, new_child_inode);
         }
 
-        Ok(())
+        Ok(())*/
     }
 
-    async fn open(&mut self, inode: Inode, flags: u32) -> Result<FileHandle> {
-        let entry_path = match self.inode_to_path.get(&inode) {
+    async fn open(&mut self, inode: Inode, flags: i32) -> Result<FileHandle> {
+        /*let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -623,11 +682,19 @@ impl Filesystem {
 
         if metadata.is_dir() {
             return Err(libc::EISDIR.into());
+        }*/
+
+        debug!("open inode {} flags {}", inode, flags);
+
+        let entry = self.inode_map.get(&inode).ok_or(libc::ENOENT)?;
+
+        if let Entry::File(file) = entry {
+            file.open(flags, &mut self.file_handle_id_gen).await
+        } else {
+            Err(libc::EISDIR.into())
         }
 
-        debug!("open {:?} flags {}", path, flags);
-
-        let mut options = fs::OpenOptions::new();
+        /*let mut options = fs::OpenOptions::new();
 
         let flags = flags as c_int;
 
@@ -662,7 +729,7 @@ impl Filesystem {
             inode,
             sys_file,
             fh_kind,
-        ))
+        ))*/
     }
 
     async fn read_dir(
@@ -672,7 +739,24 @@ impl Filesystem {
     ) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
         debug!("readdir in parent {}", inode);
 
-        let entry_path = match self.inode_to_path.get(&inode) {
+        let entry = self.inode_map.get(&inode).ok_or(libc::ENOENT)?.clone();
+
+        if let Entry::Dir(mut dir) = entry {
+            let children = dir
+                .readdir(&mut self.inode_map, &mut self.inode_gen)
+                .await?;
+
+            Ok(children
+                .into_iter()
+                .enumerate()
+                .map(|(index, (inode, kind, name, _attr))| (inode, (index + 1) as i64, kind, name))
+                .skip(offset as usize)
+                .collect())
+        } else {
+            Err(libc::ENOTDIR.into())
+        }
+
+        /*let entry_path = match self.inode_to_path.get(&inode) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -774,7 +858,7 @@ impl Filesystem {
             .enumerate()
             .map(|(index, (inode, kind, name))| (inode, (index + 1) as i64, kind, name))
             .skip(offset as usize)
-            .collect())
+            .collect())*/
     }
 
     async fn create_file(
@@ -782,13 +866,35 @@ impl Filesystem {
         parent: Inode,
         name: &OsStr,
         mode: u32,
-        _flags: u32,
+        flags: i32,
     ) -> Result<(FileHandle, FileAttr)> {
         let name = name.clean()?;
 
         debug!("create file name {:?} in parent {}", name, parent);
 
-        let entry_path = match self.inode_to_path.get(&parent) {
+        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+
+        if let Entry::Dir(mut dir) = entry {
+            let attr = dir
+                .create_file(
+                    name,
+                    mode,
+                    flags as i32,
+                    &mut self.inode_map,
+                    &mut self.inode_gen,
+                )
+                .await?
+                .get_attr()
+                .await?;
+
+            let file_handle = self.open(attr.ino, flags).await?;
+
+            Ok((file_handle, attr))
+        } else {
+            Err(libc::ENOTDIR.into())
+        }
+
+        /* let entry_path = match self.inode_to_path.get(&parent) {
             None => return Err(libc::ENOENT.into()),
             Some(entry_path) => entry_path.clone(),
         };
@@ -868,15 +974,15 @@ impl Filesystem {
         let file_handle = FileHandle::new(
             self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed),
             #[cfg(features = "test")]
-            new_inode,
+                new_inode,
             sys_file,
             FileHandleKind::ReadWrite,
         );
 
-        Ok((file_handle, attr))
+        Ok((file_handle, attr))*/
     }
 
-    /// when inode and path need fix, will return true
+    /*/// when inode and path need fix, will return true
     fn check_and_fix_inode_and_path(
         &mut self,
         inode: Inode,
@@ -938,7 +1044,7 @@ impl Filesystem {
 
             Ok(metadata) => Ok(metadata),
         }
-    }
+    }*/
 }
 
 #[cfg(features = "test")]
@@ -958,6 +1064,7 @@ mod tests {
     use tempfile;
 
     use crate::log_init;
+    use crate::server::filesystem::file_handle::FileHandleKind;
     use crate::server::filesystem::LockKind;
     use crate::Errno;
 
@@ -1039,7 +1146,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1114,7 +1221,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1200,7 +1307,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1347,7 +1454,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1457,7 +1564,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1622,7 +1729,7 @@ mod tests {
             parent: 2,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1737,7 +1844,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1749,7 +1856,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1788,7 +1895,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1800,7 +1907,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDONLY as u32,
+            flags: libc::O_RDONLY,
             response: tx,
         };
 
@@ -1836,7 +1943,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1848,7 +1955,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_WRONLY as u32,
+            flags: libc::O_WRONLY,
             response: tx,
         };
 
@@ -1887,7 +1994,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1920,7 +2027,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1959,7 +2066,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -1999,7 +2106,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDONLY as u32,
+            flags: libc::O_RDONLY,
             response: tx,
         };
 
@@ -2032,7 +2139,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2044,7 +2151,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2094,7 +2201,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2106,7 +2213,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2153,7 +2260,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2165,7 +2272,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2195,7 +2302,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2207,7 +2314,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2241,7 +2348,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2253,7 +2360,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2309,7 +2416,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2321,7 +2428,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2358,7 +2465,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2370,7 +2477,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2406,7 +2513,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2418,7 +2525,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2454,7 +2561,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2466,7 +2573,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2513,7 +2620,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2525,7 +2632,7 @@ mod tests {
 
         let req = Request::Open {
             inode: 2,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2580,7 +2687,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2746,7 +2853,7 @@ mod tests {
             parent: 1,
             name: OsString::from("test"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 
@@ -2760,7 +2867,7 @@ mod tests {
             parent: 1,
             name: OsString::from("exist"),
             mode: 0o644,
-            flags: libc::O_RDWR as u32,
+            flags: libc::O_RDWR,
             response: tx,
         };
 

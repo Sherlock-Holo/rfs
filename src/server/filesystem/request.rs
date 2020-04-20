@@ -50,7 +50,7 @@ pub enum Request {
 
     Open {
         inode: Inode,
-        flags: u32,
+        flags: i32,
         response: Sender<Result<FileHandle>>,
     },
 
@@ -64,7 +64,7 @@ pub enum Request {
         parent: Inode,
         name: OsString,
         mode: u32,
-        flags: u32,
+        flags: i32,
         response: Sender<Result<(FileHandle, FileAttr)>>,
     },
 }

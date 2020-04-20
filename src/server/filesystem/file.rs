@@ -1,11 +1,10 @@
-use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
-use std::os::raw::c_int;
 use std::os::unix::fs::PermissionsExt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use async_std::fs;
+use async_std::sync::Mutex;
 use fuse::FileAttr;
 use log::{debug, error};
 
@@ -18,9 +17,6 @@ use super::inode::Inode;
 use super::FileHandle;
 use super::SetAttr;
 
-#[derive(Debug, Clone)]
-pub struct File(Rc<RefCell<InnerFile>>);
-
 #[derive(Debug)]
 struct InnerFile {
     parent: Dir,
@@ -28,9 +24,12 @@ struct InnerFile {
     name: OsString,
 }
 
+#[derive(Debug, Clone)]
+pub struct File(Arc<Mutex<InnerFile>>);
+
 impl File {
     pub fn from_exist(parent: &Dir, name: &OsStr, inode: Inode) -> Self {
-        Self(Rc::new(RefCell::new(InnerFile {
+        Self(Arc::new(Mutex::new(InnerFile {
             parent: parent.clone(),
             inode,
             name: name.to_os_string(),
@@ -38,11 +37,11 @@ impl File {
     }
 
     pub fn get_inode(&self) -> Inode {
-        self.0.borrow().inode
+        self.0.try_lock().unwrap().inode
     }
 
-    pub async fn open(&self, flags: u32, file_handle_id_gen: &mut u64) -> Result<FileHandle> {
-        let inner = self.0.borrow();
+    pub async fn open(&self, flags: i32, file_handle_id_gen: &mut u64) -> Result<FileHandle> {
+        let inner = self.0.try_lock().unwrap();
 
         let path = inner
             .parent
@@ -52,8 +51,6 @@ impl File {
         debug!("open {:?} flags {}", path, flags);
 
         let mut options = fs::OpenOptions::new();
-
-        let flags = flags as c_int;
 
         let fh_kind = if flags & libc::O_RDWR > 0 {
             options.write(true);
@@ -93,7 +90,7 @@ impl File {
     }
 
     pub async fn get_attr(&self) -> Result<FileAttr> {
-        let inner = self.0.borrow();
+        let inner = self.0.try_lock().unwrap();
 
         let path = inner
             .parent
@@ -104,7 +101,7 @@ impl File {
     }
 
     pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
-        let inner = self.0.borrow();
+        let inner = self.0.try_lock().unwrap();
 
         let path = inner
             .parent
@@ -146,10 +143,10 @@ impl File {
     }
 
     pub fn set_new_parent(&mut self, new_parent: &Dir) {
-        self.0.borrow_mut().parent = new_parent.clone();
+        self.0.try_lock().unwrap().parent = new_parent.clone();
     }
 
     pub fn set_new_name(&mut self, new_name: &OsStr) {
-        self.0.borrow_mut().name = new_name.to_os_string();
+        self.0.try_lock().unwrap().name = new_name.to_os_string();
     }
 }

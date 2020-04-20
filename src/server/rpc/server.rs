@@ -82,6 +82,9 @@ impl Server {
         let mut fs = Filesystem::new(root_path.as_ref(), receiver).await?;
 
         task::spawn(async move { fs.run().await });
+        /*std::thread::spawn(move || {
+            task::block_on(async move { fs.run().await });
+        });*/
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
@@ -317,7 +320,7 @@ impl Rfs for Server {
             parent: request.inode,
             name: OsString::from(&request.name),
             mode: request.mode,
-            flags: request.flags,
+            flags: request.flags as i32,
             response: sender,
         };
 
@@ -470,7 +473,7 @@ impl Rfs for Server {
 
         let req = FSRequest::Open {
             inode: request.inode,
-            flags: request.flags,
+            flags: request.flags as i32,
             response: sender,
         };
 
