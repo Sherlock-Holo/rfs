@@ -105,8 +105,8 @@ fn get_blocks(size: u64) -> u64 {
     }
 }
 
-/// compare_collection will find out which item that old collection doesn't have
-pub fn compare_collection<Item: Eq + Hash>(
+/// compare_and_get_new will find out which item that old collection doesn't have
+pub fn compare_and_get_new<Item: Eq + Hash>(
     old: impl IntoIterator<Item = Item>,
     new: impl IntoIterator<Item = Item>,
 ) -> Vec<Item> {
@@ -129,15 +129,23 @@ mod tests {
     }
 
     #[test]
-    fn compare_collection_test() {
+    fn compare_and_get_new_test() {
         let old = vec![1, 2, 3, 4, 5];
         let new = vec![2, 4, 6, 8, 10];
 
-        assert_eq!(compare_collection(old, new), vec![2, 4]);
+        assert_eq!(compare_and_get_new(old, new), vec![6, 8, 10]);
 
         let old = vec![1, 2, 3, 4, 5];
         let new = vec![2, 4, 6, 8, 10];
 
-        assert_eq!(compare_collection(old.iter(), new.iter()), vec![&2, &4])
+        assert_eq!(
+            compare_and_get_new(old.iter(), new.iter()),
+            vec![&6, &8, &10]
+        );
+
+        let old = vec![1, 2, 3, 4, 5];
+        let new = vec![1, 2, 3];
+
+        assert_eq!(compare_and_get_new(old, new), vec![]);
     }
 }
