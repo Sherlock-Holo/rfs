@@ -24,6 +24,57 @@ struct InnerFile {
     name: OsString,
 }
 
+impl InnerFile {
+    pub async fn get_attr(&self) -> Result<FileAttr> {
+        let path = self
+            .parent
+            .get_absolute_path()
+            .apply(|path| path.push(&self.name));
+
+        metadata_to_file_attr(self.inode, fs::metadata(path).await?)
+    }
+
+    pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
+        let path = self
+            .parent
+            .get_absolute_path()
+            .apply(|path| path.push(&self.name));
+
+        let metadata = fs::metadata(&path).await?;
+
+        if let Some(mode) = set_attr.mode {
+            let mut permissions = metadata.permissions();
+
+            permissions.set_mode(mode);
+
+            fs::set_permissions(&path, permissions).await?;
+        }
+
+        if let Some(size) = set_attr.size {
+            let truncate = size == 0;
+
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(truncate)
+                .open(&path)
+                .await?;
+
+            if size > 0 {
+                debug!("set attr size {}", size);
+
+                if let Err(err) = file.set_len(size).await {
+                    error!("set inode {} size {} failed", self.inode, size);
+
+                    return Err(err.into());
+                }
+            }
+        }
+
+        self.get_attr().await
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct File(Arc<Mutex<InnerFile>>);
 
@@ -92,54 +143,13 @@ impl File {
     pub async fn get_attr(&self) -> Result<FileAttr> {
         let inner = self.0.try_lock().unwrap();
 
-        let path = inner
-            .parent
-            .get_absolute_path()
-            .apply(|path| path.push(&inner.name));
-
-        metadata_to_file_attr(inner.inode, fs::metadata(path).await?)
+        inner.get_attr().await
     }
 
     pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
         let inner = self.0.try_lock().unwrap();
 
-        let path = inner
-            .parent
-            .get_absolute_path()
-            .apply(|path| path.push(&inner.name));
-
-        let metadata = fs::metadata(&path).await?;
-
-        if let Some(mode) = set_attr.mode {
-            let mut permissions = metadata.permissions();
-
-            permissions.set_mode(mode);
-
-            fs::set_permissions(&path, permissions).await?;
-        }
-
-        if let Some(size) = set_attr.size {
-            let truncate = size == 0;
-
-            let file = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(truncate)
-                .open(&path)
-                .await?;
-
-            if size > 0 {
-                debug!("set attr size {}", size);
-
-                if let Err(err) = file.set_len(size).await {
-                    error!("set inode {} size {} failed", inner.inode, size);
-
-                    return Err(err.into());
-                }
-            }
-        }
-
-        self.get_attr().await
+        inner.set_attr(set_attr).await
     }
 
     pub fn set_new_parent(&mut self, new_parent: &Dir) {
