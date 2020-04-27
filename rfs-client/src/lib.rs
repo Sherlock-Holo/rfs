@@ -7,16 +7,15 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use async_std::fs;
-use async_std::task;
 use log::info;
 use nix::unistd;
 use nix::unistd::ForkResult;
 use serde::Deserialize;
+use smol::Task;
 use structopt::StructOpt;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
 use rfs::{log_init, Filesystem};
-use tokio_runtime::{enter_tokio, get_tokio_handle};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -136,7 +135,11 @@ pub fn run() -> Result<()> {
         serde_yaml::from_slice(&cfg_data)?
     };
 
-    task::block_on(enter_tokio(Box::pin(inner_run(cfg))))
+    for _ in 0..num_cpus::get().max(1) {
+        std::thread::spawn(|| smol::run(futures::future::pending::<()>()));
+    }
+
+    smol::block_on(Task::spawn(inner_run(cfg)))
 }
 
 async fn inner_run(cfg: Config) -> Result<()> {
@@ -174,37 +177,7 @@ async fn inner_run(cfg: Config) -> Result<()> {
         false
     };
 
-    let filesystem = Filesystem::new(uri, tls_config, get_tokio_handle(), compress).await?;
+    let filesystem = Filesystem::new(uri, tls_config, compress).await?;
 
-    filesystem.mount(&cfg.mount_path).await?;
-
-    Ok(())
-}
-
-mod tokio_runtime {
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::thread;
-
-    use futures::future::{pending, poll_fn};
-    use tokio::runtime::{Handle, Runtime};
-
-    use lazy_static::lazy_static;
-
-    lazy_static! {
-        static ref HANDLE: Handle = {
-            let mut rt = Runtime::new().unwrap();
-            let handle = rt.handle().clone();
-            thread::spawn(move || rt.block_on(pending::<()>()));
-            handle
-        };
-    }
-
-    pub async fn enter_tokio<T>(mut f: Pin<Box<dyn Future<Output = T> + 'static + Send>>) -> T {
-        poll_fn(|context| HANDLE.enter(|| f.as_mut().poll(context))).await
-    }
-
-    pub fn get_tokio_handle() -> Handle {
-        HANDLE.clone()
-    }
+    filesystem.mount(&cfg.mount_path).await
 }

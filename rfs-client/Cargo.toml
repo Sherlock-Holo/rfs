@@ -16,13 +16,7 @@ anyhow = "1.0"
 log = "0.4"
 tonic = { version = "0.2", features = ["tls"] }
 futures = "0.3"
-lazy_static = "1"
 nix = "0.17"
-
-[dependencies.tokio]
-version = "0.2"
-features = ["rt-threaded"]
-
-[dependencies.async-std]
-version = "1.5"
-features = ["attributes"]
+smol = { version = "0.1", features = ["tokio02"] }
+async-std = "1.5"
+num_cpus = "1.13"

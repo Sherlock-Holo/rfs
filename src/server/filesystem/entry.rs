@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
+use std::fs::Metadata;
 
-use async_std::fs::Metadata;
 use fuse::{FileAttr, FileType};
 
 use crate::Result;

@@ -14,8 +14,6 @@ use async_notify::Notify;
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
-use async_std::task;
-use async_std::task::JoinHandle;
 #[cfg(features = "test")]
 use fuse::{FileAttr, FileType};
 use futures::future::FutureExt;
@@ -23,6 +21,7 @@ use futures::select;
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::FlockArg;
+use smol::Task;
 
 use crate::errno::Errno;
 use crate::Result;
@@ -163,7 +162,7 @@ impl FileHandle {
         unique: u64,
         share: bool,
         lock_table: LockTable,
-    ) -> Result<JoinHandle<Result<bool>>> {
+    ) -> Result<Task<Result<bool>>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -188,9 +187,9 @@ impl FileHandle {
 
         debug!("save unique {} lock canceler", unique);
 
-        Ok(task::spawn(async move {
+        Ok(Task::spawn(async move {
             let lock_success = loop {
-                let lock_job = task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
+                let lock_job = Task::blocking(async move { fcntl::flock(raw_fd, flock_arg) });
 
                 let result = select! {
                     _ = lock_canceler.notified().fuse() => break false,
@@ -319,7 +318,7 @@ impl FileHandle {
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        task::block_on(async {
+        smol::block_on(async {
             let _ = self.flush().await;
         })
     }

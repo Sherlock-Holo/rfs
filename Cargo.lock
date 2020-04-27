@@ -46,9 +46,9 @@ dependencies = [
 
 [[package]]
 name = "async-signals"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ee6b9f18a82c4d4cd7ce11cd8cc3a21f486f6009f490b84ee271d2871179bf2"
+checksum = "f7bfd327d5b740fe22c1971fdef6c383d3d2e3f6191f8ff6e61b6b8aeaab6591"
 dependencies = [
  "futures-util",
  "lazy_static",
@@ -62,7 +62,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "538ecb01eb64eecd772087e5b6f7540cbc917f047727339a472dafed2185b267"
 dependencies = [
  "async-attributes",
- "async-task",
+ "async-task 1.3.1",
  "broadcaster",
  "crossbeam-channel",
  "crossbeam-deque",
@@ -112,6 +112,12 @@ dependencies = [
  "libc",
  "winapi 0.3.8",
 ]
+
+[[package]]
+name = "async-task"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c17772156ef2829aadc587461c7753af20b7e8db1529bc66855add962a3b35d3"
 
 [[package]]
 name = "async-trait"
@@ -249,6 +255,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3a71ab494c0b5b860bdc8407ae08978052417070c2ced38573a9157ad75b8ac"
 
 [[package]]
+name = "crossbeam"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69323bff1fb41c635347b8ead484a5ca6c3f11914d784170b158d8449ab07f8e"
+dependencies = [
+ "cfg-if",
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -282,6 +302,16 @@ dependencies = [
  "maybe-uninit",
  "memoffset",
  "scopeguard",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c695eeca1e7173472a32221542ae469b3e9aac3a4fc81f7696bcad82029493db"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -351,7 +381,7 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 [[package]]
 name = "fuse"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#3bcd972137254d18eb5039139834e10c0068f76e"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#7b86e07a12adf74f4382d285da02ec3aefe4d90b"
 dependencies = [
  "fuse-abi",
  "fuse-sys",
@@ -363,12 +393,12 @@ dependencies = [
 [[package]]
 name = "fuse-abi"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#3bcd972137254d18eb5039139834e10c0068f76e"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#7b86e07a12adf74f4382d285da02ec3aefe4d90b"
 
 [[package]]
 name = "fuse-sys"
 version = "0.4.0-dev"
-source = "git+https://github.com/Sherlock-Holo/fuse-rs#3bcd972137254d18eb5039139834e10c0068f76e"
+source = "git+https://github.com/Sherlock-Holo/fuse-rs#7b86e07a12adf74f4382d285da02ec3aefe4d90b"
 dependencies = [
  "pkg-config",
 ]
@@ -888,6 +918,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
+name = "piper"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6d62a6ea407d82215154475927b288219b79c8670e3371166210328e758ebaa"
+dependencies = [
+ "crossbeam-utils",
+ "futures",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1126,10 +1166,10 @@ dependencies = [
  "prost",
  "prost-types",
  "serde",
+ "smol",
  "snap",
  "tempfile",
  "thiserror",
- "tokio",
  "tonic",
  "tonic-build",
  "tower",
@@ -1143,14 +1183,14 @@ dependencies = [
  "anyhow",
  "async-std",
  "futures",
- "lazy_static",
  "log",
  "nix",
+ "num_cpus",
  "rfs",
  "serde",
  "serde_yaml",
+ "smol",
  "structopt",
- "tokio",
  "tonic",
 ]
 
@@ -1162,14 +1202,14 @@ dependencies = [
  "async-signals",
  "async-std",
  "futures",
- "lazy_static",
  "log",
  "nix",
+ "num_cpus",
  "rfs",
  "serde",
  "serde_yaml",
+ "smol",
  "structopt",
- "tokio",
 ]
 
 [[package]]
@@ -1221,6 +1261,12 @@ dependencies = [
  "lazy_static",
  "winapi 0.3.8",
 ]
+
+[[package]]
+name = "scoped-tls-hkt"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2e9d7eaddb227e8fbaaa71136ae0e1e913ca159b86c7da82f3e8f0044ad3a63"
 
 [[package]]
 name = "scopeguard"
@@ -1306,10 +1352,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7cb5678e1615754284ec264d9bb5b4c27d2018577fd90ac0ceb578591ed5ee4"
 
 [[package]]
+name = "smol"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350bf2952224030d0007755fcec71244fd802d38074d4bdfbf653d062e5cf9bc"
+dependencies = [
+ "async-task 3.0.0",
+ "crossbeam",
+ "futures",
+ "nix",
+ "once_cell",
+ "piper",
+ "scoped-tls-hkt",
+ "slab",
+ "socket2",
+ "tokio",
+ "wepoll-binding",
+]
+
+[[package]]
 name = "snap"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7fb9b0bb877b35a1cc1474a3b43d9c226a2625311760cdda2cbccbc0c7a8376"
+
+[[package]]
+name = "socket2"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03088793f677dce356f3ccc2edb1b314ad191ab702a5de3faf49304f7e104918"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "winapi 0.3.8",
+]
 
 [[package]]
 name = "spin"
@@ -1403,18 +1480,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.15"
+version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54b3d3d2ff68104100ab257bb6bb0cb26c901abe4bd4ba15961f3bf867924012"
+checksum = "d12a1dae4add0f0d568eebc7bf142f145ba1aa2544cafb195c76f0f409091b60"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.15"
+version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca972988113b7715266f91250ddb98070d033c62a011fa0fcc57434a649310dd"
+checksum = "3f34e0c1caaa462fd840ec6b768946ea1e7842620d94fe29d5b847138f521269"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1899,6 +1976,25 @@ checksum = "f1f50e1972865d6b1adb54167d1c8ed48606004c2c9d0ea5f1eeb34d95e863ef"
 dependencies = [
  "ring",
  "untrusted",
+]
+
+[[package]]
+name = "wepoll-binding"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "720cc52662740f7097c7bbc15f7906e4d3f6e64e5ec70e84eb4690b70ce1afc5"
+dependencies = [
+ "bitflags",
+ "wepoll-sys",
+]
+
+[[package]]
+name = "wepoll-sys"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9082a777aed991f6769e2b654aa0cb29f1c3d615daf009829b07b66c7aff6a24"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

@@ -1,8 +1,12 @@
 use anyhow::Result;
+use smol::Task;
 
-use rfs_server::{enter_tokio, run};
+use rfs_server::run;
 
-#[async_std::main]
-async fn main() -> Result<()> {
-    enter_tokio(Box::pin(run())).await
+fn main() -> Result<()> {
+    for _ in 0..num_cpus::get().max(1) {
+        std::thread::spawn(|| smol::run(futures::future::pending::<()>()));
+    }
+
+    smol::block_on(Task::spawn(run()))
 }

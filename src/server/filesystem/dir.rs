@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::fs::Metadata;
 use std::io::ErrorKind;
 use std::ops::Deref;
 use std::os::unix::fs::DirBuilderExt;
@@ -9,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_std::fs;
-use async_std::fs::{DirBuilder, Metadata, OpenOptions};
+use async_std::fs::{DirBuilder, OpenOptions};
 use async_std::sync::Mutex;
 use fuse::{FileAttr, FileType};
 use futures::stream::FuturesOrdered;
@@ -17,7 +18,7 @@ use futures::StreamExt;
 use log::{debug, warn};
 
 use crate::errno::Errno;
-use crate::helper::compare_collection;
+use crate::helper::compare_and_get_new;
 use crate::{Apply, Result};
 
 use super::attr::metadata_to_file_attr;
@@ -178,7 +179,7 @@ impl Dir {
         let new_names = entries.iter().map(|(name, _)| name.to_os_string());
         let old_names = inner.children.keys().map(|name| name.to_os_string());
 
-        let need_delete_name = compare_collection(new_names, old_names);
+        let need_delete_name = compare_and_get_new(new_names, old_names);
 
         // remove not exist child entry
         for name in need_delete_name {

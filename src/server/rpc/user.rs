@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_std::sync::{Mutex, RwLock};
-use async_std::task::JoinHandle;
 use chrono::prelude::*;
 use futures::future::FutureExt;
 use futures::select;
 use log::{debug, warn};
+use smol::Task;
 use uuid::Uuid;
 
 use crate::errno::Errno;
@@ -40,11 +40,6 @@ impl User {
             }),
             enable_compress,
         }
-    }
-
-    //#[inline]
-    pub async fn update_last_alive_time(&self, now: DateTime<Local>) {
-        self.inner.write().await.last_alive_time = now;
     }
 
     //#[inline]
@@ -153,7 +148,7 @@ impl User {
         fh_id: u64,
         unique: u64,
         share: bool,
-    ) -> Result<JoinHandle<Result<bool>>> {
+    ) -> Result<Task<Result<bool>>> {
         let guard = self.inner.read().await;
 
         let lock_table = guard.lock_table.clone();
@@ -254,8 +249,19 @@ impl User {
                 false
             }
 
-            Ok(no_response_time) => no_response_time > interval,
+            Ok(no_response_time) => {
+                debug!(
+                    "user {:?} no response time {:?}, allow max no response time {:?}",
+                    guard.uuid, no_response_time, interval
+                );
+
+                no_response_time < interval
+            }
         }
+    }
+
+    pub async fn update_last_alive_time(&self, now: DateTime<Local>) {
+        self.inner.write().await.last_alive_time = now;
     }
 
     pub async fn get_id(&self) -> Uuid {

@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use async_std::fs;
 use async_std::sync::RwLock;
-use async_std::task;
 use chrono::prelude::*;
 use fuse::FileType;
 use futures::channel::mpsc::{channel, Sender};
 use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
+use smol::Task;
+use smol::Timer;
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
 use tonic::transport::Server as TonicServer;
@@ -40,6 +41,7 @@ use super::user::User;
 type Result<T> = std::result::Result<T, Status>;
 
 const MIN_COMPRESS_SIZE: usize = 2048;
+const ONLINE_CHECK_INTERVAL: Duration = Duration::from_secs((60.0 * 1.5) as u64);
 
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
@@ -81,10 +83,7 @@ impl Server {
 
         let mut fs = Filesystem::new(root_path.as_ref(), receiver).await?;
 
-        task::spawn(async move { fs.run().await });
-        /*std::thread::spawn(move || {
-            task::block_on(async move { fs.run().await });
-        });*/
+        Task::spawn(async move { fs.run().await }).detach();
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
@@ -95,7 +94,7 @@ impl Server {
 
         let users = rpc_server.users.clone();
 
-        task::spawn(async { Self::check_online_users(users) });
+        Task::spawn(Self::check_online_users(users)).detach();
 
         Ok(TonicServer::builder()
             .tls_config(tls_config)
@@ -137,7 +136,7 @@ impl Server {
 
     async fn check_online_users(user_map: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>) {
         loop {
-            task::sleep(Duration::from_secs(60)).await;
+            Timer::after(ONLINE_CHECK_INTERVAL).await;
 
             {
                 let mut user_map = user_map.write().await;
@@ -146,7 +145,7 @@ impl Server {
 
                 user_map.iter().for_each(|(uuid, user)| {
                     futures_unordered.push(async move {
-                        if !user.is_online(Duration::from_secs(60)).await {
+                        if !user.is_online(ONLINE_CHECK_INTERVAL).await {
                             Some(uuid)
                         } else {
                             None
@@ -534,7 +533,7 @@ impl Rfs for Server {
             if self.compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
                 let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
 
-                task::spawn_blocking(|| {
+                Task::blocking(async {
                     if let Err(err) = encoder.write_all(&data) {
                         warn!("compress read data failed {}", err);
 

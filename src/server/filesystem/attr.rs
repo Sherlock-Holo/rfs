@@ -1,8 +1,8 @@
+use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_std::fs::Metadata;
 use fuse::{FileAttr, FileType};
 
 use crate::Result;

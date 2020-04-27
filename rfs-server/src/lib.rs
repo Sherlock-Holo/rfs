@@ -12,7 +12,6 @@ use structopt::StructOpt;
 
 use rfs::log_init;
 use rfs::Server;
-pub use tokio_runtime::enter_tokio;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -74,29 +73,5 @@ pub async fn run() -> Result<()> {
 
             Ok(())
         }
-    }
-}
-
-mod tokio_runtime {
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::thread;
-
-    use futures::future::{pending, poll_fn};
-    use tokio::runtime::{Handle, Runtime};
-
-    use lazy_static::lazy_static;
-
-    lazy_static! {
-        static ref HANDLE: Handle = {
-            let mut rt = Runtime::new().unwrap();
-            let handle = rt.handle().clone();
-            thread::spawn(move || rt.block_on(pending::<()>()));
-            handle
-        };
-    }
-
-    pub async fn enter_tokio<T>(mut f: Pin<Box<dyn Future<Output = T> + 'static + Send>>) -> T {
-        poll_fn(|context| HANDLE.enter(|| f.as_mut().poll(context))).await
     }
 }
