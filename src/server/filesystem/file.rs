@@ -107,21 +107,27 @@ impl File {
             options.write(true);
             options.read(true);
 
+            debug!("open {:?} with O_RDWR", path);
+
             FileHandleKind::ReadWrite
         } else if flags & libc::O_WRONLY > 0 {
             options.write(true);
             options.read(false);
+
+            debug!("open {:?} with O_WRONLY", path);
 
             FileHandleKind::WriteOnly
         } else {
             options.write(false);
             options.read(true);
 
+            debug!("open {:?} read only", path);
+
             FileHandleKind::ReadOnly
         };
 
         if flags & libc::O_TRUNC > 0 {
-            debug!("open {:?} flags have truncate", path);
+            debug!("open {:?} with O_TRUNC", path);
 
             options.truncate(true);
         }

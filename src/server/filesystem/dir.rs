@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::Metadata;
 use std::io::ErrorKind;
-use std::ops::Deref;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
@@ -92,7 +91,7 @@ impl Dir {
         match inner.children.get(name) {
             None => {
                 *inode_gen += 1;
-                let new_inode = *inode_gen.deref();
+                let new_inode = *inode_gen;
 
                 let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -107,7 +106,11 @@ impl Dir {
                 if is_kind_wrong(&metadata, entry) {
                     let inode = entry.get_inode();
 
-                    if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
+                    if let Entry::Dir(mut dir) = inner
+                        .children
+                        .remove(name)
+                        .expect("checked child not exist")
+                    {
                         dir.delete_children(inode_map);
                     }
 
@@ -115,7 +118,7 @@ impl Dir {
 
                     *inode_gen += 1;
 
-                    let new_inode = *inode_gen.deref();
+                    let new_inode = *inode_gen;
 
                     let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -185,7 +188,11 @@ impl Dir {
         for name in need_delete_name {
             debug!("clean not exist child entry {:?} in {}", name, inner.inode);
 
-            match inner.children.remove(&name).expect("checked") {
+            match inner
+                .children
+                .remove(&name)
+                .expect("checked child not exist")
+            {
                 Entry::File(file) => {
                     inode_map.remove(&file.get_inode());
                 }
@@ -203,6 +210,7 @@ impl Dir {
                 fs::metadata(&dir.get_absolute_path()).await?,
             )?
         } else {
+            // current dir is root, its parent is itself
             current_dir_attr
         };
 
@@ -224,11 +232,10 @@ impl Dir {
         // insert new child entry, update same name but type not same child entry and collect child
         // entry info.
         for (name, metadata) in entries {
-            match inner.children.get(&name) {
+            match inner.children.get_mut(&name) {
                 None => {
                     *inode_gen += 1;
-
-                    let new_inode = *inode_gen.deref();
+                    let new_inode = *inode_gen;
 
                     let entry = Entry::new(new_inode, &name, self, &metadata);
                     let kind = entry.get_kind();
@@ -247,85 +254,44 @@ impl Dir {
                 }
 
                 Some(entry) => {
-                    let mut need_update = false;
+                    let (inode, kind) = if is_kind_wrong(&metadata, entry) {
+                        match entry {
+                            Entry::Dir(dir) => {
+                                let inode = dir.get_inode();
 
-                    if metadata.is_dir() {
-                        if let Entry::File(file) = entry {
-                            need_update = true;
-
-                            let inode = file.get_inode();
-
-                            inode_map.remove(&inode);
-                        } else {
-                            let inode = if let Entry::Dir(dir) = entry {
-                                dir.0.try_lock().unwrap().inode
-                            } else {
-                                unreachable!()
-                            };
-
-                            // collect
-                            child_info.push((
-                                inode,
-                                FileType::Directory,
-                                name.to_os_string(),
-                                metadata_to_file_attr(inode, metadata.clone())?,
-                            ));
-                        }
-                    } else {
-                        if let Entry::Dir(dir) = entry {
-                            need_update = true;
-
-                            let dir = dir.0.try_lock().unwrap();
-                            let inode = dir.inode;
-                            let name = dir.name.to_os_string();
-
-                            drop(dir);
-
-                            let dir = inner.children.remove(&name).expect("checked");
-
-                            if let Entry::Dir(mut dir) = dir {
                                 dir.delete_children(inode_map);
+
+                                inode_map.remove(&inode);
                             }
 
-                            inode_map.remove(&inode);
-                        } else {
-                            let inode = if let Entry::File(file) = entry {
-                                file.get_inode()
-                            } else {
-                                unreachable!()
-                            };
+                            Entry::File(file) => {
+                                let inode = file.get_inode();
 
-                            // collect
-                            child_info.push((
-                                inode,
-                                FileType::RegularFile,
-                                name.to_os_string(),
-                                metadata_to_file_attr(inode, metadata.clone())?,
-                            ));
+                                inode_map.remove(&inode);
+                            }
                         }
-                    }
 
-                    if !need_update {
-                        continue;
-                    }
+                        *inode_gen += 1;
+                        let new_inode = *inode_gen;
 
-                    *inode_gen += 1;
+                        let entry = Entry::new(new_inode, &name, self, &metadata);
 
-                    let new_inode = *inode_gen.deref();
+                        let kind = entry.get_kind();
 
-                    let entry = Entry::new(new_inode, &name, self, &metadata);
-                    let kind = entry.get_kind();
+                        inode_map.insert(new_inode, entry.clone());
 
-                    inode_map.insert(new_inode, entry.clone());
+                        inner.children.insert(name.to_os_string(), entry);
 
-                    inner.children.insert(name.to_os_string(), entry);
+                        (new_inode, kind)
+                    } else {
+                        (entry.get_inode(), entry.get_kind())
+                    };
 
-                    // collect
                     child_info.push((
-                        new_inode,
+                        inode,
                         kind,
-                        name,
-                        metadata_to_file_attr(new_inode, metadata)?,
+                        name.to_os_string(),
+                        metadata_to_file_attr(inode, metadata)?,
                     ));
                 }
             }
@@ -370,8 +336,28 @@ impl Dir {
         match inner.children.get(name) {
             None => {
                 if metadata.is_dir() && kind == FileType::RegularFile {
+                    // in real filesystem entry is exist, so create this entry record
+
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+
                     return Err(libc::EISDIR.into());
                 } else if kind == FileType::Directory {
+                    // in real filesystem entry is exist, so create this entry record
+
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+
                     return Err(libc::ENOTDIR.into());
                 }
 
@@ -389,15 +375,18 @@ impl Dir {
                 if is_kind_wrong(&metadata, entry) {
                     let inode = entry.get_inode();
 
-                    if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
+                    if let Entry::Dir(mut dir) = inner
+                        .children
+                        .remove(name)
+                        .expect("checked child not exist")
+                    {
                         dir.delete_children(inode_map);
                     }
 
                     inode_map.remove(&inode);
 
                     *inode_gen += 1;
-
-                    let new_inode = *inode_gen.deref();
+                    let new_inode = *inode_gen;
 
                     let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -417,7 +406,10 @@ impl Dir {
                     fs::remove_file(&child_path).await?;
                 }
 
-                let entry = inner.children.remove(name).expect("checked");
+                let entry = inner
+                    .children
+                    .remove(name)
+                    .expect("checked child not exist");
                 let inode = entry.get_inode();
 
                 if let Entry::Dir(mut dir) = entry {
@@ -472,7 +464,10 @@ impl Dir {
     ) -> Result<Entry> {
         let name = name.as_ref();
 
-        debug!("create mode {} flags {}", mode, flags);
+        debug!(
+            "create name {:?} kind {:?} mode {} flags {}",
+            name, kind, mode, flags
+        );
 
         let child_path = self.get_absolute_path().apply(|path| path.push(name));
 
@@ -492,8 +487,7 @@ impl Dir {
                         inode_map.remove(&inode);
 
                         *inode_gen += 1;
-
-                        let new_inode = *inode_gen.deref();
+                        let new_inode = *inode_gen;
 
                         let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -502,8 +496,7 @@ impl Dir {
                     }
                 } else {
                     *inode_gen += 1;
-
-                    let new_inode = *inode_gen.deref();
+                    let new_inode = *inode_gen;
 
                     let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -521,7 +514,7 @@ impl Dir {
             }
         }
 
-        // name is not exist, can create dir now
+        // name is not exist, can create entry now
 
         // try to clean old exist entry
         if let Some(entry) = inner.children.remove(name) {
@@ -541,6 +534,7 @@ impl Dir {
         } else {
             let sys_file: async_std::fs::File = OpenOptions::new()
                 .create_new(true)
+                .read(true)
                 .write(true)
                 .mode(mode)
                 .custom_flags(flags)
@@ -551,8 +545,7 @@ impl Dir {
         };
 
         *inode_gen += 1;
-
-        let new_inode = *inode_gen.deref();
+        let new_inode = *inode_gen;
 
         let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -567,7 +560,6 @@ impl Dir {
         name: impl AsRef<OsStr>,
         new_parent: &mut Dir,
         new_name: impl AsRef<OsStr>,
-        // mode: u32,
         inode_map: &mut InodeMap,
         inode_gen: &mut Inode,
     ) -> Result<()> {
@@ -610,18 +602,13 @@ impl Dir {
 
                 fs::rename(&old_path, &new_path).await?;
 
-                /*let metadata = fs::metadata(&new_path).await?;
-                let permissions = metadata.permissions().apply(|perm| perm.set_mode(mode));
-
-                fs::set_permissions(&new_path, permissions).await?;*/
-
                 let mut new_inner = if inplace_rename {
                     inner
                 } else {
                     new_parent.0.try_lock().unwrap()
                 };
 
-                // try to clean old exist child entry
+                // try to clean old exist child entry in new parent
                 if let Some(entry) = new_inner.children.remove(new_name) {
                     let inode = entry.get_inode();
 
@@ -633,14 +620,14 @@ impl Dir {
                 }
 
                 *inode_gen += 1;
+                let new_inode = *inode_gen;
 
-                let new_inode = *inode_gen.deref();
-
-                let entry = Entry::new(new_inode, name, new_parent, &metadata);
+                let entry = Entry::new(new_inode, new_name, new_parent, &metadata);
 
                 new_inner
                     .children
                     .insert(new_name.to_os_string(), entry.clone());
+
                 inode_map.insert(new_inode, entry);
 
                 Ok(())
@@ -650,15 +637,18 @@ impl Dir {
                 if is_kind_wrong(&metadata, entry) {
                     let inode = entry.get_inode();
 
-                    if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
+                    if let Entry::Dir(mut dir) = inner
+                        .children
+                        .remove(name)
+                        .expect("checked child not exist")
+                    {
                         dir.delete_children(inode_map);
                     }
 
                     inode_map.remove(&inode);
 
                     *inode_gen += 1;
-
-                    let new_inode = *inode_gen.deref();
+                    let new_inode = *inode_gen;
 
                     let entry = Entry::new(new_inode, name, self, &metadata);
 
@@ -668,7 +658,10 @@ impl Dir {
 
                 fs::rename(&old_path, &new_path).await?;
 
-                let mut entry = inner.children.remove(name).expect("checked");
+                let mut entry = inner
+                    .children
+                    .remove(name)
+                    .expect("checked child not exist");
 
                 let mut new_inner = if inplace_rename {
                     inner
@@ -749,6 +742,7 @@ impl Dir {
         self.0.try_lock().unwrap().name = new_name.to_os_string();
     }
 
+    /// delete dir children from InodeMap
     fn delete_children(&mut self, inode_map: &mut InodeMap) {
         let mut inner = self.0.try_lock().unwrap();
 
