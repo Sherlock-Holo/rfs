@@ -12,8 +12,7 @@ use async_std::fs;
 use async_std::fs::{DirBuilder, OpenOptions};
 use async_std::sync::Mutex;
 use fuse::{FileAttr, FileType};
-use futures::stream::FuturesOrdered;
-use futures::StreamExt;
+use futures_util::stream::{FuturesOrdered, StreamExt};
 use log::{debug, warn};
 
 use crate::errno::Errno;

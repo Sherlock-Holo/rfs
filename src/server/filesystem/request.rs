@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 
 use fuse::{FileAttr, FileType};
-use futures::channel::mpsc::Sender;
+use futures_channel::mpsc::Sender;
 
 use crate::Result;
 

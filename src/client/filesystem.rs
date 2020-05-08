@@ -14,9 +14,8 @@ use fuse::{
     FileType, Filesystem as FuseFilesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyWrite, Request,
 };
-use futures::channel::oneshot;
-use futures::channel::oneshot::Sender;
-use futures::StreamExt;
+use futures_channel::oneshot::{self, Sender};
+use futures_util::stream::StreamExt;
 use libc::c_int;
 use log::{debug, error, info, warn};
 use nix::mount;

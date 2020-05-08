@@ -16,8 +16,8 @@ use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
 #[cfg(features = "test")]
 use fuse::{FileAttr, FileType};
-use futures::future::FutureExt;
-use futures::select;
+use futures_util::future::FutureExt;
+use futures_util::select;
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::FlockArg;

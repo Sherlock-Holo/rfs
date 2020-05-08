@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_std::sync::{Mutex, RwLock};
 use chrono::prelude::*;
-use futures::future::FutureExt;
-use futures::select;
+use futures_util::future::FutureExt;
+use futures_util::select;
 use log::{debug, warn};
 use smol::Task;
 use uuid::Uuid;

@@ -136,7 +136,7 @@ pub fn run() -> Result<()> {
     };
 
     for _ in 0..num_cpus::get().max(1) {
-        std::thread::spawn(|| smol::run(futures::future::pending::<()>()));
+        std::thread::spawn(|| smol::run(futures_util::future::pending::<()>()));
     }
 
     smol::block_on(Task::spawn(inner_run(cfg)))

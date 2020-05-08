@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use fuse::{FileAttr, FileType};
-use futures::channel::mpsc::Receiver;
-use futures::stream::StreamExt;
+use futures_channel::mpsc::Receiver;
+use futures_util::stream::StreamExt;
 use log::{debug, info};
 use nix::unistd;
 
@@ -389,8 +389,8 @@ mod tests {
     use async_std::future::timeout;
     use async_std::sync::Mutex;
     use async_std::task;
-    use futures::channel::mpsc::channel;
-    use futures::SinkExt;
+    use futures_channel::mpsc::channel;
+    use futures_util::sink::SinkExt;
     use tempfile;
 
     use crate::log_init;
