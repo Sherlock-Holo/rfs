@@ -14,6 +14,8 @@ use futures_channel::mpsc::{channel, Sender};
 use futures_util::sink::SinkExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use log::{debug, error, info, warn};
+use semver_parser::version;
+use semver_parser::version::Version;
 use smol::Task;
 use smol::Timer;
 use snap::read::FrameDecoder;
@@ -47,6 +49,7 @@ pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
     compress: bool,
     request_sender: Sender<FSRequest>,
+    version: Version,
 }
 
 impl Server {
@@ -87,9 +90,9 @@ impl Server {
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
-            // filesystem: fs,
             compress,
             request_sender: sender,
+            version: version::parse(VERSION).unwrap(),
         };
 
         let users = rpc_server.users.clone();
@@ -104,10 +107,30 @@ impl Server {
     }
 
     async fn get_user(&self, header: Option<Header>) -> Result<Arc<User>> {
-        let uuid: Uuid = if let Some(header) = header {
-            if header.version != VERSION {
+        let uuid: Uuid = if let Some(mut header) = header {
+            if header.version == "0.2" {
+                header.version = "0.2.0".to_string();
+            }
+
+            let version = if let Ok(version) = version::parse(&header.version) {
+                version
+            } else {
                 return Err(Status::invalid_argument(format!(
                     "version {} is not support",
+                    header.version
+                )));
+            };
+
+            if version.major != self.version.major {
+                return Err(Status::invalid_argument(format!(
+                    "version {} major is not support",
+                    header.version
+                )));
+            }
+
+            if version.minor != self.version.minor {
+                return Err(Status::invalid_argument(format!(
+                    "version {} minor is not support",
                     header.version
                 )));
             }
