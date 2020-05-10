@@ -427,9 +427,9 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 
 [[package]]
 name = "fuse3"
-version = "0.1.0-alpha9"
+version = "0.1.0-beta0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e27f6a67e91a4f62b4d3f7bd8d93b7b9b4a76cabb800744c4672570d028e7998"
+checksum = "f480512f4a4738f82b0d8b95717f5358dc0f2ee0dc512c6b062c5aca76f18e1e"
 dependencies = [
  "async-std",
  "async-trait",
@@ -1350,18 +1350,18 @@ checksum = "b46e1121e8180c12ff69a742aabc4f310542b6ccb69f1691689ac17fdf8618aa"
 
 [[package]]
 name = "serde"
-version = "1.0.107"
+version = "1.0.108"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba7550f2cdf88ffc23ab0f1607133486c390a8c0f89b57e589b9654ee15e04d"
+checksum = "98b4e9fadb50ff90c1e758e42f13a8e2ab84e1927abb0aa5b95e5ecdb49ea741"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.107"
+version = "1.0.108"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10be45e22e5597d4b88afcc71f9d7bfadcd604bf0c78a3ab4582b8d2b37f39f3"
+checksum = "6a316eba8a61ba986e87e7e04a74f9feda86298fb454b76232ead4e425976090"
 dependencies = [
  "proc-macro2",
  "quote",
