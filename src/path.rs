@@ -1,9 +1,8 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::path::Path;
 
+use fuse3::Errno;
 use path_clean::clean as original_clean;
-
-use crate::errno::Errno;
 
 pub struct Error(String);
 

@@ -34,3 +34,5 @@ unshare -r cargo test --features test --lib server::filesystem::tests::lookup_ex
 unshare -r cargo test --features test --lib server::filesystem::tests::read_dir_deeply
 unshare -r cargo test --features test --lib server::filesystem::tests::rename_to_exist_dir
 unshare -r cargo test --features test --lib server::filesystem::tests::rename_to_exist_file
+unshare -r cargo test --features test --lib server::filesystem::tests::fallocate
+unshare -r cargo test --features test --lib server::filesystem::tests::copy_file_range

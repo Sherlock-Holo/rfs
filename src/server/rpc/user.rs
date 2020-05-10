@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_std::sync::{Mutex, RwLock};
 use chrono::prelude::*;
+use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
 use futures_util::select;
 use log::{debug, warn};
+use nix::fcntl;
 use smol::Task;
 use uuid::Uuid;
-
-use crate::errno::Errno;
-use crate::Result;
 
 use super::super::filesystem::FileHandle;
 use super::super::filesystem::LockKind;
@@ -233,6 +233,71 @@ impl User {
         let lock_kind = file_handle.lock().await.get_lock_kind().await;
 
         Ok(lock_kind)
+    }
+
+    pub async fn fallocate(&self, fh_id: u64, offset: u64, size: u64, mode: u32) -> Result<()> {
+        let file_handle = self
+            .inner
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or(Errno::from(libc::EBADF))?
+            .clone();
+
+        file_handle
+            .lock()
+            .await
+            .fallocate(offset, size, mode)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn copy_file_range(
+        &self,
+        fh_in: u64,
+        off_in: u64,
+        fh_out: u64,
+        off_out: u64,
+        length: u64,
+        _flags: u64,
+    ) -> Result<usize> {
+        let (fh_in, fh_out) = {
+            let guard = self.inner.read().await;
+
+            let fh_in = guard
+                .file_handle_map
+                .get(&fh_in)
+                .ok_or(Errno::from(libc::EBADF))?
+                .clone();
+            let fh_out = guard
+                .file_handle_map
+                .get(&fh_out)
+                .ok_or(Errno::from(libc::EBADF))?
+                .clone();
+
+            (fh_in, fh_out)
+        };
+
+        let fd_in = fh_in.lock().await.as_raw_fd();
+        let fh_out = fh_out.lock().await.as_raw_fd();
+
+        let mut off_in = off_in as libc::loff_t;
+        let mut off_out = off_out as libc::loff_t;
+
+        let copied = Task::blocking(async move {
+            fcntl::copy_file_range(
+                fd_in,
+                Some(&mut off_in),
+                fh_out,
+                Some(&mut off_out),
+                length as _,
+            )
+        })
+        .await?;
+
+        Ok(copied)
     }
 
     pub async fn is_online(&self, interval: Duration) -> bool {

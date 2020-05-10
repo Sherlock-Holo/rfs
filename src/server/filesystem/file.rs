@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use async_std::fs;
 use async_std::sync::Mutex;
-use fuse::FileAttr;
+use fuse3::{FileAttr, Result};
 use log::{debug, error};
 
-use crate::{Apply, Result};
+use crate::Apply;
 
 use super::attr::metadata_to_file_attr;
 use super::dir::Dir;

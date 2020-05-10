@@ -2,11 +2,10 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse::{FileAttr, FileType};
+use fuse3::{Errno, FileAttr, FileType, Result};
 
-use crate::errno::Errno;
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
-use crate::Result;
+use crate::BLOCK_SIZE;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
@@ -75,6 +74,7 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
         uid,
         gid,
         ino: proto_attr.inode,
+        generation: 0,
         size: proto_attr.size as u64,
         blocks: get_blocks(proto_attr.size as u64),
         atime: convert_proto_time_to_system_time(proto_attr.access_time),
@@ -88,7 +88,7 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
             FileType::RegularFile => 0,
             _ => unreachable!(), // don't support other type
         },
-        flags: 0,
+        blksize: BLOCK_SIZE,
     })
 }
 

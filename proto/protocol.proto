@@ -42,7 +42,7 @@ message ReadDirResponse {
         uint64 inode = 2;
         string name = 3;
         EntryType type = 4;
-        //        uint32 mode = 5; // such as 0644
+        Attr attr = 5;
     }
 
     repeated DirEntry dirEntries = 1;
@@ -135,16 +135,17 @@ message OpenFileResponse {
     }
 }
 
-/*message AllocateRequest {
+message AllocateRequest {
     Header head = 1;
     uint64 fileHandleId = 2;
     uint64 offset = 3;
     uint64 size = 4;
+    uint32 mode = 5;
 }
 
 message AllocateResponse {
     Error error = 1;
-}*/
+}
 
 message ReadFileRequest {
     Header head = 1;
@@ -300,6 +301,23 @@ message GetLockResponse {
     }
 }
 
+message CopyFileRangeRequest {
+    Header head = 1;
+    uint64 fileHandleIdIn = 2;
+    uint64 offsetIn = 3;
+    uint64 fileHandleIdOut = 4;
+    uint64 offsetOut = 5;
+    uint64 size = 6;
+    uint64 flags = 7;
+}
+
+message CopyFileRangeResponse {
+    oneof result {
+        uint64 copied = 1;
+        Error error = 2;
+    }
+}
+
 // no acl, no link
 service Rfs {
     // dir
@@ -328,8 +346,8 @@ service Rfs {
     rpc OpenFile (OpenFileRequest) returns (OpenFileResponse) {
     }
 
-    /*rpc Allocate (AllocateRequest) returns (AllocateResponse) {
-    }*/
+    rpc Allocate (AllocateRequest) returns (AllocateResponse) {
+    }
 
     rpc ReadFile (ReadFileRequest) returns (ReadFileResponse) {
     }
@@ -363,6 +381,9 @@ service Rfs {
     }
 
     rpc SetAttr (SetAttrRequest) returns (SetAttrResponse) {
+    }
+
+    rpc CopyFileRange (CopyFileRangeRequest) returns (CopyFileRangeResponse) {
     }
 
     rpc Ping (PingRequest) returns (PingResponse) {

@@ -3,24 +3,30 @@
 use log::LevelFilter;
 
 pub use client::Filesystem;
-use errno::Errno;
 pub use helper::Apply;
 pub use server::rpc::Server;
 
 mod client;
-mod errno;
 mod helper;
 mod path;
 
 mod pb {
     tonic::include_proto!("proto");
 
-    pub const VERSION: &str = "0.2.0";
+    pub const VERSION: &str = "0.2.1";
+
+    impl From<fuse3::Errno> for Error {
+        fn from(err: fuse3::Errno) -> Self {
+            Error {
+                errno: err.0 as u32,
+            }
+        }
+    }
 }
 
 mod server;
 
-pub type Result<T> = std::result::Result<T, Errno>;
+pub(crate) const BLOCK_SIZE: u32 = 4096;
 
 pub fn log_init(debug: bool) {
     let mut builder = pretty_env_logger::formatted_timed_builder();

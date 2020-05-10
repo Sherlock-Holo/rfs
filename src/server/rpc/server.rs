@@ -9,7 +9,8 @@ use std::time::Duration;
 use async_std::fs;
 use async_std::sync::RwLock;
 use chrono::prelude::*;
-use fuse::FileType;
+use fuse3::Errno;
+use fuse3::FileType;
 use futures_channel::mpsc::{channel, Sender};
 use futures_util::sink::SinkExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -26,7 +27,6 @@ use tonic::Response;
 use tonic::{Code, Request, Status};
 use uuid::Uuid;
 
-use crate::errno::Errno;
 use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
 use crate::pb;
 use crate::pb::read_dir_response::DirEntry;
@@ -232,15 +232,23 @@ impl Rfs for Server {
             Ok(entries) => {
                 let dir_entries: Vec<_> = entries
                     .into_iter()
-                    .map(|(inode, index, kind, name)| DirEntry {
-                        index,
-                        inode,
-                        r#type: match kind {
-                            FileType::Directory => EntryType::Dir.into(),
-                            FileType::RegularFile => EntryType::File.into(),
-                            _ => unreachable!(),
-                        },
-                        name: name.into_string().expect("entry name should be valid"),
+                    .map(|(inode, index, attr, name)| {
+                        let name = name
+                            .to_os_string()
+                            .into_string()
+                            .expect("entry name should be valid");
+
+                        DirEntry {
+                            index,
+                            inode,
+                            name: name.to_string(),
+                            r#type: match attr.kind {
+                                FileType::Directory => EntryType::Dir.into(),
+                                FileType::RegularFile => EntryType::File.into(),
+                                _ => unreachable!(),
+                            },
+                            attr: Some(fuse_attr_into_proto_attr(attr, &name)),
+                        }
                     })
                     .collect();
 
@@ -914,6 +922,60 @@ impl Rfs for Server {
                 result: Some(pb::set_attr_response::Result::Attr(
                     fuse_attr_into_proto_attr(attr, ""), // here the name should not important
                 )),
+            })),
+        }
+    }
+
+    async fn allocate(
+        &self,
+        request: Request<AllocateRequest>,
+    ) -> Result<Response<AllocateResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        let result = if let Err(errno) = user
+            .fallocate(
+                request.file_handle_id,
+                request.offset,
+                request.size,
+                request.mode,
+            )
+            .await
+        {
+            Some(pb::Error::from(errno))
+        } else {
+            None
+        };
+
+        Ok(Response::new(AllocateResponse { error: result }))
+    }
+
+    async fn copy_file_range(
+        &self,
+        request: Request<CopyFileRangeRequest>,
+    ) -> Result<Response<CopyFileRangeResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        match user
+            .copy_file_range(
+                request.file_handle_id_in,
+                request.offset_in,
+                request.file_handle_id_out,
+                request.offset_out,
+                request.size,
+                request.flags,
+            )
+            .await
+        {
+            Err(errno) => Ok(Response::new(CopyFileRangeResponse {
+                result: Some(pb::copy_file_range_response::Result::Error(errno.into())),
+            })),
+
+            Ok(copied) => Ok(Response::new(CopyFileRangeResponse {
+                result: Some(pb::copy_file_range_response::Result::Copied(copied as _)),
             })),
         }
     }

@@ -1,9 +1,7 @@
 use std::ffi::OsString;
 
-use fuse::{FileAttr, FileType};
+use fuse3::{FileAttr, Result};
 use futures_channel::mpsc::Sender;
-
-use crate::Result;
 
 use super::inode::Inode;
 use super::{FileHandle, SetAttr};
@@ -57,7 +55,7 @@ pub enum Request {
     ReadDir {
         inode: Inode,
         offset: i64,
-        response: Sender<Result<Vec<(Inode, i64, FileType, OsString)>>>,
+        response: Sender<Result<Vec<(Inode, i64, FileAttr, OsString)>>>,
     },
 
     CreateFile {

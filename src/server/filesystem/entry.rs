@@ -1,9 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::Metadata;
 
-use fuse::{FileAttr, FileType};
-
-use crate::Result;
+use fuse3::{FileAttr, FileType, Result};
 
 use super::dir::Dir;
 use super::file::File;

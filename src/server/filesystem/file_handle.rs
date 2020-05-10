@@ -6,6 +6,7 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(features = "test")]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
 #[cfg(features = "test")]
 use std::time::{Duration, UNIX_EPOCH};
@@ -14,17 +15,18 @@ use async_notify::Notify;
 use async_std::fs::File as SysFile;
 use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
+use fuse3::{Errno, Result};
 #[cfg(features = "test")]
-use fuse::{FileAttr, FileType};
+use fuse3::{FileAttr, FileType};
 use futures_util::future::FutureExt;
 use futures_util::select;
 use log::{debug, error};
 use nix::fcntl;
-use nix::fcntl::FlockArg;
+use nix::fcntl::{FallocateFlags, FlockArg};
 use smol::Task;
 
-use crate::errno::Errno;
-use crate::Result;
+#[cfg(features = "test")]
+use crate::BLOCK_SIZE;
 
 #[cfg(features = "test")]
 use super::inode::Inode;
@@ -121,6 +123,7 @@ impl FileHandle {
 
         Ok(FileAttr {
             ino: self.inode,
+            generation: 0,
             size: metadata.len(),
             blocks: metadata.blocks(),
             kind: FileType::RegularFile,
@@ -132,8 +135,8 @@ impl FileHandle {
             uid: metadata.uid(),
             gid: metadata.gid(),
             rdev: metadata.rdev() as u32,
-            flags: 0,
             nlink: 0,
+            blksize: BLOCK_SIZE,
         })
     }
 
@@ -210,9 +213,7 @@ impl FileHandle {
                             }
                         }
 
-                        None => {
-                            return Err(Errno::from(err));
-                        }
+                        None => return Err(Errno::from(err)),
                     }
                 } else {
                     break true;
@@ -302,6 +303,45 @@ impl FileHandle {
         Ok(())
     }
 
+    pub async fn fallocate(&mut self, offset: u64, size: u64, mode: u32) -> Result<()> {
+        let fd = self.sys_file.as_raw_fd();
+
+        let mut fallocate_flags: FallocateFlags = FallocateFlags::empty();
+
+        let mode = mode as c_int;
+
+        if libc::FALLOC_FL_KEEP_SIZE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_KEEP_SIZE;
+        }
+
+        if libc::FALLOC_FL_PUNCH_HOLE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_PUNCH_HOLE;
+        }
+
+        if libc::FALLOC_FL_COLLAPSE_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_COLLAPSE_RANGE;
+        }
+
+        if libc::FALLOC_FL_ZERO_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_ZERO_RANGE;
+        }
+
+        if libc::FALLOC_FL_INSERT_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_INSERT_RANGE;
+        }
+
+        if libc::FALLOC_FL_UNSHARE_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_UNSHARE_RANGE;
+        }
+
+        Task::blocking(async move {
+            fcntl::fallocate(fd, fallocate_flags, offset as _, size as _)?;
+
+            Ok(())
+        })
+        .await
+    }
+
     pub fn get_id(&self) -> u64 {
         self.id
     }
@@ -313,6 +353,12 @@ impl FileHandle {
 
     pub async fn get_lock_kind(&self) -> LockKind {
         *self.lock_kind.read().await
+    }
+}
+
+impl AsRawFd for FileHandle {
+    fn as_raw_fd(&self) -> RawFd {
+        self.sys_file.as_raw_fd()
     }
 }
 

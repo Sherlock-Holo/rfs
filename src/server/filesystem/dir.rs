@@ -11,13 +11,12 @@ use std::sync::Arc;
 use async_std::fs;
 use async_std::fs::{DirBuilder, OpenOptions};
 use async_std::sync::Mutex;
-use fuse::{FileAttr, FileType};
+use fuse3::{Errno, FileAttr, FileType, Result};
 use futures_util::stream::{FuturesOrdered, StreamExt};
 use log::{debug, warn};
 
-use crate::errno::Errno;
 use crate::helper::compare_and_get_new;
-use crate::{Apply, Result};
+use crate::Apply;
 
 use super::attr::metadata_to_file_attr;
 use super::entry::Entry;
@@ -134,7 +133,7 @@ impl Dir {
         &mut self,
         inode_map: &mut InodeMap,
         inode_gen: &mut Inode,
-    ) -> Result<Vec<(Inode, FileType, OsString, FileAttr)>> {
+    ) -> Result<Vec<(Inode, OsString, FileAttr)>> {
         let path = self.get_absolute_path();
 
         let mut entries = fs::read_dir(&path).await?;
@@ -214,18 +213,8 @@ impl Dir {
         };
 
         child_info.extend_from_slice(&[
-            (
-                inner.inode,
-                FileType::Directory,
-                OsString::from("."),
-                current_dir_attr,
-            ),
-            (
-                parent_dir_attr.ino,
-                FileType::Directory,
-                OsString::from(".."),
-                parent_dir_attr,
-            ),
+            (inner.inode, OsString::from("."), current_dir_attr),
+            (parent_dir_attr.ino, OsString::from(".."), parent_dir_attr),
         ]);
 
         // insert new child entry, update same name but type not same child entry and collect child
@@ -237,23 +226,17 @@ impl Dir {
                     let new_inode = *inode_gen;
 
                     let entry = Entry::new(new_inode, &name, self, &metadata);
-                    let kind = entry.get_kind();
 
                     inode_map.insert(new_inode, entry.clone());
 
                     inner.children.insert(name.to_os_string(), entry);
 
                     // collect
-                    child_info.push((
-                        new_inode,
-                        kind,
-                        name,
-                        metadata_to_file_attr(new_inode, metadata)?,
-                    ));
+                    child_info.push((new_inode, name, metadata_to_file_attr(new_inode, metadata)?));
                 }
 
                 Some(entry) => {
-                    let (inode, kind) = if is_kind_wrong(&metadata, entry) {
+                    let (inode, _kind) = if is_kind_wrong(&metadata, entry) {
                         match entry {
                             Entry::Dir(dir) => {
                                 let inode = dir.get_inode();
@@ -288,7 +271,6 @@ impl Dir {
 
                     child_info.push((
                         inode,
-                        kind,
                         name.to_os_string(),
                         metadata_to_file_attr(inode, metadata)?,
                     ));

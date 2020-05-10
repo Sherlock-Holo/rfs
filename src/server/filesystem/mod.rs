@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use fuse::{FileAttr, FileType};
+use fuse3::{FileAttr, FileType, Result};
 use futures_channel::mpsc::Receiver;
 use futures_util::stream::StreamExt;
 use log::{debug, info};
@@ -18,7 +18,6 @@ use inode::{Inode, InodeMap};
 pub use request::Request;
 
 use crate::path::PathClean;
-use crate::Result;
 
 mod attr;
 mod dir;
@@ -327,7 +326,7 @@ impl Filesystem {
         &mut self,
         inode: Inode,
         offset: i64,
-    ) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
+    ) -> Result<Vec<(Inode, i64, FileAttr, OsString)>> {
         debug!("readdir in parent {}", inode);
 
         let entry = self.inode_map.get(&inode).ok_or(libc::ENOENT)?.clone();
@@ -340,7 +339,7 @@ impl Filesystem {
             Ok(children
                 .into_iter()
                 .enumerate()
-                .map(|(index, (inode, kind, name, _attr))| (inode, (index + 1) as i64, kind, name))
+                .map(|(index, (inode, name, attr))| (inode, (index + 1) as i64, attr, name))
                 .skip(offset as usize)
                 .collect())
         } else {
@@ -389,14 +388,15 @@ mod tests {
     use async_std::future::timeout;
     use async_std::sync::Mutex;
     use async_std::task;
+    use fuse3::Errno;
     use futures_channel::mpsc::channel;
     use futures_util::sink::SinkExt;
+    use nix::fcntl;
     use tempfile;
 
     use crate::log_init;
     use crate::server::filesystem::file_handle::FileHandleKind;
     use crate::server::filesystem::LockKind;
-    use crate::Errno;
 
     use super::*;
 
@@ -2234,5 +2234,111 @@ mod tests {
         assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
+    }
+
+    #[async_std::test]
+    async fn fallocate() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let (mut fs_tx, fs_rx) = channel(1);
+
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, mut rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o644,
+            flags: libc::O_RDWR,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        let (mut fh, _) = rx.next().await.unwrap().unwrap();
+
+        fh.fallocate(0, 100, 0).await.unwrap();
+
+        let (tx, mut rx) = channel(1);
+
+        let req = Request::GetAttr {
+            inode: 2,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        let attr = rx.next().await.unwrap().unwrap();
+
+        assert_eq!(attr.size, 100);
+    }
+
+    #[async_std::test]
+    async fn copy_file_range() {
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let (mut fs_tx, fs_rx) = channel(1);
+
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, mut rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test1"),
+            mode: 0o644,
+            flags: libc::O_RDWR,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        let (mut fh1, _) = rx.next().await.unwrap().unwrap();
+
+        assert_eq!(fh1.write(b"test", 0).await.unwrap(), 4);
+
+        let (tx, mut rx) = channel(1);
+
+        let req = Request::CreateFile {
+            parent: 1,
+            name: OsString::from("test2"),
+            mode: 0o644,
+            flags: libc::O_RDWR,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        let (mut fh2, _) = rx.next().await.unwrap().unwrap();
+
+        let fd_in = fh1.as_raw_fd();
+        let fh_out = fh2.as_raw_fd();
+
+        let mut off_in = 0;
+        let mut off_out = 0;
+
+        let copied = task::spawn_blocking(move || {
+            fcntl::copy_file_range(fd_in, Some(&mut off_in), fh_out, Some(&mut off_out), 4)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(copied, 4);
+
+        let mut buf = vec![0; 100];
+
+        let n = fh2.read(&mut buf, 0).await.unwrap();
+        assert_eq!(n, 4);
+
+        assert_eq!(buf[..n], b"test");
     }
 }
