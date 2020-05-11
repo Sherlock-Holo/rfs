@@ -427,9 +427,9 @@ checksum = "3dcaa9ae7725d12cdb85b3ad99a434db70b468c09ded17e012d86b5c1010f7a7"
 
 [[package]]
 name = "fuse3"
-version = "0.1.0-beta0"
+version = "0.1.0-beta1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f480512f4a4738f82b0d8b95717f5358dc0f2ee0dc512c6b062c5aca76f18e1e"
+checksum = "7d0620ad268c6b790a1d9812d6734334fbfb562820b8151753e75f37b0d79af8"
 dependencies = [
  "async-std",
  "async-trait",
@@ -920,18 +920,18 @@ dependencies = [
 
 [[package]]
 name = "pin-project"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c50dab4a05419117fe00216df4731e387ae616cd2a5f5dda1d8b02d863ac63d"
+checksum = "81d480cb4e89522ccda96d0eed9af94180b7a5f93fb28f66e1fd7d68431663d1"
 dependencies = [
  "pin-project-internal",
 ]
 
 [[package]]
 name = "pin-project-internal"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c27e5ac1d4c76777afd4d47b8fe9c602b44bcf6f999d34e300bba5560c9837b"
+checksum = "a82996f11efccb19b685b14b5df818de31c1edcee3daa256ab5775dd98e72feb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1370,9 +1370,9 @@ dependencies = [
 
 [[package]]
 name = "serde_yaml"
-version = "0.8.11"
+version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "691b17f19fc1ec9d94ec0b5864859290dff279dbd7b03f017afda54eb36c3c35"
+checksum = "16c7a592a1ec97c9c1c68d75b6e537dcbf60c7618e038e7841e00af1d9ccf0c4"
 dependencies = [
  "dtoa",
  "linked-hash-map",

@@ -76,7 +76,10 @@ impl Filesystem {
     }
 
     pub async fn mount<P: AsRef<Path>>(self, mount_point: P) -> anyhow::Result<()> {
-        let mount_options = MountOptions::default().fs_name("rfs").nonempty(true);
+        let mount_options = MountOptions::default()
+            .fs_name("rfs")
+            .nonempty(true)
+            .force_readdir_plus(true);
 
         let mount_point = mount_point.as_ref();
 

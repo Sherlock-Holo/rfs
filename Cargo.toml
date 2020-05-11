@@ -39,7 +39,7 @@ async-signals = "0.3"
 snap = "1"
 atomic_value = "0.1"
 smol = { version = "0.1", features = ["tokio02"] }
-fuse3 = { version = "0.1.0-beta0", features = ["file-lock", "async-std-runtime", "unprivileged"] }
+fuse3 = { version = "0.1.0-beta1.0", features = ["file-lock", "async-std-runtime", "unprivileged"] }
 semver-parser = "0.9"
 async-trait = "0.1"
 
