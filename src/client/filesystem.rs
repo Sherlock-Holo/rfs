@@ -1349,6 +1349,7 @@ impl FuseFilesystem for Filesystem {
             let rpc_req = TonicRequest::new(ReadDirRequest {
                 head: Some(header.clone()),
                 inode: parent,
+                offset: offset as _,
             });
 
             let mut client = (*client.load()).clone();
@@ -1393,31 +1394,31 @@ impl FuseFilesystem for Filesystem {
 
             debug!("got readdir result");
 
-            let entries = dir_entries
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, dir_entry)| {
-                    let dir = EntryType::Dir as i32;
-                    let file = EntryType::File as i32;
+            let entries =
+                dir_entries
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(index, dir_entry)| {
+                        let dir = EntryType::Dir as i32;
+                        let file = EntryType::File as i32;
 
-                    let kind = if dir_entry.r#type == dir {
-                        FileType::Directory
-                    } else if dir_entry.r#type == file {
-                        FileType::RegularFile
-                    } else {
-                        warn!("unexpect file type {}", dir_entry.r#type);
+                        let kind = if dir_entry.r#type == dir {
+                            FileType::Directory
+                        } else if dir_entry.r#type == file {
+                            FileType::RegularFile
+                        } else {
+                            warn!("unexpect file type {}", dir_entry.r#type);
 
-                        return None;
-                    };
+                            return None;
+                        };
 
-                    Some(DirectoryEntry {
-                        inode: dir_entry.inode,
-                        index: index as u64 + 1,
-                        kind,
-                        name: OsString::from(dir_entry.name),
-                    })
-                })
-                .skip(offset as _);
+                        Some(DirectoryEntry {
+                            inode: dir_entry.inode,
+                            index: offset as u64 + index as u64 + 1,
+                            kind,
+                            name: OsString::from(dir_entry.name),
+                        })
+                    });
 
             return Ok(ReplyDirectory {
                 entries: Box::pin(stream::iter(entries)),
@@ -1655,6 +1656,7 @@ impl FuseFilesystem for Filesystem {
         return Err(libc::ETIMEDOUT.into());
     }
 
+    #[inline]
     async fn access(&self, _req: Request, _inode: u64, _mask: u32) -> Result<()> {
         Ok(())
     }
@@ -1900,6 +1902,7 @@ impl FuseFilesystem for Filesystem {
             let rpc_req = TonicRequest::new(ReadDirRequest {
                 head: Some(header.clone()),
                 inode: parent,
+                offset: offset as _,
             });
 
             let mut client = (*client.load()).clone();
@@ -1944,44 +1947,45 @@ impl FuseFilesystem for Filesystem {
 
             debug!("got readdirplus result");
 
-            let entries = dir_entries
-                .into_iter()
-                .enumerate()
-                .filter_map(move |(index, dir_entry)| {
-                    let attr = if let Some(attr) = dir_entry.attr {
-                        attr
-                    } else {
-                        warn!(
-                            "dir entry {} in parent {} attr is None",
-                            dir_entry.name, parent
-                        );
+            let entries =
+                dir_entries
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(move |(index, dir_entry)| {
+                        let attr = if let Some(attr) = dir_entry.attr {
+                            attr
+                        } else {
+                            warn!(
+                                "dir entry {} in parent {} attr is None",
+                                dir_entry.name, parent
+                            );
 
-                        return None;
-                    };
+                            return None;
+                        };
 
-                    let attr = if let Ok(attr) = proto_attr_into_fuse_attr(attr, req.uid, req.gid) {
-                        attr
-                    } else {
-                        warn!(
-                            "parse dir entry {} in parent {} fuse attr failed",
-                            dir_entry.name, parent
-                        );
+                        let attr =
+                            if let Ok(attr) = proto_attr_into_fuse_attr(attr, req.uid, req.gid) {
+                                attr
+                            } else {
+                                warn!(
+                                    "parse dir entry {} in parent {} fuse attr failed",
+                                    dir_entry.name, parent
+                                );
 
-                        return None;
-                    };
+                                return None;
+                            };
 
-                    Some(DirectoryEntryPlus {
-                        inode: dir_entry.inode,
-                        generation: 0,
-                        index: index as u64 + 1,
-                        kind: attr.kind,
-                        name: OsString::from(dir_entry.name),
-                        attr,
-                        entry_ttl: TTL,
-                        attr_ttl: TTL,
-                    })
-                })
-                .skip(offset as _);
+                        Some(DirectoryEntryPlus {
+                            inode: dir_entry.inode,
+                            generation: 0,
+                            index: offset as u64 + index as u64 + 1,
+                            kind: attr.kind,
+                            name: OsString::from(dir_entry.name),
+                            attr,
+                            entry_ttl: TTL,
+                            attr_ttl: TTL,
+                        })
+                    });
 
             return Ok(ReplyDirectoryPlus {
                 entries: Box::pin(stream::iter(entries)),

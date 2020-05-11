@@ -10,7 +10,7 @@ this network filesystem based on GRPC and fuse:
 
 ### server
 ```
-rfs-server 0.1.0
+rfs-server 0.3.0
 rfs server.
 
 USAGE:
@@ -36,7 +36,7 @@ debug: true
 
 ### client
 ```
-rfs-client 0.1.0
+rfs-client 0.3.0
 rfs client.
 
 USAGE:
@@ -59,17 +59,6 @@ key_path: key.pem
 debug_ca_path: ca.pem # only use for debug, DO NOT use in production.
 debug: true
 ```
-
-## Note
-
-Limit by [fuse-rs](https://github.com/zargony/fuse-rs), rfs stills use fuse 3.8. I [fork and modify](https://github.com/Sherlock-Holo/fuse-rs)
-the fuse lib to handle posix lock and unknown operation code. In the future rfs will try to use latest fuse protocol.
-
-Rfs can't run in docker, it may break rfs-server.
-
-## TODO
-
-use latest fuse protocol.
 
 ## License
 

@@ -34,6 +34,7 @@ message Attr {
 message ReadDirRequest {
     Header head = 1;
     uint64 inode = 2;
+    uint64 offset = 3;
 }
 
 message ReadDirResponse {

@@ -13,7 +13,7 @@ mod path;
 mod pb {
     tonic::include_proto!("proto");
 
-    pub const VERSION: &str = "0.2.1";
+    pub const VERSION: &str = "0.3.0";
 
     impl From<fuse3::Errno> for Error {
         fn from(err: fuse3::Errno) -> Self {

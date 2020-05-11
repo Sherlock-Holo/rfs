@@ -199,7 +199,7 @@ impl Dir {
             }
         }
 
-        let mut child_info = Vec::with_capacity(entries.len());
+        let mut child_info = Vec::with_capacity(entries.len() + 2);
 
         let current_dir_attr = metadata_to_file_attr(inner.inode, fs::metadata(&path).await?)?;
         let parent_dir_attr = if let Some(dir) = &inner.parent {

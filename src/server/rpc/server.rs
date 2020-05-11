@@ -194,7 +194,7 @@ impl Server {
     }
 }
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl Rfs for Server {
     async fn read_dir(
         &self,
@@ -208,7 +208,7 @@ impl Rfs for Server {
 
         let req = FSRequest::ReadDir {
             inode: request.inode,
-            offset: 0,
+            offset: request.offset as _,
             response: sender,
         };
 
@@ -535,6 +535,31 @@ impl Rfs for Server {
         Ok(Response::new(OpenFileResponse {
             result: Some(pb::open_file_response::Result::FileHandleId(fh_id)),
         }))
+    }
+
+    async fn allocate(
+        &self,
+        request: Request<AllocateRequest>,
+    ) -> Result<Response<AllocateResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        let result = if let Err(errno) = user
+            .fallocate(
+                request.file_handle_id,
+                request.offset,
+                request.size,
+                request.mode,
+            )
+            .await
+        {
+            Some(pb::Error::from(errno))
+        } else {
+            None
+        };
+
+        Ok(Response::new(AllocateResponse { error: result }))
     }
 
     async fn read_file(
@@ -924,31 +949,6 @@ impl Rfs for Server {
                 )),
             })),
         }
-    }
-
-    async fn allocate(
-        &self,
-        request: Request<AllocateRequest>,
-    ) -> Result<Response<AllocateResponse>> {
-        let request = request.into_inner();
-
-        let user = self.get_user(request.head).await?;
-
-        let result = if let Err(errno) = user
-            .fallocate(
-                request.file_handle_id,
-                request.offset,
-                request.size,
-                request.mode,
-            )
-            .await
-        {
-            Some(pb::Error::from(errno))
-        } else {
-            None
-        };
-
-        Ok(Response::new(AllocateResponse { error: result }))
     }
 
     async fn copy_file_range(
