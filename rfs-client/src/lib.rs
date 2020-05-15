@@ -15,7 +15,7 @@ use smol::Task;
 use structopt::StructOpt;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
-use rfs::{log_init, Filesystem};
+use rfs::{init_smol_runtime, log_init, Filesystem};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -135,9 +135,7 @@ pub fn run() -> Result<()> {
         serde_yaml::from_slice(&cfg_data)?
     };
 
-    for _ in 0..num_cpus::get().max(1) {
-        std::thread::spawn(|| smol::run(futures_util::future::pending::<()>()));
-    }
+    init_smol_runtime();
 
     smol::block_on(Task::spawn(inner_run(cfg)))
 }

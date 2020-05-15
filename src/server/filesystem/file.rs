@@ -139,8 +139,8 @@ impl File {
 
         Ok(FileHandle::new(
             file_handle_id,
-            #[cfg(features = "test")]
-            inode,
+            #[cfg(test)]
+            inner.inode,
             sys_file,
             fh_kind,
         ))

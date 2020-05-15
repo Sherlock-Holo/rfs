@@ -19,4 +19,3 @@ anyhow = "1.0"
 async-signals = "0.3.0"
 smol = { version = "0.1", features = ["tokio02"] }
 async-std = "1.5"
-num_cpus = "1.13"

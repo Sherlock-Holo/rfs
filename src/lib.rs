@@ -1,5 +1,7 @@
 #![feature(backtrace)]
 
+use std::thread;
+
 use log::LevelFilter;
 
 pub use client::Filesystem;
@@ -44,4 +46,10 @@ pub fn log_init(debug: bool) {
     }
 
     builder.init();
+}
+
+pub fn init_smol_runtime() {
+    for _ in 0..num_cpus::get().min(1) {
+        thread::spawn(|| smol::run(futures_util::future::pending::<()>()));
+    }
 }

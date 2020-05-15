@@ -1,38 +1,39 @@
 #!/bin/bash
 
-unshare -r cargo test --features test --lib server::filesystem::tests::init_filesystem
-unshare -r cargo test --features test --lib server::filesystem::tests::create_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::create_file
-unshare -r cargo test --features test --lib server::filesystem::tests::lookup_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::lookup_file
-unshare -r cargo test --features test --lib server::filesystem::tests::get_attr_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::get_attr_file
-unshare -r cargo test --features test --lib server::filesystem::tests::set_dir_attr
-unshare -r cargo test --features test --lib server::filesystem::tests::remove_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::remove_file
-unshare -r cargo test --features test --lib server::filesystem::tests::rename_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::rename_file
-unshare -r cargo test --features test --lib server::filesystem::tests::move_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::move_file
-unshare -r cargo test --features test --lib server::filesystem::tests::read_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::open_file_rw
-unshare -r cargo test --features test --lib server::filesystem::tests::open_file_ro
-unshare -r cargo test --features test --lib server::filesystem::tests::open_file_wo
-unshare -r cargo test --features test --lib server::filesystem::tests::write_file
-unshare -r cargo test --features test --lib server::filesystem::tests::read_file
-unshare -r cargo test --features test --lib server::filesystem::tests::set_attr_file
-unshare -r cargo test --features test --lib server::filesystem::tests::set_share_lock_success
-unshare -r cargo test --features test --lib server::filesystem::tests::set_share_lock_failed
-unshare -r cargo test --features test --lib server::filesystem::tests::try_set_share_lock_success
-unshare -r cargo test --features test --lib server::filesystem::tests::try_set_share_lock_failed
-unshare -r cargo test --features test --lib server::filesystem::tests::set_exclusive_lock
-unshare -r cargo test --features test --lib server::filesystem::tests::try_set_exclusive_lock
-unshare -r cargo test --features test --lib server::filesystem::tests::release_share_lock
-unshare -r cargo test --features test --lib server::filesystem::tests::release_exclusive_lock
-unshare -r cargo test --features test --lib server::filesystem::tests::wait_exclusive_lock
-unshare -r cargo test --features test --lib server::filesystem::tests::lookup_exist_entry
-unshare -r cargo test --features test --lib server::filesystem::tests::read_dir_deeply
-unshare -r cargo test --features test --lib server::filesystem::tests::rename_to_exist_dir
-unshare -r cargo test --features test --lib server::filesystem::tests::rename_to_exist_file
-unshare -r cargo test --features test --lib server::filesystem::tests::fallocate
-unshare -r cargo test --features test --lib server::filesystem::tests::copy_file_range
+unshare -r cargo test --lib server::filesystem::tests::init_filesystem
+unshare -r cargo test --lib server::filesystem::tests::create_dir
+unshare -r cargo test --lib server::filesystem::tests::create_file
+unshare -r cargo test --lib server::filesystem::tests::lookup_dir
+unshare -r cargo test --lib server::filesystem::tests::lookup_file
+unshare -r cargo test --lib server::filesystem::tests::get_attr_dir
+unshare -r cargo test --lib server::filesystem::tests::get_attr_file
+unshare -r cargo test --lib server::filesystem::tests::set_dir_attr
+unshare -r cargo test --lib server::filesystem::tests::remove_dir
+unshare -r cargo test --lib server::filesystem::tests::remove_file
+unshare -r cargo test --lib server::filesystem::tests::rename_dir
+unshare -r cargo test --lib server::filesystem::tests::rename_file
+unshare -r cargo test --lib server::filesystem::tests::move_dir
+unshare -r cargo test --lib server::filesystem::tests::move_file
+unshare -r cargo test --lib server::filesystem::tests::read_dir
+unshare -r cargo test --lib server::filesystem::tests::open_file_rw
+unshare -r cargo test --lib server::filesystem::tests::open_file_ro
+unshare -r cargo test --lib server::filesystem::tests::open_file_wo
+unshare -r cargo test --lib server::filesystem::tests::write_file
+unshare -r cargo test --lib server::filesystem::tests::read_file
+unshare -r cargo test --lib server::filesystem::tests::set_attr_file
+unshare -r cargo test --lib server::filesystem::tests::set_share_lock_success
+unshare -r cargo test --lib server::filesystem::tests::set_share_lock_failed
+unshare -r cargo test --lib server::filesystem::tests::try_set_share_lock_success
+unshare -r cargo test --lib server::filesystem::tests::try_set_share_lock_failed
+unshare -r cargo test --lib server::filesystem::tests::set_exclusive_lock
+unshare -r cargo test --lib server::filesystem::tests::try_set_exclusive_lock
+unshare -r cargo test --lib server::filesystem::tests::release_share_lock
+unshare -r cargo test --lib server::filesystem::tests::release_exclusive_lock
+unshare -r cargo test --lib server::filesystem::tests::wait_exclusive_lock
+unshare -r cargo test --lib server::filesystem::tests::lookup_exist_entry
+unshare -r cargo test --lib server::filesystem::tests::read_dir_deeply
+unshare -r cargo test --lib server::filesystem::tests::rename_to_exist_dir
+unshare -r cargo test --lib server::filesystem::tests::rename_to_exist_file
+unshare -r cargo test --lib server::filesystem::tests::fallocate
+unshare -r cargo test --lib server::filesystem::tests::copy_file_range
+unshare -r cargo test --lib server::filesystem::tests::remove_dir_deep

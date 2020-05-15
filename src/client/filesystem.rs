@@ -1,19 +1,18 @@
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::raw::c_int;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_notify::Notify;
 use async_signals::Signals;
 use async_std::future::timeout;
-use async_std::sync::RwLock;
+use async_std::sync::{Mutex, RwLock};
 use atomic_value::AtomicValue;
 use fuse3::reply::*;
-use fuse3::{
-    FileType, Filesystem as FuseFilesystem, MountOptions, Request, Result, Session, SetAttr,
-};
+use fuse3::{Filesystem as FuseFilesystem, MountOptions, Request, Result, Session, SetAttr};
 use futures_util::stream;
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
@@ -32,6 +31,8 @@ use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
 
+type ReadDirCache = Arc<Mutex<HashMap<u64, (Instant, Vec<DirectoryEntryPlus>)>>>;
+
 const TTL: Duration = Duration::from_secs(1);
 const INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const MULTIPLIER: f64 = 1.5;
@@ -45,6 +46,7 @@ pub struct Filesystem {
     compress: RwLock<bool>,
     uri: Uri,
     tls_cfg: ClientTlsConfig,
+    read_dir_cache: ReadDirCache,
 }
 
 impl Filesystem {
@@ -72,15 +74,11 @@ impl Filesystem {
             compress: RwLock::new(compress),
             uri,
             tls_cfg,
+            read_dir_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     pub async fn mount<P: AsRef<Path>>(self, mount_point: P) -> anyhow::Result<()> {
-        let mount_options = MountOptions::default()
-            .fs_name("rfs")
-            .nonempty(true)
-            .force_readdir_plus(true);
-
         let mount_point = mount_point.as_ref();
 
         let unmount_point = mount_point.to_path_buf();
@@ -108,6 +106,36 @@ impl Filesystem {
             .await;
         })
         .detach();
+
+        let read_dir_cache = self.read_dir_cache.clone();
+
+        Task::spawn(async move {
+            loop {
+                Timer::after(Duration::from_secs(60 * 5)).await;
+
+                let mut guard = read_dir_cache.lock().await;
+
+                let mut invalid_cache = vec![];
+
+                guard.iter().for_each(|(inode, (instant, _))| {
+                    if instant.elapsed() > TTL {
+                        invalid_cache.push(*inode);
+                    }
+                });
+
+                invalid_cache.into_iter().for_each(|inode| {
+                    debug!("remove parent {} outdated readdirplus", inode);
+
+                    guard.remove(&inode);
+                });
+            }
+        })
+        .detach();
+
+        let mount_options = MountOptions::default()
+            .fs_name("rfs")
+            .nonempty(true)
+            .force_readdir_plus(true);
 
         let session = Session::new(mount_options);
 
@@ -1016,10 +1044,14 @@ impl FuseFilesystem for Filesystem {
                         .await
                         {
                             Err(err) => Err(err.into()),
-                            Ok(data) => Ok(ReplyData { data }),
+                            Ok(data) => Ok(ReplyData {
+                                data: Box::new(data),
+                            }),
                         }
                     } else {
-                        Ok(ReplyData { data: result.data })
+                        Ok(ReplyData {
+                            data: Box::new(result.data),
+                        })
                     }
                 }
             };
@@ -1333,7 +1365,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn readdir(
+    /*async fn readdir(
         &self,
         _req: Request,
         parent: u64,
@@ -1433,7 +1465,7 @@ impl FuseFilesystem for Filesystem {
         self.failed_notify.notify();
 
         Err(libc::ETIMEDOUT.into())
-    }
+    }*/
 
     async fn getlk(
         &self,
@@ -1897,6 +1929,33 @@ impl FuseFilesystem for Filesystem {
 
         let header = self.get_rpc_header().await;
 
+        {
+            let mut read_dir_cache = self.read_dir_cache.lock().await;
+
+            if let Some((instant, cache)) = read_dir_cache.get(&parent) {
+                if instant.elapsed() <= TTL {
+                    let entries = cache
+                        .iter()
+                        .skip(offset as _)
+                        .map(|entry| entry.clone())
+                        .collect::<Vec<_>>();
+
+                    debug!("readdirplus cache hit");
+
+                    return Ok(ReplyDirectoryPlus {
+                        entries: stream::iter(entries).boxed(),
+                    });
+                }
+
+                // cache is timeout
+                read_dir_cache.remove(&parent);
+            }
+        }
+
+        // if offset is 0, the result contains all entries, we can cache them to reuse in the next
+        // readdirplus, otherwise we don't cache it because it doesn't contain all entries.
+        let can_cache = offset == 0;
+
         let client = self.client.clone();
 
         let mut rpc_timeout = INITIAL_TIMEOUT;
@@ -1990,9 +2049,22 @@ impl FuseFilesystem for Filesystem {
                         })
                     });
 
-            return Ok(ReplyDirectoryPlus {
-                entries: Box::pin(stream::iter(entries)),
-            });
+            return if can_cache {
+                let entries = entries.collect::<Vec<_>>();
+
+                self.read_dir_cache
+                    .lock()
+                    .await
+                    .insert(parent, (Instant::now(), entries.clone()));
+
+                Ok(ReplyDirectoryPlus {
+                    entries: Box::pin(stream::iter(entries)),
+                })
+            } else {
+                Ok(ReplyDirectoryPlus {
+                    entries: Box::pin(stream::iter(entries)),
+                })
+            };
         }
 
         error!("read_dir failed more than 3 times");

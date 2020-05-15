@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use async_std::fs;
 use async_std::sync::RwLock;
-use chrono::prelude::*;
 use fuse3::Errno;
 use fuse3::FileType;
 use futures_channel::mpsc::{channel, Sender};
@@ -985,7 +984,7 @@ impl Rfs for Server {
 
         let user = self.get_user(request.header).await?;
 
-        user.update_last_alive_time(Local::now()).await;
+        user.update_last_alive_time().await;
 
         debug!(
             "receive ping message from {}",

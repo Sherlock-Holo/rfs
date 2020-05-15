@@ -376,7 +376,6 @@ impl Filesystem {
     }
 }
 
-#[cfg(features = "test")]
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -391,17 +390,18 @@ mod tests {
     use fuse3::Errno;
     use futures_channel::mpsc::channel;
     use futures_util::sink::SinkExt;
-    use nix::fcntl;
     use tempfile;
 
-    use crate::log_init;
     use crate::server::filesystem::file_handle::FileHandleKind;
     use crate::server::filesystem::LockKind;
+    use crate::{init_smol_runtime, log_init};
 
     use super::*;
 
     #[async_std::test]
     async fn init_filesystem() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -430,6 +430,8 @@ mod tests {
 
     #[async_std::test]
     async fn create_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -460,6 +462,8 @@ mod tests {
 
     #[async_std::test]
     async fn create_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -491,6 +495,8 @@ mod tests {
 
     #[async_std::test]
     async fn lookup_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -534,6 +540,8 @@ mod tests {
 
     #[async_std::test]
     async fn lookup_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -578,6 +586,8 @@ mod tests {
 
     #[async_std::test]
     async fn get_attr_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -620,6 +630,8 @@ mod tests {
 
     #[async_std::test]
     async fn get_attr_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -663,6 +675,8 @@ mod tests {
 
     #[async_std::test]
     async fn set_dir_attr() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -715,6 +729,8 @@ mod tests {
 
     #[async_std::test]
     async fn remove_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -767,6 +783,8 @@ mod tests {
 
     #[async_std::test]
     async fn remove_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -820,6 +838,8 @@ mod tests {
 
     #[async_std::test]
     async fn rename_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -870,13 +890,15 @@ mod tests {
 
         let attr = rx.next().await.unwrap().unwrap();
 
-        assert_eq!(attr.ino, 3);
+        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
     #[async_std::test]
     async fn rename_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -928,13 +950,15 @@ mod tests {
 
         let attr = rx.next().await.unwrap().unwrap();
 
-        assert_eq!(attr.ino, 3);
+        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
     #[async_std::test]
     async fn move_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -978,7 +1002,7 @@ mod tests {
             name: OsString::from("test"),
             mode: 0o755,
             response: tx,
-        };
+        }; // inode 4
 
         fs_tx.send(req).await.unwrap();
 
@@ -1010,13 +1034,15 @@ mod tests {
 
         let attr = rx.next().await.unwrap().unwrap();
 
-        assert_eq!(attr.ino, 5);
+        assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
     #[async_std::test]
     async fn move_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1061,7 +1087,7 @@ mod tests {
             mode: 0o644,
             flags: libc::O_RDWR,
             response: tx,
-        };
+        }; // inode 4
 
         fs_tx.send(req).await.unwrap();
 
@@ -1093,13 +1119,15 @@ mod tests {
 
         let attr = rx.next().await.unwrap().unwrap();
 
-        assert_eq!(attr.ino, 5);
+        assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
     #[async_std::test]
     async fn read_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1137,27 +1165,29 @@ mod tests {
 
         assert_eq!(children.len(), 3);
 
-        let (inode, _, kind, name) = &children[0];
+        let (inode, _, attr, name) = &children[0];
 
         assert_eq!(*inode, 1);
-        assert_eq!(*kind, FileType::Directory);
+        assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(*name, OsString::from("."));
 
-        let (inode, _, kind, name) = &children[1];
+        let (inode, _, attr, name) = &children[1];
 
         assert_eq!(*inode, 1);
-        assert_eq!(*kind, FileType::Directory);
+        assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(*name, OsString::from(".."));
 
-        let (inode, _, kind, name) = &children[2];
+        let (inode, _, attr, name) = &children[2];
 
         assert_eq!(*inode, 2);
-        assert_eq!(*kind, FileType::Directory);
+        assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(*name, OsString::from("test"));
     }
 
     #[async_std::test]
     async fn open_file_rw() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1209,6 +1239,8 @@ mod tests {
 
     #[async_std::test]
     async fn open_file_ro() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1257,6 +1289,8 @@ mod tests {
 
     #[async_std::test]
     async fn open_file_wo() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1308,6 +1342,8 @@ mod tests {
 
     #[async_std::test]
     async fn write_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1341,6 +1377,8 @@ mod tests {
 
     #[async_std::test]
     async fn read_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1453,6 +1491,10 @@ mod tests {
 
     #[async_std::test]
     async fn set_share_lock_success() {
+        init_smol_runtime();
+
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1515,6 +1557,8 @@ mod tests {
 
     #[async_std::test]
     async fn set_share_lock_failed() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1574,6 +1618,8 @@ mod tests {
 
     #[async_std::test]
     async fn try_set_share_lock_success() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1616,6 +1662,8 @@ mod tests {
 
     #[async_std::test]
     async fn try_set_share_lock_failed() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1662,6 +1710,8 @@ mod tests {
 
     #[async_std::test]
     async fn set_exclusive_lock() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1730,6 +1780,8 @@ mod tests {
 
     #[async_std::test]
     async fn try_set_exclusive_lock() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1779,6 +1831,8 @@ mod tests {
 
     #[async_std::test]
     async fn release_share_lock() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1827,6 +1881,8 @@ mod tests {
 
     #[async_std::test]
     async fn release_exclusive_lock() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1875,6 +1931,8 @@ mod tests {
 
     #[async_std::test]
     async fn interrupt_lock() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1934,6 +1992,8 @@ mod tests {
 
     #[async_std::test]
     async fn wait_exclusive_lock() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2001,6 +2061,8 @@ mod tests {
 
     #[async_std::test]
     async fn get_lock_kind() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2062,6 +2124,8 @@ mod tests {
 
     #[async_std::test]
     async fn lookup_exist_entry() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2097,6 +2161,8 @@ mod tests {
     // issue #8
     #[async_std::test]
     async fn rename_to_exist_dir() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2114,7 +2180,7 @@ mod tests {
             name: OsString::from("test"),
             mode: 0o755,
             response: tx,
-        };
+        }; // inode 2
 
         fs_tx.send(req).await.unwrap();
 
@@ -2127,7 +2193,7 @@ mod tests {
             name: OsString::from("exist"),
             mode: 0o755,
             response: tx,
-        };
+        }; // inode 3
 
         fs_tx.send(req).await.unwrap();
 
@@ -2159,7 +2225,7 @@ mod tests {
 
         let attr = rx.next().await.unwrap().unwrap();
 
-        assert_eq!(attr.ino, 4);
+        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
@@ -2167,6 +2233,8 @@ mod tests {
     // issue #8
     #[async_std::test]
     async fn rename_to_exist_file() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2185,7 +2253,7 @@ mod tests {
             mode: 0o644,
             flags: libc::O_RDWR,
             response: tx,
-        };
+        }; // inode 2
 
         fs_tx.send(req).await.unwrap();
 
@@ -2199,7 +2267,7 @@ mod tests {
             mode: 0o644,
             flags: libc::O_RDWR,
             response: tx,
-        };
+        }; // inode 3
 
         fs_tx.send(req).await.unwrap();
 
@@ -2231,13 +2299,15 @@ mod tests {
 
         let attr = rx.next().await.unwrap().unwrap();
 
-        assert_eq!(attr.ino, 4);
+        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
     #[async_std::test]
     async fn fallocate() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2280,6 +2350,8 @@ mod tests {
 
     #[async_std::test]
     async fn copy_file_range() {
+        init_smol_runtime();
+
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2306,6 +2378,8 @@ mod tests {
 
         assert_eq!(fh1.write(b"test", 0).await.unwrap(), 4);
 
+        fh1.flush().await.unwrap();
+
         let (tx, mut rx) = channel(1);
 
         let req = Request::CreateFile {
@@ -2320,17 +2394,7 @@ mod tests {
 
         let (mut fh2, _) = rx.next().await.unwrap().unwrap();
 
-        let fd_in = fh1.as_raw_fd();
-        let fh_out = fh2.as_raw_fd();
-
-        let mut off_in = 0;
-        let mut off_out = 0;
-
-        let copied = task::spawn_blocking(move || {
-            fcntl::copy_file_range(fd_in, Some(&mut off_in), fh_out, Some(&mut off_out), 4)
-        })
-        .await
-        .unwrap();
+        let copied = fh1.copy_to(0, 0, 4, Some(&fh2)).await.unwrap();
 
         assert_eq!(copied, 4);
 
@@ -2339,6 +2403,74 @@ mod tests {
         let n = fh2.read(&mut buf, 0).await.unwrap();
         assert_eq!(n, 4);
 
-        assert_eq!(buf[..n], b"test");
+        assert_eq!(&buf[..n], b"test");
+    }
+
+    #[async_std::test]
+    async fn remove_dir_deep() {
+        init_smol_runtime();
+
+        log_init(true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let (mut fs_tx, fs_rx) = channel(1);
+
+        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+
+        task::spawn(async move { filesystem.run().await });
+
+        let (tx, mut rx) = channel(1);
+
+        // create dir
+        let req = Request::CreateDir {
+            parent: 1,
+            name: OsString::from("test"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        rx.next().await.unwrap().unwrap();
+
+        let (tx, mut rx) = channel(1);
+
+        // create sub dir
+        let req = Request::CreateDir {
+            parent: 2,
+            name: OsString::from("sub-dir"),
+            mode: 0o755,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        rx.next().await.unwrap().unwrap();
+
+        let (tx, mut rx) = channel(1);
+
+        let req = Request::RemoveEntry {
+            parent: 1,
+            name: OsString::from("test"),
+            is_dir: true,
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        rx.next().await.unwrap().unwrap();
+
+        let (tx, mut rx) = channel(1);
+
+        let req = Request::Lookup {
+            parent: 1,
+            name: OsString::from("test"),
+            response: tx,
+        };
+
+        fs_tx.send(req).await.unwrap();
+
+        assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 }

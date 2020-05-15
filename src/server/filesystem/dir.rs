@@ -328,7 +328,7 @@ impl Dir {
                     inode_map.insert(new_inode, entry);
 
                     return Err(libc::EISDIR.into());
-                } else if kind == FileType::Directory {
+                } else if metadata.is_file() && kind == FileType::Directory {
                     // in real filesystem entry is exist, so create this entry record
 
                     *inode_gen += 1;
@@ -377,7 +377,7 @@ impl Dir {
 
                 if metadata.is_dir() && kind == FileType::RegularFile {
                     return Err(libc::EISDIR.into());
-                } else if kind == FileType::Directory {
+                } else if metadata.is_file() && kind == FileType::Directory {
                     return Err(libc::ENOTDIR.into());
                 }
 
@@ -391,6 +391,7 @@ impl Dir {
                     .children
                     .remove(name)
                     .expect("checked child not exist");
+
                 let inode = entry.get_inode();
 
                 if let Entry::Dir(mut dir) = entry {

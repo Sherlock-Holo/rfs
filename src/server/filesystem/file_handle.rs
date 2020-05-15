@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::os::raw::c_int;
-#[cfg(features = "test")]
+#[cfg(test)]
 use std::os::unix::fs::MetadataExt;
-#[cfg(features = "test")]
+#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
-#[cfg(features = "test")]
+#[cfg(test)]
 use std::time::{Duration, UNIX_EPOCH};
 
 use async_notify::Notify;
@@ -16,7 +16,7 @@ use async_std::fs::File as SysFile;
 use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
 use fuse3::{Errno, Result};
-#[cfg(features = "test")]
+#[cfg(test)]
 use fuse3::{FileAttr, FileType};
 use futures_util::future::FutureExt;
 use futures_util::select;
@@ -25,10 +25,10 @@ use nix::fcntl;
 use nix::fcntl::{FallocateFlags, FlockArg};
 use smol::Task;
 
-#[cfg(features = "test")]
+#[cfg(test)]
 use crate::BLOCK_SIZE;
 
-#[cfg(features = "test")]
+#[cfg(test)]
 use super::inode::Inode;
 
 pub type LockTable = Arc<Mutex<BTreeMap<u64, Notify>>>;
@@ -50,7 +50,7 @@ pub enum LockKind {
 pub struct FileHandle {
     id: u64,
 
-    #[cfg(features = "test")]
+    #[cfg(test)]
     inode: Inode,
     sys_file: SysFile,
 
@@ -66,13 +66,13 @@ pub struct FileHandle {
 impl FileHandle {
     pub fn new(
         id: u64,
-        #[cfg(features = "test")] inode: Inode,
+        #[cfg(test)] inode: Inode,
         sys_file: SysFile,
         kind: FileHandleKind,
     ) -> Self {
         Self {
             id,
-            #[cfg(features = "test")]
+            #[cfg(test)]
             inode,
             sys_file,
             kind,
@@ -117,7 +117,7 @@ impl FileHandle {
         Ok(data.len())
     }
 
-    #[cfg(features = "test")]
+    #[cfg(test)]
     pub async fn get_attr(&self) -> Result<FileAttr> {
         let metadata = self.sys_file.metadata().await?;
 
@@ -342,11 +342,43 @@ impl FileHandle {
         .await
     }
 
+    pub async fn copy_to(
+        &self,
+        offset_in: u64,
+        offset_out: u64,
+        size: usize,
+        fh: Option<&Self>,
+    ) -> Result<usize> {
+        let fd_in = self.as_raw_fd();
+
+        let fd_out = if let Some(fh) = fh {
+            fh.as_raw_fd()
+        } else {
+            fd_in
+        };
+
+        let size = Task::blocking(async move {
+            let mut offset_in = offset_in as i64;
+            let mut offset_out = offset_out as i64;
+
+            fcntl::copy_file_range(
+                fd_in,
+                Some(&mut offset_in),
+                fd_out,
+                Some(&mut offset_out),
+                size,
+            )
+        })
+        .await?;
+
+        Ok(size)
+    }
+
     pub fn get_id(&self) -> u64 {
         self.id
     }
 
-    #[cfg(features = "test")]
+    #[cfg(test)]
     pub fn get_file_handle_kind(&self) -> FileHandleKind {
         self.kind
     }
