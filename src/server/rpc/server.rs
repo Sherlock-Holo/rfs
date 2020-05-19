@@ -42,7 +42,8 @@ use super::user::User;
 type Result<T> = std::result::Result<T, Status>;
 
 const MIN_COMPRESS_SIZE: usize = 2048;
-const ONLINE_CHECK_INTERVAL: Duration = Duration::from_secs((60.0 * 1.5) as u64);
+const ONLINE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_PING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
@@ -167,7 +168,7 @@ impl Server {
 
                 user_map.iter().for_each(|(uuid, user)| {
                     futures_unordered.push(async move {
-                        if !user.is_online(ONLINE_CHECK_INTERVAL).await {
+                        if !user.is_online(MAX_PING_INTERVAL).await {
                             Some(uuid)
                         } else {
                             None

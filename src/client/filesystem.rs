@@ -207,10 +207,13 @@ impl Filesystem {
         failed_notify: Notify,
     ) {
         let mut rpc_timeout = INITIAL_TIMEOUT;
+        let mut failed = false;
 
         'outer: loop {
             for _ in 0..3 {
-                Timer::after(PING_INTERVAL).await;
+                if failed {
+                    Timer::after(PING_INTERVAL).await;
+                }
 
                 let ping_req = TonicRequest::new(PingRequest {
                     header: Some(Header {
@@ -224,6 +227,8 @@ impl Filesystem {
                 if timeout(rpc_timeout, client.ping(ping_req)).await.is_ok() {
                     rpc_timeout = INITIAL_TIMEOUT;
 
+                    failed = false;
+
                     debug!("sent ping message");
 
                     continue 'outer;
@@ -235,6 +240,8 @@ impl Filesystem {
             // ping failed 3 times, reset rpc timeout and notify to reconnect,
             // wait for next ping round
             rpc_timeout = INITIAL_TIMEOUT;
+
+            failed = true;
 
             failed_notify.notify();
         }
