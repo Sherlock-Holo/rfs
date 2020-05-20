@@ -211,7 +211,7 @@ impl Filesystem {
 
         'outer: loop {
             for _ in 0..3 {
-                if failed {
+                if !failed {
                     Timer::after(PING_INTERVAL).await;
                 }
 
@@ -237,8 +237,7 @@ impl Filesystem {
                 }
             }
 
-            // ping failed 3 times, reset rpc timeout and notify to reconnect,
-            // wait for next ping round
+            // ping failed 3 times, reset rpc timeout and notify to reconnect
             rpc_timeout = INITIAL_TIMEOUT;
 
             failed = true;
