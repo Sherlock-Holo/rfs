@@ -9,11 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: install fuse build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libfuse-dev pkg-config
-
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -28,11 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-
-      - name: install fuse build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libfuse-dev pkg-config
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -54,11 +44,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: install fuse build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libfuse-dev pkg-config
-
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -76,11 +61,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: install fuse build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libfuse-dev pkg-config
-
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
@@ -97,11 +77,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-
-      - name: install fuse build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libfuse-dev pkg-config
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -122,11 +97,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-
-      - name: install fuse build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libfuse-dev pkg-config
 
       - uses: actions-rs/toolchain@v1
         with:
