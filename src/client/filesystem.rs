@@ -1694,7 +1694,7 @@ impl FuseFilesystem for Filesystem {
 
         self.failed_notify.notify();
 
-        return Err(libc::ETIMEDOUT.into());
+        Err(libc::ETIMEDOUT.into())
     }
 
     #[inline]
@@ -1789,7 +1789,7 @@ impl FuseFilesystem for Filesystem {
 
         self.failed_notify.notify();
 
-        return Err(libc::ETIMEDOUT.into());
+        Err(libc::ETIMEDOUT.into())
     }
 
     async fn interrupt(&self, _req: Request, unique: u64) -> Result<()> {
@@ -1850,7 +1850,7 @@ impl FuseFilesystem for Filesystem {
 
         self.failed_notify.notify();
 
-        return Err(libc::ETIMEDOUT.into());
+        Err(libc::ETIMEDOUT.into())
     }
 
     async fn fallocate(
@@ -1920,7 +1920,7 @@ impl FuseFilesystem for Filesystem {
 
         self.failed_notify.notify();
 
-        return Err(libc::ETIMEDOUT.into());
+        Err(libc::ETIMEDOUT.into())
     }
 
     async fn readdirplus(
@@ -1940,11 +1940,7 @@ impl FuseFilesystem for Filesystem {
 
             if let Some((instant, cache)) = read_dir_cache.get(&parent) {
                 if instant.elapsed() <= TTL {
-                    let entries = cache
-                        .iter()
-                        .skip(offset as _)
-                        .map(|entry| entry.clone())
-                        .collect::<Vec<_>>();
+                    let entries = cache.iter().skip(offset as _).cloned().collect::<Vec<_>>();
 
                     debug!("readdirplus cache hit");
 

@@ -9,6 +9,7 @@ use futures_util::stream::StreamExt;
 use log::{debug, info};
 use nix::libc;
 use serde::Deserialize;
+use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 
 use rfs::log_init;
@@ -26,7 +27,7 @@ pub struct Config {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "rfs-server", about = "rfs server.")]
+#[structopt(about = "rfs server.", settings(& [ColorAuto, ColoredHelp]))]
 pub struct Argument {
     #[structopt(short, long, default_value = "/etc/rfs/server.yml", parse(from_os_str))]
     config: PathBuf,

@@ -12,6 +12,7 @@ use nix::unistd;
 use nix::unistd::ForkResult;
 use serde::Deserialize;
 use smol::Task;
+use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
@@ -29,7 +30,7 @@ struct Config {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(about = "mount a rfs filesystem")]
+#[structopt(about = "mount a rfs filesystem", settings(& [ColorAuto, ColoredHelp]))]
 struct Argument {
     #[structopt(short, long, default_value = "/etc/rfs/client.yml", parse(from_os_str))]
     config: PathBuf,
@@ -42,7 +43,7 @@ enum RunMode {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(about = "mount a rfs filesystem")]
+#[structopt(about = "mount a rfs filesystem", settings(& [ColorAuto, ColoredHelp]))]
 struct MountArgument {
     #[structopt(help = "server addr, such as https://example.com")]
     server_addr: String,
@@ -72,7 +73,7 @@ impl TryInto<(Config, RunMode)> for MountArgument {
         let mut debug_ca = None;
         let mut mode = RunMode::Background;
 
-        for opt in self.options.split(",") {
+        for opt in self.options.split(',') {
             if opt.starts_with("cert") {
                 cert = Some(opt.replace("cert=", ""));
             } else if opt.starts_with("key") {
@@ -88,8 +89,8 @@ impl TryInto<(Config, RunMode)> for MountArgument {
             }
         }
 
-        let cert = cert.ok_or(anyhow::anyhow!("cert is miss"))?.into();
-        let key = key.ok_or(anyhow::anyhow!("key is miss"))?.into();
+        let cert = cert.ok_or_else(|| anyhow::anyhow!("cert is miss"))?.into();
+        let key = key.ok_or_else(|| anyhow::anyhow!("key is miss"))?.into();
 
         Ok((
             Config {
@@ -107,7 +108,7 @@ impl TryInto<(Config, RunMode)> for MountArgument {
 }
 
 pub fn run() -> Result<()> {
-    let program_name = args().nth(0).map_or(String::from(""), |name| name);
+    let program_name = args().next().map_or(String::from(""), |name| name);
 
     let program_name = Path::new(&program_name)
         .file_name()

@@ -221,7 +221,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         match result {
             Err(errno) => Ok(Response::new(ReadDirResponse {
@@ -233,10 +233,7 @@ impl Rfs for Server {
                 let dir_entries: Vec<_> = entries
                     .into_iter()
                     .map(|(inode, index, attr, name)| {
-                        let name = name
-                            .to_os_string()
-                            .into_string()
-                            .expect("entry name should be valid");
+                        let name = name.into_string().expect("entry name should be valid");
 
                         DirEntry {
                             index,
@@ -282,7 +279,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         match result {
             Err(errno) => Ok(Response::new(LookupResponse {
@@ -320,7 +317,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         match result {
             Err(errno) => Ok(Response::new(MkdirResponse {
@@ -363,7 +360,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         let (file_handle, attr) = match result {
             Err(errno) => {
@@ -411,7 +408,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         if let Err(errno) = result {
             Ok(Response::new(UnlinkResponse {
@@ -445,7 +442,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         if let Err(errno) = result {
             Ok(Response::new(RmDirResponse {
@@ -480,7 +477,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         if let Err(errno) = result {
             Ok(Response::new(RenameResponse {
@@ -516,7 +513,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         let file_handle = match result {
             Err(errno) => {
@@ -858,7 +855,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         match result {
             Err(errno) => Ok(Response::new(GetAttrResponse {
@@ -936,7 +933,7 @@ impl Rfs for Server {
         let result = receiver
             .next()
             .await
-            .ok_or(Status::aborted("server filesystem stopped"))?;
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
 
         match result {
             Err(errno) => Ok(Response::new(SetAttrResponse {

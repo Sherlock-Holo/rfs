@@ -55,7 +55,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let mut buf = vec![0; size as usize];
@@ -74,7 +74,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let written = file_handle.lock().await.write(data, offset).await?;
@@ -102,7 +102,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle.lock().await.fsync(false).await?;
@@ -117,7 +117,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle.lock().await.flush().await?;
@@ -153,7 +153,7 @@ impl User {
         let file_handle = guard
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         drop(guard); // release lock as soon as possible
@@ -174,7 +174,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let file_handle = select! {
@@ -192,7 +192,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle.lock().await.try_release_lock().await?;
@@ -204,16 +204,17 @@ impl User {
     pub async fn interrupt_lock(&self, unique: u64) -> Result<()> {
         debug!("interrupt unique {} lock", unique);
 
-        Ok(self
-            .inner
+        self.inner
             .read()
             .await
             .lock_table
             .lock()
             .await
             .get(&unique)
-            .ok_or(Errno::from(libc::EBADF))?
-            .notify())
+            .ok_or_else(|| Errno::from(libc::EBADF))?
+            .notify();
+
+        Ok(())
     }
 
     //#[inline]
@@ -224,7 +225,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let lock_kind = file_handle.lock().await.get_lock_kind().await;
@@ -239,7 +240,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle
@@ -265,7 +266,7 @@ impl User {
         let file_handle_in = guard
             .file_handle_map
             .get(&fh_in)
-            .ok_or(Errno::from(libc::EBADF))?;
+            .ok_or_else(|| Errno::from(libc::EBADF))?;
 
         let file_handle_in = file_handle_in.lock().await;
 
@@ -277,7 +278,7 @@ impl User {
             let file_handle_out = guard
                 .file_handle_map
                 .get(&fh_out)
-                .ok_or(Errno::from(libc::EBADF))?;
+                .ok_or_else(|| Errno::from(libc::EBADF))?;
 
             let file_handle_out = file_handle_out.lock().await;
 
