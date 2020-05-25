@@ -13,13 +13,12 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use async_notify::Notify;
 use async_std::fs::File as SysFile;
-use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
 use fuse3::{Errno, Result};
 #[cfg(test)]
 use fuse3::{FileAttr, FileType};
 use futures_util::future::FutureExt;
-use futures_util::select;
+use futures_util::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::{FallocateFlags, FlockArg};
@@ -31,7 +30,7 @@ use crate::BLOCK_SIZE;
 #[cfg(test)]
 use super::inode::Inode;
 
-pub type LockTable = Arc<Mutex<BTreeMap<u64, Notify>>>;
+pub type LockTable = Arc<Mutex<BTreeMap<u64, Arc<Notify>>>>;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
@@ -180,7 +179,7 @@ impl FileHandle {
 
         let lock_kind = self.lock_kind.clone();
 
-        let lock_canceler = Notify::new();
+        let lock_canceler = Arc::new(Notify::new());
 
         // save lock canceler at first, ensure when return JoinHandle, lock canceler is usable
         lock_table
@@ -194,7 +193,7 @@ impl FileHandle {
             let lock_success = loop {
                 let lock_job = Task::blocking(async move { fcntl::flock(raw_fd, flock_arg) });
 
-                let result = select! {
+                let result = futures_util::select! {
                     _ = lock_canceler.notified().fuse() => break false,
                     result = lock_job.fuse() => result,
                 };

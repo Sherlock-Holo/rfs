@@ -42,7 +42,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(60);
 pub struct Filesystem {
     uuid: RwLock<Option<Uuid>>,
     client: Arc<AtomicValue<RfsClient<Channel>>>,
-    failed_notify: Notify,
+    failed_notify: Arc<Notify>,
     compress: RwLock<bool>,
     uri: Uri,
     tls_cfg: ClientTlsConfig,
@@ -70,7 +70,7 @@ impl Filesystem {
         Ok(Filesystem {
             uuid: RwLock::new(None),
             client,
-            failed_notify: Notify::new(),
+            failed_notify: Arc::new(Notify::new()),
             compress: RwLock::new(compress),
             uri,
             tls_cfg,
@@ -163,7 +163,7 @@ impl Filesystem {
         client: Arc<AtomicValue<RfsClient<Channel>>>,
         uri: Uri,
         tls_cfg: ClientTlsConfig,
-        failed_notify: Notify,
+        failed_notify: Arc<Notify>,
     ) {
         loop {
             failed_notify.notified().await;
@@ -204,7 +204,7 @@ impl Filesystem {
     async fn ping_loop(
         client: Arc<AtomicValue<RfsClient<Channel>>>,
         uuid: Uuid,
-        failed_notify: Notify,
+        failed_notify: Arc<Notify>,
     ) {
         let mut rpc_timeout = INITIAL_TIMEOUT;
         let mut failed = false;
