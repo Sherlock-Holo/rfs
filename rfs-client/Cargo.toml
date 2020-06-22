@@ -18,4 +18,4 @@ tonic = { version = "0.2", features = ["tls"] }
 futures-util = "0.3"
 nix = "0.17"
 smol = { version = "0.1", features = ["tokio02"] }
-async-std = "1.5"
+async-std = "1.6"
