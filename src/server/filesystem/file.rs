@@ -1,127 +1,67 @@
-use std::ffi::OsString;
-use std::os::unix::fs::MetadataExt;
+use std::ffi::{OsStr, OsString};
+use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
 
 use async_std::fs;
-use async_std::path::Path;
-use async_std::sync::RwLock;
-use fuse::{FileAttr, FileType};
+use async_std::sync::Mutex;
+use fuse3::{FileAttr, Result};
 use log::{debug, error};
 
-use crate::server::filesystem::SetAttr;
-use crate::Result;
+use crate::Apply;
 
-use super::entry::Entry;
-use super::file_handle::{FileHandle, FileHandleKind};
-use super::inode::{Inode, InodeMap};
+use super::attr::metadata_to_file_attr;
+use super::dir::Dir;
+use super::file_handle::FileHandleKind;
+use super::inode::Inode;
+use super::FileHandle;
+use super::SetAttr;
 
 #[derive(Debug)]
 struct InnerFile {
+    parent: Dir,
     inode: Inode,
     name: OsString,
-    real_path: OsString,
-    parent: Inode,
 }
 
-#[derive(Debug)]
-pub struct File(RwLock<InnerFile>);
-
-impl File {
-    pub async fn from_exist<P: AsRef<Path>>(
-        parent: Inode,
-        real_path: P,
-        inode_gen: &AtomicU64,
-        inode_map: &mut InodeMap,
-    ) -> Result<Arc<Self>> {
-        fs::metadata(&real_path).await?;
-
-        let real_path = real_path.as_ref().to_path_buf();
-
-        debug!("create File from real path {:?}", real_path);
-
-        let inode = inode_gen.fetch_add(1, Ordering::Relaxed);
-
-        let file = Arc::new(File(RwLock::new(InnerFile {
-            inode,
-            name: real_path
-                .file_name()
-                .expect("name should be valid")
-                .to_os_string(),
-            real_path: real_path.as_os_str().to_os_string(),
-            parent,
-        })));
-
-        inode_map.insert(inode, Entry::from(&file));
-
-        Ok(file)
-    }
-
+impl InnerFile {
     pub async fn get_attr(&self) -> Result<FileAttr> {
-        let guard = self.0.read().await;
+        let path = self.get_absolute_path();
 
-        let metadata = fs::metadata(&guard.real_path).await?;
-
-        Ok(FileAttr {
-            ino: guard.inode,
-            size: metadata.len(),
-            blocks: metadata.blocks(),
-            kind: FileType::RegularFile,
-            atime: metadata.accessed()?,
-            mtime: metadata.modified()?,
-            ctime: UNIX_EPOCH
-                + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
-            perm: (metadata.permissions().mode() ^ libc::S_IFREG) as u16,
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            rdev: metadata.rdev() as u32,
-            flags: 0,
-            nlink: 0,
-        })
+        metadata_to_file_attr(self.inode, fs::metadata(path).await?)
     }
 
     pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
-        {
-            let guard = self.0.read().await;
+        let path = self.get_absolute_path();
 
-            debug!("set inode {} attr {:?}", guard.inode, set_attr);
+        let metadata = fs::metadata(&path).await?;
 
-            let truncate = if let Some(size) = set_attr.size {
-                size == 0
-            } else {
-                false
-            };
+        if let Some(mode) = set_attr.mode {
+            let mut permissions = metadata.permissions();
+
+            permissions.set_mode(mode);
+
+            fs::set_permissions(&path, permissions).await?;
+        }
+
+        if let Some(size) = set_attr.size {
+            let truncate = size == 0;
 
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .truncate(truncate)
-                .open(&guard.real_path)
+                .open(&path)
                 .await?;
 
-            if let Some(mode) = set_attr.mode {
-                let metadata = file.metadata().await?;
+            if size > 0 {
+                debug!("set attr size {}", size);
 
-                let mut permissions = metadata.permissions();
+                if let Err(err) = file.set_len(size).await {
+                    error!("set inode {} size {} failed", self.inode, size);
 
-                permissions.set_mode(mode);
-
-                file.set_permissions(permissions).await?;
-
-                debug!("set inode {} permission success", guard.inode);
-            }
-
-            if let Some(size) = set_attr.size {
-                if size > 0 {
-                    if let Err(err) = file.set_len(size).await {
-                        error!("set inode {} size {} failed", guard.inode, size);
-
-                        return Err(err.into());
-                    }
-
-                    debug!("set inode {} size success", guard.inode);
+                    return Err(err.into());
                 }
             }
         }
@@ -129,79 +69,101 @@ impl File {
         self.get_attr().await
     }
 
-    pub async fn open(&self, fh_id: u64, flags: u32) -> Result<FileHandle> {
-        let guard = self.0.read().await;
+    fn get_absolute_path(&self) -> PathBuf {
+        self.parent
+            .get_absolute_path()
+            .apply(|path| path.push(&self.name))
+    }
+}
 
-        debug!("server open {:?} flags {}", guard.name, flags);
+#[derive(Debug, Clone)]
+pub struct File(Arc<Mutex<InnerFile>>);
+
+impl File {
+    pub fn from_exist(parent: &Dir, name: &OsStr, inode: Inode) -> Self {
+        Self(Arc::new(Mutex::new(InnerFile {
+            parent: parent.clone(),
+            inode,
+            name: name.to_os_string(),
+        })))
+    }
+
+    pub fn get_inode(&self) -> Inode {
+        self.0.try_lock().unwrap().inode
+    }
+
+    pub async fn open(&self, flags: i32, file_handle_id_gen: &mut u64) -> Result<FileHandle> {
+        let inner = self.0.try_lock().unwrap();
+
+        let path = inner
+            .parent
+            .get_absolute_path()
+            .apply(|path| path.push(&inner.name));
+
+        debug!("open {:?} flags {}", path, flags);
 
         let mut options = fs::OpenOptions::new();
 
-        let fh_kind = if flags & libc::O_RDWR as u32 > 0 {
+        let fh_kind = if flags & libc::O_RDWR > 0 {
             options.write(true);
             options.read(true);
 
+            debug!("open {:?} with O_RDWR", path);
+
             FileHandleKind::ReadWrite
-        } else if flags & libc::O_WRONLY as u32 > 0 {
+        } else if flags & libc::O_WRONLY > 0 {
             options.write(true);
             options.read(false);
+
+            debug!("open {:?} with O_WRONLY", path);
 
             FileHandleKind::WriteOnly
         } else {
             options.write(false);
             options.read(true);
 
+            debug!("open {:?} read only", path);
+
             FileHandleKind::ReadOnly
         };
 
-        if flags & libc::O_TRUNC as u32 > 0 {
-            debug!("open {:?} flags have truncate", guard.name);
+        if flags & libc::O_TRUNC > 0 {
+            debug!("open {:?} with O_TRUNC", path);
 
             options.truncate(true);
         }
 
-        let sys_file = options.open(&guard.real_path).await?;
+        let sys_file = options.open(path).await?;
 
-        Ok(FileHandle::new(fh_id, guard.inode, sys_file, fh_kind))
+        *file_handle_id_gen += 1;
+        let file_handle_id = *file_handle_id_gen.deref();
+
+        Ok(FileHandle::new(
+            file_handle_id,
+            #[cfg(test)]
+            inner.inode,
+            sys_file,
+            fh_kind,
+        ))
     }
 
-    pub async fn rename<P: AsRef<Path>>(&self, new_real_path: P) -> Result<()> {
-        let mut guard = self.0.write().await;
+    pub async fn get_attr(&self) -> Result<FileAttr> {
+        let inner = self.0.try_lock().unwrap();
 
-        fs::rename(&guard.real_path, &new_real_path).await?;
-
-        let new_real_path = new_real_path.as_ref();
-
-        guard.real_path = new_real_path.as_os_str().to_os_string();
-        guard.name = new_real_path
-            .file_name()
-            .expect("name should be valid")
-            .to_os_string();
-
-        Ok(())
+        inner.get_attr().await
     }
 
-    //#[inline]
-    pub async fn set_new_parent(&self, new_parent: Inode) {
-        self.0.write().await.parent = new_parent
+    pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
+        let inner = self.0.try_lock().unwrap();
+
+        inner.set_attr(set_attr).await
     }
 
-    #[inline]
-    pub async fn get_inode(&self) -> Inode {
-        self.0.read().await.inode
+    pub fn set_new_parent(&mut self, new_parent: &Dir) {
+        self.0.try_lock().unwrap().parent = new_parent.clone();
     }
 
-    //#[inline]
-    pub async fn get_name(&self) -> OsString {
-        self.0.read().await.name.to_os_string()
-    }
-
-    #[inline]
-    pub async fn get_real_path(&self) -> OsString {
-        self.0.read().await.real_path.to_os_string()
-    }
-
-    //#[inline]
-    pub async fn get_parent_inode(&self) -> Inode {
-        self.0.read().await.parent
+    pub fn set_new_name(&mut self, new_name: &OsStr) {
+        self.0.try_lock().unwrap().name = new_name.to_os_string();
     }
 }

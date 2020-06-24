@@ -1,9 +1,7 @@
-use std::ffi::OsString;
-use std::sync::Arc;
+use std::ffi::OsStr;
+use std::fs::Metadata;
 
-use fuse::FileAttr;
-
-use crate::Result;
+use fuse3::{FileAttr, FileType, Result};
 
 use super::dir::Dir;
 use super::file::File;
@@ -12,11 +10,56 @@ use super::SetAttr;
 
 #[derive(Debug, Clone)]
 pub enum Entry {
-    Dir(Arc<Dir>),
-    File(Arc<File>),
+    Dir(Dir),
+    File(File),
 }
 
 impl Entry {
+    pub fn new(new_inode: Inode, name: &OsStr, parent: &Dir, metadata: &Metadata) -> Self {
+        if metadata.is_dir() {
+            Entry::from(Dir::from_exist(parent, &name, new_inode))
+        } else {
+            Entry::from(File::from_exist(parent, &name, new_inode))
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        matches!(self, Entry::Dir(_))
+    }
+
+    pub fn is_file(&self) -> bool {
+        !self.is_dir()
+    }
+
+    pub fn get_inode(&self) -> Inode {
+        match self {
+            Entry::Dir(dir) => dir.get_inode(),
+            Entry::File(file) => file.get_inode(),
+        }
+    }
+
+    pub fn get_kind(&self) -> FileType {
+        if self.is_dir() {
+            FileType::Directory
+        } else {
+            FileType::RegularFile
+        }
+    }
+
+    pub fn set_new_parent(&mut self, new_parent: &Dir) {
+        match self {
+            Entry::Dir(dir) => dir.set_new_parent(new_parent),
+            Entry::File(file) => file.set_new_parent(new_parent),
+        }
+    }
+
+    pub fn set_new_name(&mut self, new_name: &OsStr) {
+        match self {
+            Entry::Dir(dir) => dir.set_new_name(new_name),
+            Entry::File(file) => file.set_new_name(new_name),
+        }
+    }
+
     pub async fn get_attr(&self) -> Result<FileAttr> {
         match self {
             Entry::Dir(dir) => dir.get_attr().await,
@@ -30,42 +73,28 @@ impl Entry {
             Entry::File(file) => file.set_attr(set_attr).await,
         }
     }
-
-    pub async fn get_inode(&self) -> Inode {
-        match self {
-            Entry::Dir(dir) => dir.get_inode().await,
-            Entry::File(file) => file.get_inode().await,
-        }
-    }
-
-    pub async fn get_name(&self) -> OsString {
-        match self {
-            Entry::Dir(dir) => dir.get_name().await,
-            Entry::File(file) => file.get_name().await,
-        }
-    }
 }
 
-impl From<&Arc<Dir>> for Entry {
-    fn from(dir: &Arc<Dir>) -> Self {
-        Entry::Dir(dir.clone())
-    }
-}
-
-impl From<Arc<Dir>> for Entry {
-    fn from(dir: Arc<Dir>) -> Self {
+impl From<Dir> for Entry {
+    fn from(dir: Dir) -> Self {
         Entry::Dir(dir)
     }
 }
 
-impl From<&Arc<File>> for Entry {
-    fn from(file: &Arc<File>) -> Self {
-        Entry::File(file.clone())
+impl From<File> for Entry {
+    fn from(file: File) -> Self {
+        Entry::File(file)
     }
 }
 
-impl From<Arc<File>> for Entry {
-    fn from(file: Arc<File>) -> Self {
-        Entry::File(file)
+impl From<&Dir> for Entry {
+    fn from(dir: &Dir) -> Self {
+        Entry::Dir(dir.clone())
+    }
+}
+
+impl From<&File> for Entry {
+    fn from(file: &File) -> Self {
+        Entry::File(file.clone())
     }
 }

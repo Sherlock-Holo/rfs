@@ -1,569 +1,749 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::ops::DerefMut;
+use std::fs::Metadata;
+use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
 
 use async_std::fs;
 use async_std::fs::{DirBuilder, OpenOptions};
-use async_std::path::{Path, PathBuf};
-use async_std::stream;
-use async_std::sync::RwLock;
-use fuse::{FileAttr, FileType};
-use futures_util::future::try_join_all;
+use async_std::sync::Mutex;
+use fuse3::{Errno, FileAttr, FileType, Result};
 use futures_util::stream::{FuturesOrdered, StreamExt};
-use log::debug;
+use log::{debug, warn};
 
-use crate::errno::Errno;
-use crate::helper::Apply;
-use crate::Result;
+use crate::helper::compare_and_get_new;
+use crate::Apply;
 
-use super::attr::SetAttr;
+use super::attr::metadata_to_file_attr;
 use super::entry::Entry;
-use super::file::File;
-use super::inode::{Inode, InodeMap};
+use super::inode::Inode;
+use super::inode::InodeMap;
+use super::SetAttr;
 
 #[derive(Debug)]
 struct InnerDir {
+    parent: Option<Dir>,
     inode: Inode,
     name: OsString,
-    real_path: OsString,
-    parent: Inode,
-    children: Option<BTreeMap<OsString, Entry>>,
-    inode_gen: Arc<AtomicU64>,
-    inode_map: Arc<RwLock<InodeMap>>,
+    children: BTreeMap<OsString, Entry>,
 }
 
-#[derive(Debug)]
-pub struct Dir(RwLock<InnerDir>);
+#[derive(Debug, Clone)]
+pub struct Dir(Arc<Mutex<InnerDir>>);
 
 impl Dir {
-    pub async fn from_exist<P: AsRef<Path>>(
-        parent: Inode,
-        real_path: P,
-        inode_gen: Arc<AtomicU64>,
-        inode_map: Arc<RwLock<InodeMap>>,
-    ) -> Result<Arc<Self>> {
-        if fs::metadata(&real_path).await?.is_file() {
-            return Err(Errno::from(libc::ENOTDIR));
+    pub fn new_root() -> Self {
+        Self(Arc::new(Mutex::new(InnerDir {
+            parent: None,
+            inode: 1,
+            name: OsString::from("/"),
+            children: BTreeMap::new(),
+        })))
+    }
+
+    pub fn from_exist(parent: &Dir, name: &OsStr, inode: Inode) -> Self {
+        Self(Arc::new(Mutex::new(InnerDir {
+            parent: Some(parent.clone()),
+            inode,
+            name: name.to_os_string(),
+            children: BTreeMap::new(),
+        })))
+    }
+
+    pub async fn lookup(
+        &mut self,
+        name: impl AsRef<OsStr>,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<Entry> {
+        let name = name.as_ref();
+
+        let path = self.get_absolute_path().apply(|path| path.push(name));
+
+        let mut inner = self.0.try_lock().unwrap();
+
+        let metadata = match fs::metadata(&path).await {
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    if let Some(entry) = inner.children.remove(name) {
+                        let inode = entry.get_inode();
+
+                        if let Entry::Dir(mut dir) = entry {
+                            dir.delete_children(inode_map);
+                        }
+
+                        inode_map.remove(&inode);
+                    }
+                }
+
+                return Err(err.into());
+            }
+
+            Ok(metadata) => metadata,
+        };
+
+        match inner.children.get(name) {
+            None => {
+                *inode_gen += 1;
+                let new_inode = *inode_gen;
+
+                let entry = Entry::new(new_inode, name, self, &metadata);
+
+                inner.children.insert(name.to_os_string(), entry.clone());
+                inode_map.insert(new_inode, entry.clone());
+
+                Ok(entry)
+            }
+
+            Some(entry) => {
+                // child entry type isn't right, fix it
+                if is_kind_wrong(&metadata, entry) {
+                    let inode = entry.get_inode();
+
+                    if let Entry::Dir(mut dir) = inner
+                        .children
+                        .remove(name)
+                        .expect("checked child not exist")
+                    {
+                        dir.delete_children(inode_map);
+                    }
+
+                    inode_map.remove(&inode);
+
+                    *inode_gen += 1;
+
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+                }
+
+                Ok(inner.children.get(name).expect("checked").clone())
+            }
+        }
+    }
+
+    pub async fn readdir(
+        &mut self,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<Vec<(Inode, OsString, FileAttr)>> {
+        let path = self.get_absolute_path();
+
+        let mut entries = fs::read_dir(&path).await?;
+
+        let mut entry_futures = FuturesOrdered::new();
+
+        while let Some(entry) = entries.next().await {
+            let entry = entry?;
+
+            entry_futures.push(async move {
+                let name = entry.file_name();
+
+                let metadata = match entry.metadata().await {
+                    Err(err) => return Err((name, Errno::from(err))),
+
+                    Ok(metadata) => metadata,
+                };
+
+                Ok((name, metadata))
+            });
         }
 
-        let real_path = real_path.as_ref();
+        let entries = entry_futures
+            .filter_map(|result| async {
+                match result {
+                    Err((name, err)) => {
+                        warn!(
+                            "when readdir in {:?}, child entry {:?} has error {}",
+                            path, name, err
+                        );
 
-        debug!("create Dir from exist path {:?}", real_path);
+                        None
+                    }
 
-        let inode = inode_gen.fetch_add(1, Ordering::Relaxed);
+                    Ok(success) => Some(success),
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
 
-        debug!("new dir inode generated");
+        let mut inner = self.0.try_lock().unwrap();
 
-        let dir = Arc::new(Dir(RwLock::new(InnerDir {
-            inode,
-            name: if real_path == Path::new("/") {
-                OsString::from("/")
-            } else {
-                real_path
-                    .file_name()
-                    .expect("name should be valid")
-                    .to_os_string()
-            },
-            real_path: real_path.as_os_str().to_os_string(),
-            parent,
-            children: None,
+        // fix dir children map
+        let new_names = entries.iter().map(|(name, _)| name.to_os_string());
+        let old_names = inner.children.keys().map(|name| name.to_os_string());
+
+        let need_delete_name = compare_and_get_new(new_names, old_names);
+
+        // remove not exist child entry
+        for name in need_delete_name {
+            debug!("clean not exist child entry {:?} in {}", name, inner.inode);
+
+            match inner
+                .children
+                .remove(&name)
+                .expect("checked child not exist")
+            {
+                Entry::File(file) => {
+                    inode_map.remove(&file.get_inode());
+                }
+
+                Entry::Dir(mut dir) => dir.delete_children(inode_map),
+            }
+        }
+
+        let mut child_info = Vec::with_capacity(entries.len() + 2);
+
+        let current_dir_attr = metadata_to_file_attr(inner.inode, fs::metadata(&path).await?)?;
+        let parent_dir_attr = if let Some(dir) = &inner.parent {
+            metadata_to_file_attr(
+                dir.get_inode(),
+                fs::metadata(&dir.get_absolute_path()).await?,
+            )?
+        } else {
+            // current dir is root, its parent is itself
+            current_dir_attr
+        };
+
+        child_info.extend_from_slice(&[
+            (inner.inode, OsString::from("."), current_dir_attr),
+            (parent_dir_attr.ino, OsString::from(".."), parent_dir_attr),
+        ]);
+
+        // insert new child entry, update same name but type not same child entry and collect child
+        // entry info.
+        for (name, metadata) in entries {
+            match inner.children.get_mut(&name) {
+                None => {
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, &name, self, &metadata);
+
+                    inode_map.insert(new_inode, entry.clone());
+
+                    inner.children.insert(name.to_os_string(), entry);
+
+                    // collect
+                    child_info.push((new_inode, name, metadata_to_file_attr(new_inode, metadata)?));
+                }
+
+                Some(entry) => {
+                    let (inode, _kind) = if is_kind_wrong(&metadata, entry) {
+                        match entry {
+                            Entry::Dir(dir) => {
+                                let inode = dir.get_inode();
+
+                                dir.delete_children(inode_map);
+
+                                inode_map.remove(&inode);
+                            }
+
+                            Entry::File(file) => {
+                                let inode = file.get_inode();
+
+                                inode_map.remove(&inode);
+                            }
+                        }
+
+                        *inode_gen += 1;
+                        let new_inode = *inode_gen;
+
+                        let entry = Entry::new(new_inode, &name, self, &metadata);
+
+                        let kind = entry.get_kind();
+
+                        inode_map.insert(new_inode, entry.clone());
+
+                        inner.children.insert(name.to_os_string(), entry);
+
+                        (new_inode, kind)
+                    } else {
+                        (entry.get_inode(), entry.get_kind())
+                    };
+
+                    child_info.push((
+                        inode,
+                        name.to_os_string(),
+                        metadata_to_file_attr(inode, metadata)?,
+                    ));
+                }
+            }
+        }
+
+        Ok(child_info)
+    }
+
+    pub async fn remove_child(
+        &mut self,
+        name: impl AsRef<OsStr>,
+        kind: FileType,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<()> {
+        let name = name.as_ref();
+
+        let child_path = self.get_absolute_path().apply(|path| path.push(name));
+
+        let mut inner = self.0.try_lock().unwrap();
+
+        let metadata = match fs::metadata(&child_path).await {
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    if let Some(entry) = inner.children.remove(name) {
+                        let inode = entry.get_inode();
+
+                        if let Entry::Dir(mut dir) = entry {
+                            dir.delete_children(inode_map);
+                        }
+
+                        inode_map.remove(&inode);
+                    }
+                }
+
+                return Err(err.into());
+            }
+
+            Ok(metadata) => metadata,
+        };
+
+        match inner.children.get(name) {
+            None => {
+                if metadata.is_dir() && kind == FileType::RegularFile {
+                    // in real filesystem entry is exist, so create this entry record
+
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+
+                    return Err(libc::EISDIR.into());
+                } else if metadata.is_file() && kind == FileType::Directory {
+                    // in real filesystem entry is exist, so create this entry record
+
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+
+                    return Err(libc::ENOTDIR.into());
+                }
+
+                if metadata.is_dir() {
+                    fs::remove_dir_all(&child_path).await?;
+                } else {
+                    fs::remove_file(&child_path).await?;
+                }
+
+                Ok(())
+            }
+
+            Some(entry) => {
+                // child entry type isn't right, fix it
+                if is_kind_wrong(&metadata, entry) {
+                    let inode = entry.get_inode();
+
+                    if let Entry::Dir(mut dir) = inner
+                        .children
+                        .remove(name)
+                        .expect("checked child not exist")
+                    {
+                        dir.delete_children(inode_map);
+                    }
+
+                    inode_map.remove(&inode);
+
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+                }
+
+                if metadata.is_dir() && kind == FileType::RegularFile {
+                    return Err(libc::EISDIR.into());
+                } else if metadata.is_file() && kind == FileType::Directory {
+                    return Err(libc::ENOTDIR.into());
+                }
+
+                if metadata.is_dir() {
+                    fs::remove_dir_all(&child_path).await?;
+                } else {
+                    fs::remove_file(&child_path).await?;
+                }
+
+                let entry = inner
+                    .children
+                    .remove(name)
+                    .expect("checked child not exist");
+
+                let inode = entry.get_inode();
+
+                if let Entry::Dir(mut dir) = entry {
+                    dir.delete_children(inode_map);
+                }
+
+                inode_map.remove(&inode);
+
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn create_dir(
+        &mut self,
+        name: impl AsRef<OsStr>,
+        mode: u32,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<Entry> {
+        self.create_child(name, mode, 0, FileType::Directory, inode_map, inode_gen)
+            .await
+    }
+
+    pub async fn create_file(
+        &mut self,
+        name: impl AsRef<OsStr>,
+        mode: u32,
+        flags: i32,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<Entry> {
+        self.create_child(
+            name,
+            mode,
+            flags,
+            FileType::RegularFile,
+            inode_map,
             inode_gen,
-            inode_map: inode_map.clone(),
-        })));
+        )
+        .await
+    }
 
-        debug!("Dir created");
+    async fn create_child(
+        &mut self,
+        name: impl AsRef<OsStr>,
+        mode: u32,
+        flags: i32,
+        kind: FileType,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<Entry> {
+        let name = name.as_ref();
 
-        inode_map.write().await.insert(inode, Entry::from(&dir));
+        debug!(
+            "create name {:?} kind {:?} mode {} flags {}",
+            name, kind, mode, flags
+        );
 
-        debug!("inode map wrote");
+        let child_path = self.get_absolute_path().apply(|path| path.push(name));
 
-        Ok(dir)
+        let mut inner = self.0.try_lock().unwrap();
+
+        match fs::metadata(&child_path).await {
+            Ok(metadata) => {
+                if let Some(entry) = inner.children.get(name) {
+                    // child entry type isn't right, fix it
+                    if is_kind_wrong(&metadata, entry) {
+                        let inode = entry.get_inode();
+
+                        if let Entry::Dir(mut dir) = inner.children.remove(name).expect("checked") {
+                            dir.delete_children(inode_map);
+                        }
+
+                        inode_map.remove(&inode);
+
+                        *inode_gen += 1;
+                        let new_inode = *inode_gen;
+
+                        let entry = Entry::new(new_inode, name, self, &metadata);
+
+                        inner.children.insert(name.to_os_string(), entry.clone());
+                        inode_map.insert(new_inode, entry);
+                    }
+                } else {
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+                }
+
+                return Err(libc::EEXIST.into());
+            }
+
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    return Err(err.into());
+                }
+            }
+        }
+
+        // name is not exist, can create entry now
+
+        // try to clean old exist entry
+        if let Some(entry) = inner.children.remove(name) {
+            let inode = entry.get_inode();
+
+            if let Entry::Dir(mut dir) = entry {
+                dir.delete_children(inode_map);
+            }
+
+            inode_map.remove(&inode);
+        }
+
+        let metadata = if kind == FileType::Directory {
+            DirBuilder::new().mode(mode).create(&child_path).await?;
+
+            fs::metadata(&child_path).await?
+        } else {
+            let sys_file: async_std::fs::File = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .mode(mode)
+                .custom_flags(flags)
+                .open(&child_path)
+                .await?;
+
+            sys_file.metadata().await?
+        };
+
+        *inode_gen += 1;
+        let new_inode = *inode_gen;
+
+        let entry = Entry::new(new_inode, name, self, &metadata);
+
+        inner.children.insert(name.to_os_string(), entry.clone());
+        inode_map.insert(new_inode, entry.clone());
+
+        Ok(entry)
+    }
+
+    pub async fn move_child_to_new_parent(
+        &mut self,
+        name: impl AsRef<OsStr>,
+        new_parent: &mut Dir,
+        new_name: impl AsRef<OsStr>,
+        inode_map: &mut InodeMap,
+        inode_gen: &mut Inode,
+    ) -> Result<()> {
+        let name = name.as_ref();
+        let new_name = new_name.as_ref();
+
+        let old_path = self.get_absolute_path().apply(|path| path.push(name));
+        let new_path = new_parent
+            .get_absolute_path()
+            .apply(|path| path.push(new_name));
+
+        let inplace_rename = self.get_inode() == new_parent.get_inode();
+
+        let mut inner = self.0.try_lock().unwrap();
+
+        let metadata = match fs::metadata(&old_path).await {
+            Err(err) => {
+                if err.kind() == ErrorKind::NotFound {
+                    if let Some(entry) = inner.children.remove(name) {
+                        let inode = entry.get_inode();
+
+                        if let Entry::Dir(mut dir) = entry {
+                            dir.delete_children(inode_map);
+                        }
+
+                        inode_map.remove(&inode);
+                    }
+                }
+
+                return Err(err.into());
+            }
+
+            Ok(metadata) => metadata,
+        };
+
+        match inner.children.get(name) {
+            None => {
+                // old parent doesn't have this child entry, we can rename directly and only add
+                // child entry to new parent
+
+                fs::rename(&old_path, &new_path).await?;
+
+                let mut new_inner = if inplace_rename {
+                    inner
+                } else {
+                    new_parent.0.try_lock().unwrap()
+                };
+
+                // try to clean old exist child entry in new parent
+                if let Some(entry) = new_inner.children.remove(new_name) {
+                    let inode = entry.get_inode();
+
+                    if let Entry::Dir(mut dir) = entry {
+                        dir.delete_children(inode_map);
+                    }
+
+                    inode_map.remove(&inode);
+                }
+
+                *inode_gen += 1;
+                let new_inode = *inode_gen;
+
+                let entry = Entry::new(new_inode, new_name, new_parent, &metadata);
+
+                new_inner
+                    .children
+                    .insert(new_name.to_os_string(), entry.clone());
+
+                inode_map.insert(new_inode, entry);
+
+                Ok(())
+            }
+
+            Some(entry) => {
+                if is_kind_wrong(&metadata, entry) {
+                    let inode = entry.get_inode();
+
+                    if let Entry::Dir(mut dir) = inner
+                        .children
+                        .remove(name)
+                        .expect("checked child not exist")
+                    {
+                        dir.delete_children(inode_map);
+                    }
+
+                    inode_map.remove(&inode);
+
+                    *inode_gen += 1;
+                    let new_inode = *inode_gen;
+
+                    let entry = Entry::new(new_inode, name, self, &metadata);
+
+                    inner.children.insert(name.to_os_string(), entry.clone());
+                    inode_map.insert(new_inode, entry);
+                }
+
+                fs::rename(&old_path, &new_path).await?;
+
+                let mut entry = inner
+                    .children
+                    .remove(name)
+                    .expect("checked child not exist");
+
+                let mut new_inner = if inplace_rename {
+                    inner
+                } else {
+                    new_parent.0.try_lock().unwrap()
+                };
+
+                // try to clean old exist child entry
+                if let Some(entry) = new_inner.children.remove(new_name) {
+                    let inode = entry.get_inode();
+
+                    if let Entry::Dir(mut dir) = entry {
+                        dir.delete_children(inode_map);
+                    }
+
+                    inode_map.remove(&inode);
+                }
+
+                entry.set_new_parent(new_parent);
+                entry.set_new_name(new_name);
+
+                new_inner.children.insert(new_name.to_os_string(), entry);
+
+                Ok(())
+            }
+        }
     }
 
     pub async fn get_attr(&self) -> Result<FileAttr> {
-        let guard = self.0.read().await;
+        let path = self.get_absolute_path();
 
-        let metadata = fs::metadata(&guard.real_path).await?;
+        let inode = self.0.try_lock().unwrap().inode;
 
-        Ok(FileAttr {
-            ino: guard.inode,
-            size: metadata.len(),
-            blocks: metadata.blocks(),
-            kind: FileType::Directory,
-            atime: metadata.accessed()?,
-            mtime: metadata.modified()?,
-            ctime: UNIX_EPOCH
-                + Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32),
-            perm: (metadata.permissions().mode() ^ libc::S_IFDIR) as u16,
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            rdev: metadata.rdev() as u32,
-            flags: 0,
-            nlink: 2,
-        })
+        metadata_to_file_attr(inode, fs::metadata(path).await?)
     }
 
     pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
-        {
-            let write_guard = self.0.write().await;
+        let path = self.get_absolute_path();
 
-            if let Some(mode) = set_attr.mode {
-                let metadata = fs::metadata(&write_guard.real_path).await?;
+        let metadata = fs::metadata(&path).await?;
 
-                let mut permissions = metadata.permissions();
+        if let Some(mode) = set_attr.mode {
+            let mut permissions = metadata.permissions();
 
-                permissions.set_mode(mode);
+            permissions.set_mode(mode);
 
-                fs::set_permissions(&write_guard.real_path, permissions).await?;
-            }
+            fs::set_permissions(&path, permissions).await?;
+        }
 
-            if set_attr.size.is_some() {
-                return Err(Errno::from(libc::EISDIR));
-            }
+        if set_attr.size.is_some() {
+            return Err(libc::EISDIR.into());
         }
 
         self.get_attr().await
     }
 
-    pub async fn lookup(&self, name: &OsStr) -> Result<FileAttr> {
-        self.init_children_map().await?;
-
-        let entry = self
-            .0
-            .read()
-            .await
-            .children
-            .as_ref()
-            .expect("children map should be initialized")
-            .get(name)
-            .ok_or(Errno::from(libc::ENOENT))?
-            .clone();
-
-        entry.get_attr().await
+    pub fn get_inode(&self) -> Inode {
+        self.0.try_lock().unwrap().inode
     }
 
-    pub async fn read_dir(&self, offset: i64) -> Result<Vec<(Inode, i64, FileType, OsString)>> {
-        self.init_children_map().await?;
+    pub fn get_absolute_path(&self) -> PathBuf {
+        let inner = self.0.try_lock().unwrap();
 
-        let guard = self.0.read().await;
-
-        let children_map = guard
-            .children
-            .as_ref()
-            .expect("children map should be initialized");
-
-        let prefix_children = stream::from_iter(vec![
-            (guard.inode, FileType::Directory, OsString::from(".")),
-            (guard.parent, FileType::Directory, OsString::from("..")),
-        ]);
-
-        let children = children_map
-            .iter()
-            .map(|(name, child)| async move { (name, child.get_attr().await) })
-            .collect::<FuturesOrdered<_>>()
-            .filter_map(|(name, result)| async move {
-                if let Ok(attr) = result {
-                    Some((attr.ino, attr.kind, name.to_os_string()))
-                } else {
-                    None
-                }
-            });
-
-        Ok(prefix_children
-            .chain(children)
-            .enumerate()
-            .map(|(index, (inode, kind, name))| (inode, (index + 1) as i64, kind, name))
-            .skip(offset as usize)
-            .collect()
-            .await)
+        if let Some(parent) = &inner.parent {
+            parent
+                .get_absolute_path()
+                .apply(|path| path.push(&inner.name))
+        } else {
+            PathBuf::from("/")
+        }
     }
 
-    pub async fn create_dir(&self, name: &OsStr, mode: u32) -> Result<Entry> {
-        self.init_children_map().await?;
-
-        let mut guard = self.0.write().await;
-
-        if guard
-            .children
-            .as_ref()
-            .expect("children should be initialized")
-            .get(name)
-            .is_some()
-        {
-            return Err(Errno::from(libc::EEXIST));
-        }
-
-        let parent_path = PathBuf::from(guard.real_path.clone());
-        let inode_map = guard.inode_map.clone();
-        let inode_gen = guard.inode_gen.clone();
-        let parent_inode = guard.parent;
-
-        let children_map = &mut guard
-            .children
-            .as_mut()
-            .expect("children should be initialized");
-
-        if children_map.get(name).is_some() {
-            return Err(Errno::from(libc::EEXIST));
-        }
-
-        let new_dir_path = PathBuf::from(parent_path).apply(|path| path.push(name));
-
-        DirBuilder::new().mode(mode).create(&new_dir_path).await?;
-
-        let dir = Dir::from_exist(parent_inode, &new_dir_path, inode_gen, inode_map).await?;
-        let dir = Entry::from(dir);
-
-        children_map.insert(name.to_os_string(), dir.clone());
-
-        Ok(dir)
+    pub fn set_new_parent(&mut self, new_parent: &Dir) {
+        self.0.try_lock().unwrap().parent = Some(new_parent.clone());
     }
 
-    pub async fn create_file(&self, name: &OsStr, mode: u32) -> Result<Arc<File>> {
-        debug!("init children map");
-
-        self.init_children_map().await?;
-
-        debug!("children map is initialize");
-
-        let mut guard = self.0.write().await;
-
-        if guard
-            .children
-            .as_ref()
-            .expect("children should be initialized")
-            .get(name)
-            .is_some()
-        {
-            return Err(Errno::from(libc::EEXIST));
-        }
-
-        debug!("guard acquired");
-
-        let parent_path = PathBuf::from(guard.real_path.clone());
-        let inode_map = guard.inode_map.clone();
-        let parent_inode = guard.parent;
-
-        let inode_gen = guard.inode_gen.clone();
-
-        let children_map = guard
-            .children
-            .as_mut()
-            .expect("children should be initialized");
-
-        debug!("get children map");
-
-        if children_map.get(name).is_some() {
-            return Err(Errno::from(libc::EEXIST));
-        }
-
-        let new_file_path = parent_path.apply(|path| path.push(name));
-
-        debug!("new file path {:?}", new_file_path);
-
-        OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(mode)
-            .open(&new_file_path)
-            .await?;
-
-        debug!("created real file {:?}", new_file_path);
-
-        let file = File::from_exist(
-            parent_inode,
-            &new_file_path,
-            &inode_gen,
-            inode_map.write().await.deref_mut(),
-        )
-        .await?;
-
-        children_map.insert(name.to_os_string(), Entry::from(&file));
-
-        Ok(file)
+    pub fn set_new_name(&mut self, new_name: &OsStr) {
+        self.0.try_lock().unwrap().name = new_name.to_os_string();
     }
 
-    pub async fn remove_entry(&self, name: &OsStr, is_dir: bool) -> Result<Entry> {
-        self.init_children_map().await?;
+    /// delete dir children from InodeMap
+    fn delete_children(&mut self, inode_map: &mut InodeMap) {
+        let mut inner = self.0.try_lock().unwrap();
 
-        debug!("remove entry children map initialize");
-
-        let mut guard = self.0.write().await;
-
-        let inode_map = guard.inode_map.clone();
-        let mut inode_map = inode_map.write().await;
-
-        let children_map = guard
-            .children
-            .as_mut()
-            .expect("children map should be initialized");
-
-        match children_map.get(name).ok_or(Errno::from(libc::ENOENT))? {
-            Entry::Dir(dir) => {
-                if !is_dir {
-                    return Err(Errno::from(libc::EISDIR));
-                }
-
-                fs::remove_dir(dir.get_real_path().await).await?;
-            }
-
-            Entry::File(file) => {
-                if is_dir {
-                    return Err(Errno::from(libc::ENOTDIR));
-                } else {
-                    fs::remove_file(file.get_real_path().await).await?;
-                }
-            }
-        }
-
-        let entry = children_map.remove(name).expect("child exists");
-
-        inode_map.remove(&entry.get_inode().await);
-
-        Ok(entry)
-    }
-
-    pub async fn add_child_from(
-        &self,
-        old_parent: &Self,
-        old_name: &OsStr,
-        new_name: &OsStr,
-    ) -> Result<()> {
-        self.init_children_map().await?;
-
-        let new_parent_inode = self.get_inode().await;
-        let old_parent_inode = old_parent.get_inode().await;
-
-        if old_parent_inode == new_parent_inode {
-            let mut guard = self.0.write().await;
-
-            let inode_map = guard.inode_map.clone(); // fix immutable borrow can't stay with mutable borrow
-            let mut inode_map = inode_map.write().await;
-
-            let new_real_path =
-                PathBuf::from(guard.real_path.clone()).apply(|path| path.push(new_name));
-
-            debug!("new real path {:?}", new_real_path);
-
-            let children_map = guard
-                .children
-                .as_mut()
-                .expect("children map should be initialized");
-
-            if children_map.get(old_name).is_none() {
-                return Err(Errno::from(libc::ENOENT));
-            }
-
-            // if new_name exists, remove it at first
-            if let Some(exist_entry) = children_map.remove(new_name) {
-                match &exist_entry {
-                    Entry::Dir(dir) => {
-                        let real_path = dir.get_real_path().await;
-                        fs::remove_dir_all(real_path).await?;
-                    }
-
-                    Entry::File(file) => {
-                        let real_path = file.get_real_path().await;
-                        fs::remove_file(real_path).await?;
-                    }
-                }
-
-                inode_map.remove(&exist_entry.get_inode().await);
-            }
-
-            let entry = children_map.remove(old_name).expect("checked");
-
-            match &entry {
-                Entry::Dir(child_dir) => child_dir.rename(&new_real_path).await?,
-                Entry::File(child_file) => child_file.rename(&new_real_path).await?,
-            }
-
-            children_map.insert(new_name.to_os_string(), entry);
-
-            return Ok(());
-        }
-
-        old_parent.init_children_map().await?;
-
-        let mut old_parent = old_parent.0.write().await;
-        let mut new_parent = self.0.write().await;
-
-        let inode_map = new_parent.inode_map.clone();
-        let mut inode_map = inode_map.write().await;
-
-        let new_real_path =
-            PathBuf::from(new_parent.real_path.clone()).apply(|path| path.push(new_name));
-
-        let old_children_map = old_parent
-            .children
-            .as_mut()
-            .expect("children map should be initialized");
-
-        let new_children_map = new_parent
-            .children
-            .as_mut()
-            .expect("children map should be initialized");
-
-        let entry = old_children_map
-            .remove(old_name)
-            .ok_or(Errno::from(libc::ENOENT))?;
-
-        // if new_name exists, remove it at first
-        if let Some(exist_entry) = new_children_map.remove(new_name) {
-            match &exist_entry {
+        for (_, entry) in inner.children.iter_mut() {
+            match entry {
                 Entry::Dir(dir) => {
-                    let real_path = dir.get_real_path().await;
-                    fs::remove_dir_all(real_path).await?;
+                    dir.delete_children(inode_map);
+
+                    inode_map.remove(&dir.0.try_lock().unwrap().inode);
                 }
 
                 Entry::File(file) => {
-                    let real_path = file.get_real_path().await;
-                    fs::remove_file(real_path).await?;
+                    inode_map.remove(&file.get_inode());
                 }
             }
-
-            inode_map.remove(&exist_entry.get_inode().await);
         }
-
-        match &entry {
-            Entry::Dir(child_dir) => {
-                child_dir.set_new_parent(new_parent_inode).await;
-                child_dir.rename(&new_real_path).await?;
-            }
-            Entry::File(child_file) => {
-                child_file.set_new_parent(new_parent_inode).await;
-                child_file.rename(&new_real_path).await?;
-            }
-        }
-
-        new_children_map.insert(new_name.to_os_string(), entry);
-
-        Ok(())
     }
+}
 
-    pub async fn rename<P: AsRef<Path>>(&self, new_real_path: P) -> Result<()> {
-        let mut guard = self.0.write().await;
-
-        fs::rename(&guard.real_path, &new_real_path).await?;
-
-        let new_real_path = new_real_path.as_ref();
-
-        debug!(
-            "rename dir from {:?} to {:?}",
-            guard.real_path, new_real_path
-        );
-
-        guard.real_path = new_real_path.as_os_str().to_os_string();
-        guard.name = new_real_path
-            .file_name()
-            .expect("name should be valid")
-            .to_os_string();
-
-        Ok(())
-    }
-
-    //#[inline]
-    pub async fn set_new_parent(&self, new_parent: Inode) {
-        self.0.write().await.parent = new_parent
-    }
-
-    //#[inline]
-    pub async fn get_inode(&self) -> Inode {
-        self.0.read().await.inode
-    }
-
-    async fn init_children_map(&self) -> Result<()> {
-        if self.0.read().await.children.is_some() {
-            return Ok(());
-        }
-
-        let mut guard = self.0.write().await;
-
-        // avoid useless init
-        if guard.children.is_some() {
-            return Ok(());
-        }
-
-        debug!("children map not init");
-
-        let mut dir_entries = fs::read_dir(&guard.real_path).await?;
-
-        let parent_inode = guard.parent;
-
-        let mut futures = vec![];
-
-        while let Some(dir_entry) = dir_entries.next().await {
-            let inode_map = guard.inode_map.clone();
-            let parent_path = PathBuf::from(guard.real_path.clone());
-            let inode_gen = guard.inode_gen.clone();
-
-            futures.push(Box::pin(async move {
-                let dir_entry = match dir_entry {
-                    Err(err) => return Err(Errno::from(err)),
-                    Ok(dir_entry) => dir_entry,
-                };
-
-                let dir_entry_real_path =
-                    PathBuf::from(&parent_path).apply(|path| path.push(dir_entry.file_name()));
-
-                let child = if dir_entry.file_type().await?.is_dir() {
-                    Entry::from(
-                        Dir::from_exist(parent_inode, &dir_entry_real_path, inode_gen, inode_map)
-                            .await?,
-                    )
-                } else {
-                    Entry::from(
-                        File::from_exist(
-                            parent_inode,
-                            &dir_entry_real_path,
-                            &inode_gen,
-                            inode_map.write().await.deref_mut(),
-                        )
-                        .await?,
-                    )
-                };
-
-                Ok((dir_entry.file_name(), child))
-            }))
-        }
-
-        let mut children_map = BTreeMap::new();
-
-        for (name, entry) in try_join_all(futures).await? {
-            children_map.insert(name, entry);
-        }
-
-        // disable this debug log, it may downgrade performance
-        /*for (name, _entry) in children_map.iter() {
-            debug!("name is {:?}", name);
-        }*/
-
-        guard.children.replace(children_map);
-
-        debug!("children map init success");
-
-        Ok(())
-    }
-
-    //#[inline]
-    pub async fn get_name(&self) -> OsString {
-        self.0.read().await.name.to_os_string()
-    }
-
-    #[inline]
-    pub async fn get_real_path(&self) -> OsString {
-        self.0.read().await.real_path.to_os_string()
-    }
-
-    //#[inline]
-    pub async fn get_parent_inode(&self) -> Inode {
-        self.0.read().await.parent
-    }
+fn is_kind_wrong(metadata: &Metadata, entry: &Entry) -> bool {
+    (metadata.is_dir() && entry.is_file()) || (metadata.is_file() && entry.is_dir())
 }

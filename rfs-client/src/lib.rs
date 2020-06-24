@@ -1,22 +1,22 @@
 use std::convert::TryInto;
 use std::env::args;
 use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use async_std::fs;
-use async_std::path::Path;
-use async_std::task;
 use log::info;
 use nix::unistd;
 use nix::unistd::ForkResult;
 use serde::Deserialize;
+use smol::Task;
+use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
-use rfs::{log_init, Filesystem};
-use tokio_runtime::{enter_tokio, get_tokio_handle};
+use rfs::{init_smol_runtime, log_init, Filesystem};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -30,7 +30,7 @@ struct Config {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(about = "mount a rfs filesystem")]
+#[structopt(about = "mount a rfs filesystem", settings(& [ColorAuto, ColoredHelp]))]
 struct Argument {
     #[structopt(short, long, default_value = "/etc/rfs/client.yml", parse(from_os_str))]
     config: PathBuf,
@@ -43,7 +43,7 @@ enum RunMode {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(about = "mount a rfs filesystem")]
+#[structopt(about = "mount a rfs filesystem", settings(& [ColorAuto, ColoredHelp]))]
 struct MountArgument {
     #[structopt(help = "server addr, such as https://example.com")]
     server_addr: String,
@@ -73,7 +73,7 @@ impl TryInto<(Config, RunMode)> for MountArgument {
         let mut debug_ca = None;
         let mut mode = RunMode::Background;
 
-        for opt in self.options.split(",") {
+        for opt in self.options.split(',') {
             if opt.starts_with("cert") {
                 cert = Some(opt.replace("cert=", ""));
             } else if opt.starts_with("key") {
@@ -89,8 +89,8 @@ impl TryInto<(Config, RunMode)> for MountArgument {
             }
         }
 
-        let cert = cert.ok_or(anyhow::anyhow!("cert is miss"))?.into();
-        let key = key.ok_or(anyhow::anyhow!("key is miss"))?.into();
+        let cert = cert.ok_or_else(|| anyhow::anyhow!("cert is miss"))?.into();
+        let key = key.ok_or_else(|| anyhow::anyhow!("key is miss"))?.into();
 
         Ok((
             Config {
@@ -108,7 +108,7 @@ impl TryInto<(Config, RunMode)> for MountArgument {
 }
 
 pub fn run() -> Result<()> {
-    let program_name = args().nth(0).map_or(String::from(""), |name| name);
+    let program_name = args().next().map_or(String::from(""), |name| name);
 
     let program_name = Path::new(&program_name)
         .file_name()
@@ -136,7 +136,9 @@ pub fn run() -> Result<()> {
         serde_yaml::from_slice(&cfg_data)?
     };
 
-    task::block_on(enter_tokio(Box::pin(inner_run(cfg))))
+    init_smol_runtime();
+
+    smol::block_on(Task::spawn(inner_run(cfg)))
 }
 
 async fn inner_run(cfg: Config) -> Result<()> {
@@ -174,37 +176,7 @@ async fn inner_run(cfg: Config) -> Result<()> {
         false
     };
 
-    let filesystem = Filesystem::new(uri, tls_config, get_tokio_handle(), compress).await?;
+    let filesystem = Filesystem::new(uri, tls_config, compress).await?;
 
-    filesystem.mount(&cfg.mount_path).await?;
-
-    Ok(())
-}
-
-mod tokio_runtime {
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::thread;
-
-    use futures_util::future::{pending, poll_fn};
-    use tokio::runtime::{Handle, Runtime};
-
-    use lazy_static::lazy_static;
-
-    lazy_static! {
-        static ref HANDLE: Handle = {
-            let mut rt = Runtime::new().unwrap();
-            let handle = rt.handle().clone();
-            thread::spawn(move || rt.block_on(pending::<()>()));
-            handle
-        };
-    }
-
-    pub async fn enter_tokio<T>(mut f: Pin<Box<dyn Future<Output = T> + 'static + Send>>) -> T {
-        poll_fn(|context| HANDLE.enter(|| f.as_mut().poll(context))).await
-    }
-
-    pub fn get_tokio_handle() -> Handle {
-        HANDLE.clone()
-    }
+    filesystem.mount(&cfg.mount_path).await
 }

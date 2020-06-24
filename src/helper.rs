@@ -1,18 +1,11 @@
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
 
-use async_std::net::Shutdown;
-use async_std::prelude::*;
-use fuse::{FileAttr, FileType};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tonic::transport::server::Connected;
+use fuse3::{Errno, FileAttr, FileType, Result};
 
-use crate::errno::Errno;
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
-use crate::Result;
+use crate::BLOCK_SIZE;
 
 pub trait Apply: Sized {
     fn apply<F>(mut self, f: F) -> Self
@@ -25,43 +18,6 @@ pub trait Apply: Sized {
 }
 
 impl<T> Apply for T {}
-
-#[derive(Debug)]
-pub struct UnixStream(pub async_std::os::unix::net::UnixStream);
-
-impl Connected for UnixStream {}
-
-impl AsyncRead for UnixStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.0).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for UnixStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.0).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        if let Err(err) = self.0.shutdown(Shutdown::Both) {
-            Poll::Ready(Err(err))
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    }
-}
 
 fn convert_system_time_to_proto_time(sys_time: SystemTime) -> Option<prost_types::Timestamp> {
     sys_time
@@ -118,6 +74,7 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
         uid,
         gid,
         ino: proto_attr.inode,
+        generation: 0,
         size: proto_attr.size as u64,
         blocks: get_blocks(proto_attr.size as u64),
         atime: convert_proto_time_to_system_time(proto_attr.access_time),
@@ -131,7 +88,7 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
             FileType::RegularFile => 0,
             _ => unreachable!(), // don't support other type
         },
-        flags: 0,
+        blksize: BLOCK_SIZE,
     })
 }
 
@@ -148,16 +105,47 @@ fn get_blocks(size: u64) -> u64 {
     }
 }
 
+/// compare_and_get_new will find out which item that old collection doesn't have
+pub fn compare_and_get_new<Item: Eq + Hash>(
+    old: impl IntoIterator<Item = Item>,
+    new: impl IntoIterator<Item = Item>,
+) -> Vec<Item> {
+    let old = old.into_iter().collect::<HashSet<Item>>();
+
+    new.into_iter().filter(|name| !old.contains(name)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test() {
+    fn apply_test() {
         let x = 100.apply(|myself| {
             *myself += 1;
         });
 
         assert_eq!(x, 101);
+    }
+
+    #[test]
+    fn compare_and_get_new_test() {
+        let old = vec![1, 2, 3, 4, 5];
+        let new = vec![2, 4, 6, 8, 10];
+
+        assert_eq!(compare_and_get_new(old, new), vec![6, 8, 10]);
+
+        let old = vec![1, 2, 3, 4, 5];
+        let new = vec![2, 4, 6, 8, 10];
+
+        assert_eq!(
+            compare_and_get_new(old.iter(), new.iter()),
+            vec![&6, &8, &10]
+        );
+
+        let old = vec![1, 2, 3, 4, 5];
+        let new = vec![1, 2, 3];
+
+        assert_eq!(compare_and_get_new(old, new), vec![]);
     }
 }

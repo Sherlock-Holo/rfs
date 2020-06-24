@@ -1,20 +1,23 @@
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_std::fs;
-use async_std::os::unix::net::UnixListener;
-use async_std::path::Path;
 use async_std::sync::RwLock;
-use async_std::task;
-use chrono::prelude::*;
-use fuse::FileType;
-use futures_util::stream::{FuturesUnordered, TryStreamExt};
-use futures_util::{try_join, StreamExt};
+use fuse3::Errno;
+use fuse3::FileType;
+use futures_channel::mpsc::{channel, Sender};
+use futures_util::sink::SinkExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use log::{debug, error, info, warn};
+use semver_parser::version;
+use semver_parser::version::Version;
+use smol::Task;
+use smol::Timer;
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
 use tonic::transport::Server as TonicServer;
@@ -23,28 +26,30 @@ use tonic::Response;
 use tonic::{Code, Request, Status};
 use uuid::Uuid;
 
-use crate::errno::Errno;
 use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
 use crate::pb;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 use crate::pb::rfs_server::RfsServer;
 use crate::pb::*;
-use crate::TokioUnixStream;
 
 use super::super::filesystem::Filesystem;
 use super::super::filesystem::LockKind;
+use super::super::filesystem::Request as FSRequest;
 use super::super::filesystem::SetAttr;
 use super::user::User;
 
 type Result<T> = std::result::Result<T, Status>;
 
 const MIN_COMPRESS_SIZE: usize = 2048;
+const ONLINE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_PING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct Server {
     users: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>,
-    filesystem: Arc<Filesystem>,
     compress: bool,
+    request_sender: Sender<FSRequest>,
+    version: Version,
 }
 
 impl Server {
@@ -54,7 +59,6 @@ impl Server {
         cert_path: impl AsRef<Path>,
         key_path: impl AsRef<Path>,
         client_ca_path: impl AsRef<Path>,
-        uds_path: impl AsRef<Path>,
         listen_path: SocketAddr,
         compress: bool,
     ) -> anyhow::Result<()> {
@@ -62,9 +66,9 @@ impl Server {
             info!("enable compress support");
         }
 
-        let cert = fs::read(cert_path).await?;
-        let key = fs::read(key_path).await?;
-        let client_ca = fs::read(client_ca_path).await?;
+        let cert = fs::read(cert_path.as_ref()).await?;
+        let key = fs::read(key_path.as_ref()).await?;
+        let client_ca = fs::read(client_ca_path.as_ref()).await?;
 
         let server_identity = Identity::from_pem(cert, key);
 
@@ -78,45 +82,55 @@ impl Server {
             .identity(server_identity)
             .client_ca_root(client_ca);
 
-        let unix_listener = UnixListener::bind(uds_path.as_ref()).await?;
+        let (sender, receiver) = channel(1);
 
-        let fs = Arc::new(Filesystem::new(root_path.as_ref()).await?);
+        let mut fs = Filesystem::new(root_path.as_ref(), receiver).await?;
 
-        let nds_server = Self {
-            users: Arc::new(RwLock::new(BTreeMap::new())),
-            filesystem: fs.clone(),
-            compress,
-        };
-
-        let uds_serve = TonicServer::builder()
-            .add_service(RfsServer::new(nds_server))
-            .serve_with_incoming(unix_listener.incoming().map_ok(TokioUnixStream));
+        Task::spawn(async move { fs.run().await }).detach();
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
-            filesystem: fs,
             compress,
+            request_sender: sender,
+            version: version::parse(VERSION).unwrap(),
         };
 
         let users = rpc_server.users.clone();
 
-        task::spawn(async { Self::check_online_users(users) });
+        Task::spawn(Self::check_online_users(users)).detach();
 
-        let rpc_serve = TonicServer::builder()
+        Ok(TonicServer::builder()
             .tls_config(tls_config)
             .add_service(RfsServer::new(rpc_server))
-            .serve(listen_path);
-
-        try_join!(rpc_serve, uds_serve)?;
-
-        Ok(())
+            .serve(listen_path)
+            .await?)
     }
 
     async fn get_user(&self, header: Option<Header>) -> Result<Arc<User>> {
-        let uuid: Uuid = if let Some(header) = header {
-            if header.version != VERSION {
+        let uuid: Uuid = if let Some(mut header) = header {
+            if header.version == "0.2" {
+                header.version = "0.2.0".to_string();
+            }
+
+            let version = if let Ok(version) = version::parse(&header.version) {
+                version
+            } else {
                 return Err(Status::invalid_argument(format!(
                     "version {} is not support",
+                    header.version
+                )));
+            };
+
+            if version.major != self.version.major {
+                return Err(Status::invalid_argument(format!(
+                    "version {} major is not support",
+                    header.version
+                )));
+            }
+
+            if version.minor != self.version.minor {
+                return Err(Status::invalid_argument(format!(
+                    "version {} minor is not support",
                     header.version
                 )));
             }
@@ -145,7 +159,7 @@ impl Server {
 
     async fn check_online_users(user_map: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>) {
         loop {
-            task::sleep(Duration::from_secs(60)).await;
+            Timer::after(ONLINE_CHECK_INTERVAL).await;
 
             {
                 let mut user_map = user_map.write().await;
@@ -154,7 +168,7 @@ impl Server {
 
                 user_map.iter().for_each(|(uuid, user)| {
                     futures_unordered.push(async move {
-                        if !user.is_online(Duration::from_secs(60)).await {
+                        if !user.is_online(MAX_PING_INTERVAL).await {
                             Some(uuid)
                         } else {
                             None
@@ -180,7 +194,7 @@ impl Server {
     }
 }
 
-#[tonic::async_trait]
+#[async_trait::async_trait]
 impl Rfs for Server {
     async fn read_dir(
         &self,
@@ -190,7 +204,26 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        match self.filesystem.read_dir(request.inode, 0).await {
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::ReadDir {
+            inode: request.inode,
+            offset: request.offset as _,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
             Err(errno) => Ok(Response::new(ReadDirResponse {
                 dir_entries: vec![],
                 error: Some(errno.into()),
@@ -199,15 +232,20 @@ impl Rfs for Server {
             Ok(entries) => {
                 let dir_entries: Vec<_> = entries
                     .into_iter()
-                    .map(|(inode, index, kind, name)| DirEntry {
-                        index,
-                        inode,
-                        r#type: match kind {
-                            FileType::Directory => EntryType::Dir.into(),
-                            FileType::RegularFile => EntryType::File.into(),
-                            _ => unreachable!(),
-                        },
-                        name: name.into_string().expect("entry name should be valid"),
+                    .map(|(inode, index, attr, name)| {
+                        let name = name.into_string().expect("entry name should be valid");
+
+                        DirEntry {
+                            index,
+                            inode,
+                            name: name.to_string(),
+                            r#type: match attr.kind {
+                                FileType::Directory => EntryType::Dir.into(),
+                                FileType::RegularFile => EntryType::File.into(),
+                                _ => unreachable!(),
+                            },
+                            attr: Some(fuse_attr_into_proto_attr(attr, &name)),
+                        }
                     })
                     .collect();
 
@@ -224,11 +262,26 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        match self
-            .filesystem
-            .lookup(request.inode, OsStr::new(&request.name))
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::Lookup {
+            parent: request.inode,
+            name: OsString::from(&request.name),
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
             .await
-        {
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
             Err(errno) => Ok(Response::new(LookupResponse {
                 result: Some(pb::lookup_response::Result::Error(errno.into())),
             })),
@@ -246,11 +299,27 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        match self
-            .filesystem
-            .create_dir(request.inode, OsStr::new(&request.name), request.mode)
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::CreateDir {
+            parent: request.inode,
+            name: OsString::from(&request.name),
+            mode: request.mode,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
             .await
-        {
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
             Err(errno) => Ok(Response::new(MkdirResponse {
                 result: Some(pb::mkdir_response::Result::Error(errno.into())),
             })),
@@ -272,16 +341,28 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        let (file_handle, attr) = match self
-            .filesystem
-            .create_file(
-                request.inode,
-                OsStr::new(&request.name),
-                request.mode,
-                request.flags,
-            )
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::CreateFile {
+            parent: request.inode,
+            name: OsString::from(&request.name),
+            mode: request.mode,
+            flags: request.flags as i32,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
             .await
-        {
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        let (file_handle, attr) = match result {
             Err(errno) => {
                 return Ok(Response::new(CreateFileResponse {
                     file_handle_id: 0,
@@ -309,11 +390,27 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        if let Err(errno) = self
-            .filesystem
-            .remove_entry(request.inode, OsStr::new(&request.name), false)
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::RemoveEntry {
+            parent: request.inode,
+            name: OsString::from(&request.name),
+            is_dir: false,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
             .await
-        {
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        if let Err(errno) = result {
             Ok(Response::new(UnlinkResponse {
                 error: Some(errno.into()),
             }))
@@ -327,11 +424,27 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        if let Err(errno) = self
-            .filesystem
-            .remove_entry(request.inode, OsStr::new(&request.name), true)
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::RemoveEntry {
+            parent: request.inode,
+            name: OsString::from(&request.name),
+            is_dir: true,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
             .await
-        {
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        if let Err(errno) = result {
             Ok(Response::new(RmDirResponse {
                 error: Some(errno.into()),
             }))
@@ -345,16 +458,28 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        if let Err(errno) = self
-            .filesystem
-            .rename(
-                request.old_parent,
-                OsStr::new(&request.old_name),
-                request.new_parent,
-                OsStr::new(&request.new_name),
-            )
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::Rename {
+            old_parent: request.old_parent,
+            old_name: OsString::from(&request.old_name),
+            new_parent: request.new_parent,
+            new_name: OsString::from(&request.new_name),
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
             .await
-        {
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        if let Err(errno) = result {
             Ok(Response::new(RenameResponse {
                 error: Some(errno.into()),
             }))
@@ -371,7 +496,26 @@ impl Rfs for Server {
 
         let user = self.get_user(request.head).await?;
 
-        let file_handle = match self.filesystem.open(request.inode, request.flags).await {
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::Open {
+            inode: request.inode,
+            flags: request.flags as i32,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        let file_handle = match result {
             Err(errno) => {
                 return Ok(Response::new(OpenFileResponse {
                     result: Some(pb::open_file_response::Result::Error(errno.into())),
@@ -388,6 +532,31 @@ impl Rfs for Server {
         Ok(Response::new(OpenFileResponse {
             result: Some(pb::open_file_response::Result::FileHandleId(fh_id)),
         }))
+    }
+
+    async fn allocate(
+        &self,
+        request: Request<AllocateRequest>,
+    ) -> Result<Response<AllocateResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        let result = if let Err(errno) = user
+            .fallocate(
+                request.file_handle_id,
+                request.offset,
+                request.size,
+                request.mode,
+            )
+            .await
+        {
+            Some(pb::Error::from(errno))
+        } else {
+            None
+        };
+
+        Ok(Response::new(AllocateResponse { error: result }))
     }
 
     async fn read_file(
@@ -417,7 +586,7 @@ impl Rfs for Server {
             if self.compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
                 let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
 
-                task::spawn_blocking(|| {
+                Task::blocking(async {
                     if let Err(err) = encoder.write_all(&data) {
                         warn!("compress read data failed {}", err);
 
@@ -670,7 +839,25 @@ impl Rfs for Server {
 
         self.get_user(request.head).await?;
 
-        match self.filesystem.get_attr(request.inode).await {
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::GetAttr {
+            inode: request.inode,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
             Err(errno) => Ok(Response::new(GetAttrResponse {
                 result: Some(pb::get_attr_response::Result::Error(errno.into())),
             })),
@@ -698,7 +885,7 @@ impl Rfs for Server {
             return Err(Status::new(Code::InvalidArgument, "attr is miss"));
         };
 
-        let set_attr = SetAttr {
+        let new_attr = SetAttr {
             uid: None,
             gid: None,
             flags: None,
@@ -729,7 +916,26 @@ impl Rfs for Server {
             },
         };
 
-        match self.filesystem.set_attr(request.inode, set_attr).await {
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::SetAttr {
+            inode: request.inode,
+            new_attr,
+            response: sender,
+        };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
             Err(errno) => Ok(Response::new(SetAttrResponse {
                 result: Some(pb::set_attr_response::Result::Error(errno.into())),
             })),
@@ -742,12 +948,81 @@ impl Rfs for Server {
         }
     }
 
+    async fn copy_file_range(
+        &self,
+        request: Request<CopyFileRangeRequest>,
+    ) -> Result<Response<CopyFileRangeResponse>> {
+        let request = request.into_inner();
+
+        let user = self.get_user(request.head).await?;
+
+        match user
+            .copy_file_range(
+                request.file_handle_id_in,
+                request.offset_in,
+                request.file_handle_id_out,
+                request.offset_out,
+                request.size,
+                request.flags,
+            )
+            .await
+        {
+            Err(errno) => Ok(Response::new(CopyFileRangeResponse {
+                result: Some(pb::copy_file_range_response::Result::Error(errno.into())),
+            })),
+
+            Ok(copied) => Ok(Response::new(CopyFileRangeResponse {
+                result: Some(pb::copy_file_range_response::Result::Copied(copied as _)),
+            })),
+        }
+    }
+
+    async fn stat_fs(&self, request: Request<StatFsRequest>) -> Result<Response<StatFsResponse>> {
+        let request = request.into_inner();
+
+        self.get_user(request.head).await?;
+
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::StatFs { response: sender };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
+            Err(errno) => Ok(Response::new(StatFsResponse {
+                result: Some(pb::stat_fs_response::Result::Error(errno.into())),
+            })),
+
+            Ok(statfs) => Ok(Response::new(StatFsResponse {
+                result: Some(pb::stat_fs_response::Result::Statfs(StatFs {
+                    blocks: statfs.blocks,
+                    block_free: statfs.bfree,
+                    block_available: statfs.bavail,
+                    files: statfs.files,
+                    file_free: statfs.ffree,
+                    block_size: statfs.bsize,
+                    max_name_length: statfs.namelen,
+                    fragment_size: statfs.frsize,
+                })),
+            })),
+        }
+    }
+
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>> {
         let request = request.into_inner();
 
         let user = self.get_user(request.header).await?;
 
-        user.update_last_alive_time(Local::now()).await;
+        user.update_last_alive_time().await;
 
         debug!(
             "receive ping message from {}",

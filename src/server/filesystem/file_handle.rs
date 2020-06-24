@@ -1,32 +1,36 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
-use std::ops::Deref;
 use std::os::raw::c_int;
+#[cfg(test)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::io::RawFd;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::{Duration, UNIX_EPOCH};
 
 use async_notify::Notify;
 use async_std::fs::File as SysFile;
-use async_std::prelude::*;
 use async_std::sync::{Mutex, RwLock};
-use async_std::task;
-use async_std::task::JoinHandle;
-use fuse::{FileAttr, FileType};
+use fuse3::{Errno, Result};
+#[cfg(test)]
+use fuse3::{FileAttr, FileType};
 use futures_util::future::FutureExt;
-use futures_util::select;
+use futures_util::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use log::{debug, error};
 use nix::fcntl;
-use nix::fcntl::FlockArg;
+use nix::fcntl::{FallocateFlags, FlockArg};
+use smol::Task;
 
-use crate::errno::Errno;
-use crate::Result;
+#[cfg(test)]
+use crate::BLOCK_SIZE;
 
+#[cfg(test)]
 use super::inode::Inode;
 
-pub type LockTable = Arc<Mutex<BTreeMap<u64, Notify>>>;
+pub type LockTable = Arc<Mutex<BTreeMap<u64, Arc<Notify>>>>;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FileHandleKind {
@@ -44,6 +48,8 @@ pub enum LockKind {
 
 pub struct FileHandle {
     id: u64,
+
+    #[cfg(test)]
     inode: Inode,
     sys_file: SysFile,
 
@@ -57,9 +63,15 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    pub fn new(id: u64, inode: Inode, sys_file: SysFile, kind: FileHandleKind) -> Self {
+    pub fn new(
+        id: u64,
+        #[cfg(test)] inode: Inode,
+        sys_file: SysFile,
+        kind: FileHandleKind,
+    ) -> Self {
         Self {
             id,
+            #[cfg(test)]
             inode,
             sys_file,
             kind,
@@ -104,11 +116,13 @@ impl FileHandle {
         Ok(data.len())
     }
 
+    #[cfg(test)]
     pub async fn get_attr(&self) -> Result<FileAttr> {
         let metadata = self.sys_file.metadata().await?;
 
         Ok(FileAttr {
             ino: self.inode,
+            generation: 0,
             size: metadata.len(),
             blocks: metadata.blocks(),
             kind: FileType::RegularFile,
@@ -120,8 +134,8 @@ impl FileHandle {
             uid: metadata.uid(),
             gid: metadata.gid(),
             rdev: metadata.rdev() as u32,
-            flags: 0,
             nlink: 0,
+            blksize: BLOCK_SIZE,
         })
     }
 
@@ -150,7 +164,7 @@ impl FileHandle {
         unique: u64,
         share: bool,
         lock_table: LockTable,
-    ) -> Result<JoinHandle<Result<bool>>> {
+    ) -> Result<Task<Result<bool>>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -165,7 +179,7 @@ impl FileHandle {
 
         let lock_kind = self.lock_kind.clone();
 
-        let lock_canceler = Notify::new();
+        let lock_canceler = Arc::new(Notify::new());
 
         // save lock canceler at first, ensure when return JoinHandle, lock canceler is usable
         lock_table
@@ -175,11 +189,11 @@ impl FileHandle {
 
         debug!("save unique {} lock canceler", unique);
 
-        Ok(task::spawn(async move {
+        Ok(Task::spawn(async move {
             let lock_success = loop {
-                let lock_job = task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg));
+                let lock_job = Task::blocking(async move { fcntl::flock(raw_fd, flock_arg) });
 
-                let result = select! {
+                let result = futures_util::select! {
                     _ = lock_canceler.notified().fuse() => break false,
                     result = lock_job.fuse() => result,
                 };
@@ -198,9 +212,7 @@ impl FileHandle {
                             }
                         }
 
-                        None => {
-                            return Err(Errno::from(err));
-                        }
+                        None => return Err(Errno::from(err)),
                     }
                 } else {
                     break true;
@@ -290,23 +302,100 @@ impl FileHandle {
         Ok(())
     }
 
+    pub async fn fallocate(&mut self, offset: u64, size: u64, mode: u32) -> Result<()> {
+        let fd = self.sys_file.as_raw_fd();
+
+        let mut fallocate_flags: FallocateFlags = FallocateFlags::empty();
+
+        let mode = mode as c_int;
+
+        if libc::FALLOC_FL_KEEP_SIZE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_KEEP_SIZE;
+        }
+
+        if libc::FALLOC_FL_PUNCH_HOLE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_PUNCH_HOLE;
+        }
+
+        if libc::FALLOC_FL_COLLAPSE_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_COLLAPSE_RANGE;
+        }
+
+        if libc::FALLOC_FL_ZERO_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_ZERO_RANGE;
+        }
+
+        if libc::FALLOC_FL_INSERT_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_INSERT_RANGE;
+        }
+
+        if libc::FALLOC_FL_UNSHARE_RANGE & mode > 0 {
+            fallocate_flags |= FallocateFlags::FALLOC_FL_UNSHARE_RANGE;
+        }
+
+        Task::blocking(async move {
+            fcntl::fallocate(fd, fallocate_flags, offset as _, size as _)?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn copy_to(
+        &self,
+        offset_in: u64,
+        offset_out: u64,
+        size: usize,
+        fh: Option<&Self>,
+    ) -> Result<usize> {
+        let fd_in = self.as_raw_fd();
+
+        let fd_out = if let Some(fh) = fh {
+            fh.as_raw_fd()
+        } else {
+            fd_in
+        };
+
+        let size = Task::blocking(async move {
+            let mut offset_in = offset_in as i64;
+            let mut offset_out = offset_out as i64;
+
+            fcntl::copy_file_range(
+                fd_in,
+                Some(&mut offset_in),
+                fd_out,
+                Some(&mut offset_out),
+                size,
+            )
+        })
+        .await?;
+
+        Ok(size)
+    }
+
     pub fn get_id(&self) -> u64 {
         self.id
     }
 
+    #[cfg(test)]
     pub fn get_file_handle_kind(&self) -> FileHandleKind {
         self.kind
     }
 
-    //#[inline]
     pub async fn get_lock_kind(&self) -> LockKind {
-        self.lock_kind.read().await.deref().clone()
+        *self.lock_kind.read().await
+    }
+}
+
+impl AsRawFd for FileHandle {
+    fn as_raw_fd(&self) -> RawFd {
+        self.sys_file.as_raw_fd()
     }
 }
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        task::block_on(async {
+        smol::block_on(async {
             let _ = self.flush().await;
         })
     }

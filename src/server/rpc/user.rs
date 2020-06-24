@@ -1,17 +1,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_std::sync::{Mutex, RwLock};
-use async_std::task::JoinHandle;
-use chrono::prelude::*;
+use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
 use futures_util::select;
-use log::{debug, warn};
+use log::debug;
+use smol::Task;
 use uuid::Uuid;
-
-use crate::errno::Errno;
-use crate::Result;
 
 use super::super::filesystem::FileHandle;
 use super::super::filesystem::LockKind;
@@ -20,7 +17,7 @@ use super::super::filesystem::LockTable;
 struct InnerUser {
     uuid: Uuid,
     file_handle_map: BTreeMap<u64, Arc<Mutex<FileHandle>>>,
-    last_alive_time: DateTime<Local>,
+    last_alive_time: Instant,
     lock_table: LockTable,
 }
 
@@ -35,16 +32,11 @@ impl User {
             inner: RwLock::new(InnerUser {
                 uuid,
                 file_handle_map: BTreeMap::new(),
-                last_alive_time: Local::now(),
+                last_alive_time: Instant::now(),
                 lock_table: Arc::new(Mutex::new(BTreeMap::new())),
             }),
             enable_compress,
         }
-    }
-
-    //#[inline]
-    pub async fn update_last_alive_time(&self, now: DateTime<Local>) {
-        self.inner.write().await.last_alive_time = now;
     }
 
     //#[inline]
@@ -63,7 +55,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let mut buf = vec![0; size as usize];
@@ -82,7 +74,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let written = file_handle.lock().await.write(data, offset).await?;
@@ -110,7 +102,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle.lock().await.fsync(false).await?;
@@ -125,7 +117,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle.lock().await.flush().await?;
@@ -153,7 +145,7 @@ impl User {
         fh_id: u64,
         unique: u64,
         share: bool,
-    ) -> Result<JoinHandle<Result<bool>>> {
+    ) -> Result<Task<Result<bool>>> {
         let guard = self.inner.read().await;
 
         let lock_table = guard.lock_table.clone();
@@ -161,7 +153,7 @@ impl User {
         let file_handle = guard
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         drop(guard); // release lock as soon as possible
@@ -182,7 +174,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let file_handle = select! {
@@ -200,7 +192,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         file_handle.lock().await.try_release_lock().await?;
@@ -212,16 +204,17 @@ impl User {
     pub async fn interrupt_lock(&self, unique: u64) -> Result<()> {
         debug!("interrupt unique {} lock", unique);
 
-        Ok(self
-            .inner
+        self.inner
             .read()
             .await
             .lock_table
             .lock()
             .await
             .get(&unique)
-            .ok_or(Errno::from(libc::EBADF))?
-            .notify())
+            .ok_or_else(|| Errno::from(libc::EBADF))?
+            .notify();
+
+        Ok(())
     }
 
     //#[inline]
@@ -232,7 +225,7 @@ impl User {
             .await
             .file_handle_map
             .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
+            .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
         let lock_kind = file_handle.lock().await.get_lock_kind().await;
@@ -240,22 +233,67 @@ impl User {
         Ok(lock_kind)
     }
 
-    pub async fn is_online(&self, interval: Duration) -> bool {
+    pub async fn fallocate(&self, fh_id: u64, offset: u64, size: u64, mode: u32) -> Result<()> {
+        let file_handle = self
+            .inner
+            .read()
+            .await
+            .file_handle_map
+            .get(&fh_id)
+            .ok_or_else(|| Errno::from(libc::EBADF))?
+            .clone();
+
+        file_handle
+            .lock()
+            .await
+            .fallocate(offset, size, mode)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn copy_file_range(
+        &self,
+        fh_in: u64,
+        off_in: u64,
+        fh_out: u64,
+        off_out: u64,
+        length: u64,
+        _flags: u64,
+    ) -> Result<usize> {
         let guard = self.inner.read().await;
 
-        match (Local::now() - guard.last_alive_time).to_std() {
-            Err(err) => {
-                warn!(
-                    "check user {} is alive failed {}",
-                    guard.uuid.to_hyphenated_ref().to_string(),
-                    err
-                );
+        let file_handle_in = guard
+            .file_handle_map
+            .get(&fh_in)
+            .ok_or_else(|| Errno::from(libc::EBADF))?;
 
-                false
-            }
+        let file_handle_in = file_handle_in.lock().await;
 
-            Ok(no_response_time) => no_response_time > interval,
+        if fh_in == fh_out {
+            file_handle_in
+                .copy_to(off_in, off_out, length as _, None)
+                .await
+        } else {
+            let file_handle_out = guard
+                .file_handle_map
+                .get(&fh_out)
+                .ok_or_else(|| Errno::from(libc::EBADF))?;
+
+            let file_handle_out = file_handle_out.lock().await;
+
+            file_handle_in
+                .copy_to(off_in, off_out, length as _, Some(&file_handle_out))
+                .await
         }
+    }
+
+    pub async fn is_online(&self, interval: Duration) -> bool {
+        self.inner.read().await.last_alive_time.elapsed() < interval
+    }
+
+    pub async fn update_last_alive_time(&self) {
+        self.inner.write().await.last_alive_time = Instant::now();
     }
 
     pub async fn get_id(&self) -> Uuid {

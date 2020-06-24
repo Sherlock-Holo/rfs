@@ -34,6 +34,7 @@ message Attr {
 message ReadDirRequest {
     Header head = 1;
     uint64 inode = 2;
+    uint64 offset = 3;
 }
 
 message ReadDirResponse {
@@ -42,7 +43,7 @@ message ReadDirResponse {
         uint64 inode = 2;
         string name = 3;
         EntryType type = 4;
-        //        uint32 mode = 5; // such as 0644
+        Attr attr = 5;
     }
 
     repeated DirEntry dirEntries = 1;
@@ -135,16 +136,17 @@ message OpenFileResponse {
     }
 }
 
-/*message AllocateRequest {
+message AllocateRequest {
     Header head = 1;
     uint64 fileHandleId = 2;
     uint64 offset = 3;
     uint64 size = 4;
+    uint32 mode = 5;
 }
 
 message AllocateResponse {
     Error error = 1;
-}*/
+}
 
 message ReadFileRequest {
     Header head = 1;
@@ -300,6 +302,45 @@ message GetLockResponse {
     }
 }
 
+message CopyFileRangeRequest {
+    Header head = 1;
+    uint64 fileHandleIdIn = 2;
+    uint64 offsetIn = 3;
+    uint64 fileHandleIdOut = 4;
+    uint64 offsetOut = 5;
+    uint64 size = 6;
+    uint64 flags = 7;
+}
+
+message CopyFileRangeResponse {
+    oneof result {
+        uint64 copied = 1;
+        Error error = 2;
+    }
+}
+
+message StatFsRequest {
+    Header head = 1;
+}
+
+message StatFs {
+    uint64 blocks = 1;
+    uint64 blockFree = 2;
+    uint64 blockAvailable = 3;
+    uint64 files = 4;
+    uint64 fileFree = 5;
+    uint32 blockSize = 6;
+    uint32 maxNameLength = 7;
+    uint32 fragmentSize = 8;
+}
+
+message StatFsResponse {
+    oneof result {
+        StatFs statfs = 1;
+        Error error = 2;
+    }
+}
+
 // no acl, no link
 service Rfs {
     // dir
@@ -328,8 +369,8 @@ service Rfs {
     rpc OpenFile (OpenFileRequest) returns (OpenFileResponse) {
     }
 
-    /*rpc Allocate (AllocateRequest) returns (AllocateResponse) {
-    }*/
+    rpc Allocate (AllocateRequest) returns (AllocateResponse) {
+    }
 
     rpc ReadFile (ReadFileRequest) returns (ReadFileResponse) {
     }
@@ -358,11 +399,17 @@ service Rfs {
     rpc GetLock (GetLockRequest) returns (GetLockResponse) {
     }
 
+    rpc StatFs (StatFsRequest) returns (StatFsResponse) {
+    }
+
     // normal
     rpc GetAttr (GetAttrRequest) returns (GetAttrResponse) {
     }
 
     rpc SetAttr (SetAttrRequest) returns (SetAttrResponse) {
+    }
+
+    rpc CopyFileRange (CopyFileRangeRequest) returns (CopyFileRangeResponse) {
     }
 
     rpc Ping (PingRequest) returns (PingResponse) {
