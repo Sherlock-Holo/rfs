@@ -4,7 +4,7 @@ a fuse network filesystem
 
 this network filesystem based on GRPC and fuse:
 - client use GRPC to communicate with server
-- client mount filesystem through linux fuse2
+- client mount filesystem through linux fuse3
 
 ## Usage
 
