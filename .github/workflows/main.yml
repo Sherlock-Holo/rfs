@@ -12,7 +12,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
-          toolchain: nightly
+          toolchain: stable
           override: true
       - uses: actions-rs/cargo@v1
         with:
@@ -27,7 +27,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
-          toolchain: nightly
+          toolchain: stable
           override: true
 
       - uses: actions-rs/cargo@v1
@@ -47,7 +47,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
-          toolchain: nightly
+          toolchain: stable
           override: true
 
       - uses: actions-rs/cargo@v1
@@ -64,7 +64,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
-          toolchain: nightly
+          toolchain: stable
           override: true
 
       - uses: actions-rs/cargo@v1
@@ -81,7 +81,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
-          toolchain: nightly
+          toolchain: stable
           override: true
 
       - name: build
@@ -101,7 +101,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: default
-          toolchain: nightly
+          toolchain: stable
           override: true
 
       - name: build
