@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_std::fs;
@@ -26,19 +27,13 @@ struct InnerFile {
 
 impl InnerFile {
     pub async fn get_attr(&self) -> Result<FileAttr> {
-        let path = self
-            .parent
-            .get_absolute_path()
-            .apply(|path| path.push(&self.name));
+        let path = self.get_absolute_path();
 
         metadata_to_file_attr(self.inode, fs::metadata(path).await?)
     }
 
     pub async fn set_attr(&self, set_attr: SetAttr) -> Result<FileAttr> {
-        let path = self
-            .parent
-            .get_absolute_path()
-            .apply(|path| path.push(&self.name));
+        let path = self.get_absolute_path();
 
         let metadata = fs::metadata(&path).await?;
 
@@ -72,6 +67,12 @@ impl InnerFile {
         }
 
         self.get_attr().await
+    }
+
+    fn get_absolute_path(&self) -> PathBuf {
+        self.parent
+            .get_absolute_path()
+            .apply(|path| path.push(&self.name))
     }
 }
 

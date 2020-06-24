@@ -10,6 +10,7 @@ use async_notify::Notify;
 use async_signals::Signals;
 use async_std::future::timeout;
 use async_std::sync::{Mutex, RwLock};
+use async_trait::async_trait;
 use atomic_value::AtomicValue;
 use fuse3::reply::*;
 use fuse3::{Filesystem as FuseFilesystem, MountOptions, Request, Result, Session, SetAttr};
@@ -24,8 +25,6 @@ use snap::write::FrameEncoder;
 use tonic::transport::{Channel, ClientTlsConfig, Uri};
 use tonic::{Code, Request as TonicRequest};
 use uuid::Uuid;
-
-use async_trait::async_trait;
 
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
@@ -1180,6 +1179,80 @@ impl FuseFilesystem for Filesystem {
         }
 
         error!("write_file failed more than 3 times");
+
+        self.failed_notify.notify();
+
+        Err(libc::ETIMEDOUT.into())
+    }
+
+    async fn statsfs(&self, _req: Request, _inode: u64) -> Result<ReplyStatFs> {
+        let header = self.get_rpc_header().await;
+
+        let client = self.client.clone();
+
+        let mut rpc_timeout = INITIAL_TIMEOUT;
+
+        for _ in 0..3 {
+            let rpc_req = TonicRequest::new(StatFsRequest {
+                head: Some(header.clone()),
+            });
+
+            let mut client = (*client.load()).clone();
+
+            let result = match timeout(rpc_timeout, client.stat_fs(rpc_req)).await {
+                Err(err) => {
+                    warn!("statfs rpc timeout {}", err);
+
+                    rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
+
+                    continue;
+                }
+
+                Ok(result) => result,
+            };
+
+            let result = match result {
+                Err(err) => {
+                    if code_can_retry(err.code()) {
+                        warn!("statfs rpc has error {}", err);
+
+                        Timer::after(Duration::from_secs(1)).await;
+
+                        continue;
+                    }
+
+                    error!("statfs rpc has error {}", err);
+
+                    return Err(libc::EIO.into());
+                }
+
+                Ok(resp) => {
+                    if let Some(result) = resp.into_inner().result {
+                        result
+                    } else {
+                        error!("statfs result is None");
+
+                        return Err(libc::EIO.into());
+                    }
+                }
+            };
+
+            return match result {
+                stat_fs_response::Result::Error(err) => Err((err.errno as c_int).into()),
+                stat_fs_response::Result::Statfs(statfs) => Ok(ReplyStatFs {
+                    blocks: statfs.blocks,
+                    bfree: statfs.block_free,
+                    bavail: statfs.block_available,
+                    files: statfs.files,
+                    ffree: statfs.file_free,
+                    bsize: statfs.block_size,
+                    namelen: statfs.max_name_length,
+                    frsize: statfs.fragment_size,
+                }),
+            };
+        }
+
+        error!("statfs failed more than 3 times");
 
         self.failed_notify.notify();
 

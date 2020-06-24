@@ -977,6 +977,46 @@ impl Rfs for Server {
         }
     }
 
+    async fn stat_fs(&self, request: Request<StatFsRequest>) -> Result<Response<StatFsResponse>> {
+        let request = request.into_inner();
+
+        self.get_user(request.head).await?;
+
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::StatFs { response: sender };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
+            Err(errno) => Ok(Response::new(StatFsResponse {
+                result: Some(pb::stat_fs_response::Result::Error(errno.into())),
+            })),
+
+            Ok(statfs) => Ok(Response::new(StatFsResponse {
+                result: Some(pb::stat_fs_response::Result::Statfs(StatFs {
+                    blocks: statfs.blocks,
+                    block_free: statfs.bfree,
+                    block_available: statfs.bavail,
+                    files: statfs.files,
+                    file_free: statfs.ffree,
+                    block_size: statfs.bsize,
+                    max_name_length: statfs.namelen,
+                    fragment_size: statfs.frsize,
+                })),
+            })),
+        }
+    }
+
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingResponse>> {
         let request = request.into_inner();
 

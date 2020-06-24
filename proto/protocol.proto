@@ -319,6 +319,28 @@ message CopyFileRangeResponse {
     }
 }
 
+message StatFsRequest {
+    Header head = 1;
+}
+
+message StatFs {
+    uint64 blocks = 1;
+    uint64 blockFree = 2;
+    uint64 blockAvailable = 3;
+    uint64 files = 4;
+    uint64 fileFree = 5;
+    uint32 blockSize = 6;
+    uint32 maxNameLength = 7;
+    uint32 fragmentSize = 8;
+}
+
+message StatFsResponse {
+    oneof result {
+        StatFs statfs = 1;
+        Error error = 2;
+    }
+}
+
 // no acl, no link
 service Rfs {
     // dir
@@ -375,6 +397,9 @@ service Rfs {
     }
 
     rpc GetLock (GetLockRequest) returns (GetLockResponse) {
+    }
+
+    rpc StatFs (StatFsRequest) returns (StatFsResponse) {
     }
 
     // normal

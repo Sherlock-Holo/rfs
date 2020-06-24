@@ -1,5 +1,3 @@
-#![feature(backtrace)]
-
 use std::thread;
 
 use log::LevelFilter;

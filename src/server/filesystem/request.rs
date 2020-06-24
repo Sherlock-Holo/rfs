@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 
+use fuse3::reply::ReplyStatFs;
 use fuse3::{FileAttr, Result};
 use futures_channel::mpsc::Sender;
 
@@ -64,5 +65,9 @@ pub enum Request {
         mode: u32,
         flags: i32,
         response: Sender<Result<(FileHandle, FileAttr)>>,
+    },
+
+    StatFs {
+        response: Sender<Result<ReplyStatFs>>,
     },
 }

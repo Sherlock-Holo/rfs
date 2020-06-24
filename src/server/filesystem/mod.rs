@@ -2,10 +2,15 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
+use fuse3::reply::ReplyStatFs;
 use fuse3::{FileAttr, FileType, Result};
 use futures_channel::mpsc::Receiver;
 use futures_util::stream::StreamExt;
 use log::{debug, info};
+use nix::dir::Dir as NixDir;
+use nix::fcntl::OFlag;
+use nix::sys::stat::Mode;
+use nix::sys::statfs;
 use nix::unistd;
 
 pub use attr::SetAttr;
@@ -31,6 +36,7 @@ pub struct Filesystem {
     inode_map: InodeMap,
     inode_gen: Inode,
     file_handle_id_gen: u64,
+    root_dir_fd: NixDir,
     receiver: Receiver<Request>,
 }
 
@@ -39,6 +45,8 @@ impl Filesystem {
     /// ensure won't be affected by uds client fuse mount
     pub async fn new<P: AsRef<Path>>(root: P, receiver: Receiver<Request>) -> Result<Self> {
         info!("root is {:?}", root.as_ref());
+
+        let root_dir_fd = NixDir::open(root.as_ref(), OFlag::O_DIRECTORY, Mode::S_IRWXU)?;
 
         // pivot_root mode, butI think we don't need use pivot_root, chroot is safe enough
         /*sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)?;
@@ -92,6 +100,7 @@ impl Filesystem {
             inode_gen: 1,
             file_handle_id_gen: 0,
             inode_map,
+            root_dir_fd,
             receiver,
         })
     }
@@ -194,6 +203,11 @@ impl Filesystem {
                     mut response,
                 } => {
                     let result = self.create_file(parent, &name, mode, flags).await;
+                    let _ = response.try_send(result);
+                }
+
+                Request::StatFs { mut response } => {
+                    let result = self.statfs().await;
                     let _ = response.try_send(result);
                 }
             }
@@ -374,6 +388,21 @@ impl Filesystem {
             Err(libc::ENOTDIR.into())
         }
     }
+
+    async fn statfs(&mut self) -> Result<ReplyStatFs> {
+        let statfs = statfs::fstatfs(&self.root_dir_fd)?;
+
+        Ok(ReplyStatFs {
+            blocks: statfs.blocks(),
+            bfree: statfs.blocks_free(),
+            bavail: statfs.blocks_available(),
+            files: statfs.files(),
+            ffree: statfs.files_free(),
+            bsize: statfs.block_size() as _,
+            namelen: statfs.maximum_name_length() as _,
+            frsize: 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -390,7 +419,6 @@ mod tests {
     use fuse3::Errno;
     use futures_channel::mpsc::channel;
     use futures_util::sink::SinkExt;
-    use tempfile;
 
     use crate::server::filesystem::file_handle::FileHandleKind;
     use crate::server::filesystem::LockKind;
