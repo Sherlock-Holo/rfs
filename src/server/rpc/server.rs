@@ -6,8 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_std::fs;
-use async_std::sync::RwLock;
 use fuse3::Errno;
 use fuse3::FileType;
 use futures_channel::mpsc::{channel, Sender};
@@ -16,10 +14,11 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use log::{debug, error, info, warn};
 use semver_parser::version;
 use semver_parser::version::Version;
-use smol::Task;
-use smol::Timer;
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
+use tokio::fs;
+use tokio::sync::RwLock;
+use tokio::{task, time};
 use tonic::transport::Server as TonicServer;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::Response;
@@ -86,7 +85,7 @@ impl Server {
 
         let mut fs = Filesystem::new(root_path.as_ref(), receiver).await?;
 
-        Task::spawn(async move { fs.run().await }).detach();
+        tokio::spawn(async move { fs.run().await });
 
         let rpc_server = Self {
             users: Arc::new(RwLock::new(BTreeMap::new())),
@@ -97,10 +96,10 @@ impl Server {
 
         let users = rpc_server.users.clone();
 
-        Task::spawn(Self::check_online_users(users)).detach();
+        tokio::spawn(Self::check_online_users(users));
 
         Ok(TonicServer::builder()
-            .tls_config(tls_config)
+            .tls_config(tls_config)?
             .add_service(RfsServer::new(rpc_server))
             .serve(listen_path)
             .await?)
@@ -159,7 +158,7 @@ impl Server {
 
     async fn check_online_users(user_map: Arc<RwLock<BTreeMap<Uuid, Arc<User>>>>) {
         loop {
-            Timer::after(ONLINE_CHECK_INTERVAL).await;
+            time::sleep(ONLINE_CHECK_INTERVAL).await;
 
             {
                 let mut user_map = user_map.write().await;
@@ -586,7 +585,7 @@ impl Rfs for Server {
             if self.compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
                 let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
 
-                Task::blocking(async {
+                task::spawn_blocking(|| {
                     if let Err(err) = encoder.write_all(&data) {
                         warn!("compress read data failed {}", err);
 
@@ -604,6 +603,7 @@ impl Rfs for Server {
                     }
                 })
                 .await
+                .unwrap()
             } else {
                 (data, false)
             };
@@ -831,6 +831,46 @@ impl Rfs for Server {
         }
     }
 
+    async fn stat_fs(&self, request: Request<StatFsRequest>) -> Result<Response<StatFsResponse>> {
+        let request = request.into_inner();
+
+        self.get_user(request.head).await?;
+
+        let (sender, mut receiver) = channel(1);
+
+        let req = FSRequest::StatFs { response: sender };
+
+        if let Err(err) = self.request_sender.clone().send(req).await {
+            error!("send filesystem request failed {}", err);
+
+            return Err(Status::internal("server failed"));
+        }
+
+        let result = receiver
+            .next()
+            .await
+            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
+
+        match result {
+            Err(errno) => Ok(Response::new(StatFsResponse {
+                result: Some(pb::stat_fs_response::Result::Error(errno.into())),
+            })),
+
+            Ok(statfs) => Ok(Response::new(StatFsResponse {
+                result: Some(pb::stat_fs_response::Result::Statfs(StatFs {
+                    blocks: statfs.blocks,
+                    block_free: statfs.bfree,
+                    block_available: statfs.bavail,
+                    files: statfs.files,
+                    file_free: statfs.ffree,
+                    block_size: statfs.bsize,
+                    max_name_length: statfs.namelen,
+                    fragment_size: statfs.frsize,
+                })),
+            })),
+        }
+    }
+
     async fn get_attr(
         &self,
         request: Request<GetAttrRequest>,
@@ -973,46 +1013,6 @@ impl Rfs for Server {
 
             Ok(copied) => Ok(Response::new(CopyFileRangeResponse {
                 result: Some(pb::copy_file_range_response::Result::Copied(copied as _)),
-            })),
-        }
-    }
-
-    async fn stat_fs(&self, request: Request<StatFsRequest>) -> Result<Response<StatFsResponse>> {
-        let request = request.into_inner();
-
-        self.get_user(request.head).await?;
-
-        let (sender, mut receiver) = channel(1);
-
-        let req = FSRequest::StatFs { response: sender };
-
-        if let Err(err) = self.request_sender.clone().send(req).await {
-            error!("send filesystem request failed {}", err);
-
-            return Err(Status::internal("server failed"));
-        }
-
-        let result = receiver
-            .next()
-            .await
-            .ok_or_else(|| Status::aborted("server filesystem stopped"))?;
-
-        match result {
-            Err(errno) => Ok(Response::new(StatFsResponse {
-                result: Some(pb::stat_fs_response::Result::Error(errno.into())),
-            })),
-
-            Ok(statfs) => Ok(Response::new(StatFsResponse {
-                result: Some(pb::stat_fs_response::Result::Statfs(StatFs {
-                    blocks: statfs.blocks,
-                    block_free: statfs.bfree,
-                    block_available: statfs.bavail,
-                    files: statfs.files,
-                    file_free: statfs.ffree,
-                    block_size: statfs.bsize,
-                    max_name_length: statfs.namelen,
-                    fragment_size: statfs.frsize,
-                })),
             })),
         }
     }

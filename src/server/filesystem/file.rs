@@ -4,10 +4,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_std::fs;
-use async_std::sync::Mutex;
-use fuse3::{FileAttr, Result};
+use fuse3::raw::reply::FileAttr;
+use fuse3::Result;
 use log::{debug, error};
+use tokio::fs;
+use tokio::sync::Mutex;
 
 use crate::Apply;
 

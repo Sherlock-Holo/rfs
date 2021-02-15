@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_std::sync::{Mutex, RwLock};
 use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
 use futures_util::select;
 use log::debug;
-use smol::Task;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use super::super::filesystem::FileHandle;
@@ -145,7 +145,7 @@ impl User {
         fh_id: u64,
         unique: u64,
         share: bool,
-    ) -> Result<Task<Result<bool>>> {
+    ) -> Result<impl Future<Output = Result<bool>>> {
         let guard = self.inner.read().await;
 
         let lock_table = guard.lock_table.clone();

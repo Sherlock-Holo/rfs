@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use async_signals::Signals;
-use async_std::fs;
 use futures_util::future::FutureExt;
 use futures_util::select;
 use futures_util::stream::StreamExt;
@@ -11,6 +10,7 @@ use nix::libc;
 use serde::Deserialize;
 use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
+use tokio::fs;
 
 use rfs::log_init;
 use rfs::Server;

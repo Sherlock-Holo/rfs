@@ -3,7 +3,8 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse3::{FileAttr, FileType, Result};
+use fuse3::raw::reply::FileAttr;
+use fuse3::{FileType, Result};
 
 use crate::BLOCK_SIZE;
 

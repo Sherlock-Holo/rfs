@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse3::{Errno, FileAttr, FileType, Result};
+use fuse3::raw::reply::FileAttr;
+use fuse3::{Errno, FileType, Result};
 
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
 use crate::BLOCK_SIZE;

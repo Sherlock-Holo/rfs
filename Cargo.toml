@@ -17,27 +17,28 @@ members = [".", "rfs-client", "rfs-server"]
 [dependencies]
 log = "0.4"
 pretty_env_logger = "0.4"
-nix = "0.17"
+nix = "0.19"
 libc = "0.2"
 path-clean = "0.1"
 futures-util = "0.3"
 futures-channel = "0.3"
-tonic = { version = "0.2", features = ["transport", "tls", "tls-roots"] }
-prost = "0.6"
-prost-types = "0.6"
+tonic = { version = "0.4", features = ["transport", "tls", "tls-roots"] }
+prost = "0.7"
+prost-types = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "0.8", features = ["serde", "v4"] }
 anyhow = "1.0"
 async-notify = "0.2"
 async-signals = "0.3"
-snap = "1"
+snap = "1.0"
 atomic_value = "0.1"
-fuse3 = { version = "0.1.0-beta1.2", features = ["file-lock", "async-std-runtime", "unprivileged"] }
-semver-parser = "0.9"
+fuse3 = { version = "0.2.0-beta.2", features = ["file-lock", "tokio-runtime", "unprivileged"] }
+semver-parser = "0.10"
 async-trait = "0.1"
-smol = { version = "0.1", features = ["tokio02"] }
-async-std = "1.6"
-num_cpus = "1.13"
+tokio = { version = "1.2", features = ["fs", "net", "rt", "sync", "time", "macros"] }
+bytes = "1.0"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["fs"] }
 
 #[dependencies.fuse3]
 #branch = "master"
@@ -45,8 +46,7 @@ num_cpus = "1.13"
 #features = ["file-lock", "async-std-runtime", "unprivileged"]
 
 [dev-dependencies]
-tempfile = "3.1"
-async-std = { version = "1.6", features = ["tokio02", "attributes"] }
+tempfile = "3.2"
 
 [build-dependencies]
-tonic-build = "0.2"
+tonic-build = "0.4"

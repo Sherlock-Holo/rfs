@@ -2,8 +2,8 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use fuse3::reply::ReplyStatFs;
-use fuse3::{FileAttr, FileType, Result};
+use fuse3::raw::reply::{FileAttr, ReplyStatFs};
+use fuse3::{FileType, Result};
 use futures_channel::mpsc::Receiver;
 use futures_util::stream::StreamExt;
 use log::{debug, info};
@@ -412,24 +412,22 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_std::fs;
-    use async_std::future::timeout;
-    use async_std::sync::Mutex;
-    use async_std::task;
     use fuse3::Errno;
     use futures_channel::mpsc::channel;
     use futures_util::sink::SinkExt;
+    use tokio::sync::Mutex;
+    use tokio::task;
+    use tokio::time::timeout;
+    use tokio::{fs, time};
 
+    use crate::log_init;
     use crate::server::filesystem::file_handle::FileHandleKind;
     use crate::server::filesystem::LockKind;
-    use crate::{init_smol_runtime, log_init};
 
     use super::*;
 
-    #[async_std::test]
+    #[tokio::test]
     async fn init_filesystem() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -456,10 +454,8 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn create_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -488,10 +484,8 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn create_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -521,10 +515,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn lookup_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -566,10 +558,8 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn lookup_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -612,10 +602,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn get_attr_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -656,10 +644,8 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn get_attr_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -701,10 +687,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_dir_attr() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -755,10 +739,8 @@ mod tests {
         assert_eq!(attr.perm, 0o700);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn remove_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -809,10 +791,8 @@ mod tests {
         assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn remove_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -864,10 +844,8 @@ mod tests {
         assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -923,10 +901,8 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -983,10 +959,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn move_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1067,10 +1041,8 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn move_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1152,10 +1124,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn read_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1212,10 +1182,8 @@ mod tests {
         assert_eq!(*name, OsString::from("test"));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn open_file_rw() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1265,10 +1233,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn open_file_ro() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1315,10 +1281,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn open_file_wo() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1368,10 +1332,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn write_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1403,10 +1365,8 @@ mod tests {
         assert_eq!(file_handle.get_attr().await.unwrap().size, 4)
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn read_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1444,7 +1404,7 @@ mod tests {
         assert_eq!(&b"test"[..], &buf[..])
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_attr_file() {
         log_init(true);
 
@@ -1517,12 +1477,8 @@ mod tests {
         assert_eq!(&b"te"[..], &buf[..read])
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_share_lock_success() {
-        init_smol_runtime();
-
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1583,10 +1539,8 @@ mod tests {
         assert!(lock_job);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_share_lock_failed() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1644,10 +1598,8 @@ mod tests {
         }
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn try_set_share_lock_success() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1688,10 +1640,8 @@ mod tests {
         assert_eq!(file_handle2.try_set_lock(true).await, Ok(()));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn try_set_share_lock_failed() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1736,10 +1686,8 @@ mod tests {
         )
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_exclusive_lock() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1806,10 +1754,8 @@ mod tests {
         }
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn try_set_exclusive_lock() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1857,10 +1803,8 @@ mod tests {
         );
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn release_share_lock() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1907,10 +1851,8 @@ mod tests {
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn release_exclusive_lock() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1957,10 +1899,8 @@ mod tests {
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn interrupt_lock() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2018,10 +1958,8 @@ mod tests {
         assert!(!lock_job.await.unwrap())
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn wait_exclusive_lock() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2070,7 +2008,7 @@ mod tests {
         );
 
         task::spawn(async move {
-            task::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
 
             file_handle.try_release_lock().await.unwrap();
         });
@@ -2087,10 +2025,8 @@ mod tests {
         assert!(lock_result.unwrap())
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn get_lock_kind() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2150,10 +2086,8 @@ mod tests {
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn lookup_exist_entry() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2187,10 +2121,8 @@ mod tests {
     }
 
     // issue #8
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_to_exist_dir() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2259,10 +2191,8 @@ mod tests {
     }
 
     // issue #8
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_to_exist_file() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2332,10 +2262,8 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn fallocate() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2376,10 +2304,8 @@ mod tests {
         assert_eq!(attr.size, 100);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn copy_file_range() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -2434,10 +2360,8 @@ mod tests {
         assert_eq!(&buf[..n], b"test");
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn remove_dir_deep() {
-        init_smol_runtime();
-
         log_init(true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();

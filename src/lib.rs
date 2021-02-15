@@ -1,4 +1,5 @@
-use std::thread;
+#![feature(type_alias_impl_trait)]
+#![feature(generic_associated_types)]
 
 use log::LevelFilter;
 
@@ -18,7 +19,7 @@ mod pb {
     impl From<fuse3::Errno> for Error {
         fn from(err: fuse3::Errno) -> Self {
             Error {
-                errno: err.0 as u32,
+                errno: libc::c_int::from(err) as u32,
             }
         }
     }
@@ -44,10 +45,4 @@ pub fn log_init(debug: bool) {
     }
 
     builder.init();
-}
-
-pub fn init_smol_runtime() {
-    for _ in 0..num_cpus::get().min(1) {
-        thread::spawn(|| smol::run(futures_util::future::pending::<()>()));
-    }
 }

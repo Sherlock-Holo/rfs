@@ -1,27 +1,27 @@
-use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::raw::c_int;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_notify::Notify;
 use async_signals::Signals;
-use async_std::future::timeout;
-use async_std::sync::{Mutex, RwLock};
 use async_trait::async_trait;
 use atomic_value::AtomicValue;
-use fuse3::reply::*;
-use fuse3::{Filesystem as FuseFilesystem, MountOptions, Request, Result, Session, SetAttr};
-use futures_util::stream;
+use fuse3::raw::prelude::*;
+use fuse3::raw::Filesystem as FuseFilesystem;
+use fuse3::{MountOptions, Result};
+use futures_util::stream::{self, Empty, Stream};
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
 use nix::mount;
 use nix::mount::MntFlags;
-use smol::{Task, Timer};
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
+use tokio::sync::RwLock;
+use tokio::task;
+use tokio::time::{self, timeout};
 use tonic::transport::{Channel, ClientTlsConfig, Uri};
 use tonic::{Code, Request as TonicRequest};
 use uuid::Uuid;
@@ -30,10 +30,8 @@ use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
 
-type ReadDirCache = Arc<Mutex<HashMap<u64, (Instant, Vec<DirectoryEntryPlus>)>>>;
-
 const TTL: Duration = Duration::from_secs(1);
-const INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
+const INITIAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLIER: f64 = 1.5;
 const MIN_COMPRESS_SIZE: usize = 2048;
 const PING_INTERVAL: Duration = Duration::from_secs(60);
@@ -45,7 +43,6 @@ pub struct Filesystem {
     compress: RwLock<bool>,
     uri: Uri,
     tls_cfg: ClientTlsConfig,
-    read_dir_cache: ReadDirCache,
 }
 
 impl Filesystem {
@@ -57,7 +54,7 @@ impl Filesystem {
         info!("connecting server");
 
         let channel = Channel::builder(uri.clone())
-            .tls_config(tls_cfg.clone())
+            .tls_config(tls_cfg.clone())?
             .tcp_keepalive(Some(Duration::from_secs(5)))
             .connect()
             .await?;
@@ -73,7 +70,6 @@ impl Filesystem {
             compress: RwLock::new(compress),
             uri,
             tls_cfg,
-            read_dir_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -84,7 +80,7 @@ impl Filesystem {
 
         let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
-        Task::spawn(async move {
+        tokio::spawn(async move {
             debug!("waiting stop signal");
 
             stop_signal.next().await;
@@ -95,41 +91,16 @@ impl Filesystem {
 
             info!("stopping rfs");
 
-            Task::blocking(async move {
+            task::spawn_blocking(move || {
                 while let Err(err) = mount::umount2(&unmount_point, MntFlags::MNT_DETACH) {
                     error!("lazy unmount failed {}", err);
 
-                    Timer::after(Duration::from_secs(1)).await;
+                    std::thread::sleep(Duration::from_secs(1));
                 }
             })
-            .await;
-        })
-        .detach();
-
-        let read_dir_cache = self.read_dir_cache.clone();
-
-        Task::spawn(async move {
-            loop {
-                Timer::after(Duration::from_secs(60 * 5)).await;
-
-                let mut guard = read_dir_cache.lock().await;
-
-                let mut invalid_cache = vec![];
-
-                guard.iter().for_each(|(inode, (instant, _))| {
-                    if instant.elapsed() > TTL {
-                        invalid_cache.push(*inode);
-                    }
-                });
-
-                invalid_cache.into_iter().for_each(|inode| {
-                    debug!("remove parent {} outdated readdirplus", inode);
-
-                    guard.remove(&inode);
-                });
-            }
-        })
-        .detach();
+            .await
+            .unwrap();
+        });
 
         let mount_options = MountOptions::default()
             .fs_name("rfs")
@@ -173,19 +144,20 @@ impl Filesystem {
                 let uri = uri.clone();
                 let tls_cfg = tls_cfg.clone();
 
-                match Task::spawn(async move {
+                match tokio::spawn(async move {
                     Channel::builder(uri)
-                        .tls_config(tls_cfg)
+                        .tls_config(tls_cfg)?
                         .tcp_keepalive(Some(Duration::from_secs(5)))
                         .connect()
                         .await
                 })
                 .await
+                .unwrap()
                 {
                     Err(err) => {
                         error!("reconnect failed {}", err);
 
-                        Timer::after(Duration::from_millis(500)).await;
+                        time::sleep(Duration::from_millis(500)).await;
 
                         continue;
                     }
@@ -211,7 +183,7 @@ impl Filesystem {
         'outer: loop {
             for _ in 0..3 {
                 if !failed {
-                    Timer::after(PING_INTERVAL).await;
+                    time::sleep(PING_INTERVAL).await;
                 }
 
                 let ping_req = TonicRequest::new(PingRequest {
@@ -248,6 +220,9 @@ impl Filesystem {
 
 #[async_trait]
 impl FuseFilesystem for Filesystem {
+    type DirEntryStream = Empty<Result<DirectoryEntry>>;
+    type DirEntryPlusStream = impl Stream<Item = Result<DirectoryEntryPlus>> + Send;
+
     async fn init(&self, _req: Request) -> Result<()> {
         let mut client = (*self.client.load()).clone();
 
@@ -263,7 +238,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("register failed {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -296,20 +271,18 @@ impl FuseFilesystem for Filesystem {
                     let uri = self.uri.clone();
                     let tls_cfg = self.tls_cfg.clone();
 
-                    Task::spawn(Self::ping_loop(
+                    tokio::spawn(Self::ping_loop(
                         self.client.clone(),
                         uuid,
                         failed_notify.clone(),
-                    ))
-                    .detach();
+                    ));
 
-                    Task::spawn(Self::reconnect_loop(
+                    tokio::spawn(Self::reconnect_loop(
                         self.client.clone(),
                         uri,
                         tls_cfg,
                         failed_notify,
-                    ))
-                    .detach();
+                    ));
 
                     Ok(())
                 }
@@ -393,7 +366,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("lookup rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -472,7 +445,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("getattr rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -567,7 +540,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("setattr rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -655,7 +628,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("mkdir rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -731,7 +704,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("unlink rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -796,7 +769,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("rmdir rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -875,7 +848,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("rename rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -937,7 +910,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("open rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1015,7 +988,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("read_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1033,7 +1006,7 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     if result.compressed {
-                        match Task::blocking(async move {
+                        match task::spawn_blocking(move || {
                             let mut decoder = FrameDecoder::new(result.data.as_slice());
 
                             let mut data = Vec::with_capacity(result.data.len());
@@ -1047,15 +1020,14 @@ impl FuseFilesystem for Filesystem {
                             Ok(data)
                         })
                         .await
+                        .unwrap()
                         {
                             Err(err) => Err(err.into()),
-                            Ok(data) => Ok(ReplyData {
-                                data: Box::new(data),
-                            }),
+                            Ok(data) => Ok(ReplyData { data: data.into() }),
                         }
                     } else {
                         Ok(ReplyData {
-                            data: Box::new(result.data),
+                            data: result.data.into(),
                         })
                     }
                 }
@@ -1086,7 +1058,7 @@ impl FuseFilesystem for Filesystem {
 
         let data = data.to_vec();
 
-        let (data, compressed) = Task::blocking(async move {
+        let (data, compressed) = task::spawn_blocking(move || {
             if enable_compress && data.len() > MIN_COMPRESS_SIZE {
                 let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE)); // should I choose a better size?
 
@@ -1119,7 +1091,8 @@ impl FuseFilesystem for Filesystem {
                 (data, false)
             }
         })
-        .await;
+        .await
+        .unwrap();
 
         let mut rpc_timeout = INITIAL_TIMEOUT;
 
@@ -1151,7 +1124,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("write_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1216,7 +1189,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("statfs rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1299,7 +1272,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("close_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1358,7 +1331,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("sync_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1417,7 +1390,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("flush rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1443,108 +1416,6 @@ impl FuseFilesystem for Filesystem {
 
         Err(libc::ETIMEDOUT.into())
     }
-
-    /*async fn readdir(
-        &self,
-        _req: Request,
-        parent: u64,
-        _fh: u64,
-        offset: i64,
-    ) -> Result<ReplyDirectory> {
-        debug!("readdir inode {}, offset {}", parent, offset);
-
-        let header = self.get_rpc_header().await;
-
-        let client = self.client.clone();
-
-        let mut rpc_timeout = INITIAL_TIMEOUT;
-
-        for _ in 0..3 {
-            let rpc_req = TonicRequest::new(ReadDirRequest {
-                head: Some(header.clone()),
-                inode: parent,
-                offset: offset as _,
-            });
-
-            let mut client = (*client.load()).clone();
-
-            let result = match timeout(rpc_timeout, client.read_dir(rpc_req)).await {
-                Err(err) => {
-                    warn!("readdir rpc timeout {}", err);
-
-                    rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
-
-                    continue;
-                }
-
-                Ok(result) => result,
-            };
-
-            let dir_entries: Vec<read_dir_response::DirEntry> = match result {
-                Err(err) => {
-                    if code_can_retry(err.code()) {
-                        warn!("read_dir rpc has error {}", err);
-
-                        Timer::after(Duration::from_secs(1)).await;
-
-                        continue;
-                    }
-
-                    error!("read_dir rpc has error {}", err);
-
-                    return Err(libc::EIO.into());
-                }
-
-                Ok(resp) => {
-                    let resp = resp.into_inner();
-
-                    if let Some(error) = resp.error {
-                        return Err((error.errno as c_int).into());
-                    }
-
-                    resp.dir_entries
-                }
-            };
-
-            debug!("got readdir result");
-
-            let entries =
-                dir_entries
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(move |(index, dir_entry)| {
-                        let dir = EntryType::Dir as i32;
-                        let file = EntryType::File as i32;
-
-                        let kind = if dir_entry.r#type == dir {
-                            FileType::Directory
-                        } else if dir_entry.r#type == file {
-                            FileType::RegularFile
-                        } else {
-                            warn!("unexpect file type {}", dir_entry.r#type);
-
-                            return None;
-                        };
-
-                        Some(DirectoryEntry {
-                            inode: dir_entry.inode,
-                            index: offset as u64 + index as u64 + 1,
-                            kind,
-                            name: OsString::from(dir_entry.name),
-                        })
-                    });
-
-            return Ok(ReplyDirectory {
-                entries: Box::pin(stream::iter(entries)),
-            });
-        }
-
-        error!("read_dir failed more than 3 times");
-
-        self.failed_notify.notify();
-
-        Err(libc::ETIMEDOUT.into())
-    }*/
 
     async fn getlk(
         &self,
@@ -1588,7 +1459,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("get_lock rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1686,7 +1557,7 @@ impl FuseFilesystem for Filesystem {
                         if code_can_retry(err.code()) {
                             warn!("release_lock rpc has error {}", err);
 
-                            Timer::after(Duration::from_secs(1)).await;
+                            time::sleep(Duration::from_secs(1)).await;
 
                             continue;
                         }
@@ -1738,7 +1609,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("set_lock rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1822,7 +1693,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("create_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1899,7 +1770,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("interrupt rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1969,7 +1840,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("allocate rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -2003,33 +1874,10 @@ impl FuseFilesystem for Filesystem {
         _fh: u64,
         offset: u64,
         _lock_owner: u64,
-    ) -> Result<ReplyDirectoryPlus> {
+    ) -> Result<ReplyDirectoryPlus<Self::DirEntryPlusStream>> {
         debug!("readdirplus inode {}, offset {}", parent, offset);
 
         let header = self.get_rpc_header().await;
-
-        {
-            let mut read_dir_cache = self.read_dir_cache.lock().await;
-
-            if let Some((instant, cache)) = read_dir_cache.get(&parent) {
-                if instant.elapsed() <= TTL {
-                    let entries = cache.iter().skip(offset as _).cloned().collect::<Vec<_>>();
-
-                    debug!("readdirplus cache hit");
-
-                    return Ok(ReplyDirectoryPlus {
-                        entries: stream::iter(entries).boxed(),
-                    });
-                }
-
-                // cache is timeout
-                read_dir_cache.remove(&parent);
-            }
-        }
-
-        // if offset is 0, the result contains all entries, we can cache them to reuse in the next
-        // readdirplus, otherwise we don't cache it because it doesn't contain all entries.
-        let can_cache = offset == 0;
 
         let client = self.client.clone();
 
@@ -2061,7 +1909,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("read_dir rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -2124,22 +1972,9 @@ impl FuseFilesystem for Filesystem {
                         })
                     });
 
-            return if can_cache {
-                let entries = entries.collect::<Vec<_>>();
-
-                self.read_dir_cache
-                    .lock()
-                    .await
-                    .insert(parent, (Instant::now(), entries.clone()));
-
-                Ok(ReplyDirectoryPlus {
-                    entries: Box::pin(stream::iter(entries)),
-                })
-            } else {
-                Ok(ReplyDirectoryPlus {
-                    entries: Box::pin(stream::iter(entries)),
-                })
-            };
+            return Ok(ReplyDirectoryPlus {
+                entries: stream::iter(entries).map(Ok),
+            });
         }
 
         error!("read_dir failed more than 3 times");
@@ -2214,7 +2049,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("copy_file_range rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }

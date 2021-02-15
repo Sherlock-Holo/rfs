@@ -2,18 +2,18 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::Metadata;
 use std::io::ErrorKind;
-use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_std::fs;
-use async_std::fs::{DirBuilder, OpenOptions};
-use async_std::sync::Mutex;
-use fuse3::{Errno, FileAttr, FileType, Result};
+use fuse3::raw::reply::FileAttr;
+use fuse3::{Errno, FileType, Result};
 use futures_util::stream::{FuturesOrdered, StreamExt};
 use log::{debug, warn};
+use tokio::fs;
+use tokio::fs::{DirBuilder, OpenOptions};
+use tokio::sync::Mutex;
+use tokio_stream::wrappers::ReadDirStream;
 
 use crate::helper::compare_and_get_new;
 use crate::Apply;
@@ -136,7 +136,7 @@ impl Dir {
     ) -> Result<Vec<(Inode, OsString, FileAttr)>> {
         let path = self.get_absolute_path();
 
-        let mut entries = fs::read_dir(&path).await?;
+        let mut entries = ReadDirStream::new(fs::read_dir(&path).await?);
 
         let mut entry_futures = FuturesOrdered::new();
 
@@ -514,16 +514,16 @@ impl Dir {
 
             fs::metadata(&child_path).await?
         } else {
-            let sys_file: async_std::fs::File = OpenOptions::new()
+            OpenOptions::new()
                 .create_new(true)
                 .read(true)
                 .write(true)
                 .mode(mode)
                 .custom_flags(flags)
                 .open(&child_path)
-                .await?;
-
-            sys_file.metadata().await?
+                .await?
+                .metadata()
+                .await?
         };
 
         *inode_gen += 1;

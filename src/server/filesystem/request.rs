@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 
-use fuse3::reply::ReplyStatFs;
-use fuse3::{FileAttr, Result};
+use fuse3::raw::reply::{FileAttr, ReplyStatFs};
+use fuse3::Result;
 use futures_channel::mpsc::Sender;
 
 use super::inode::Inode;

@@ -6,17 +6,16 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use async_std::fs;
 use log::info;
 use nix::unistd;
 use nix::unistd::ForkResult;
 use serde::Deserialize;
-use smol::Task;
 use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
+use tokio::fs;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 
-use rfs::{init_smol_runtime, log_init, Filesystem};
+use rfs::{log_init, Filesystem};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -107,7 +106,7 @@ impl TryInto<(Config, RunMode)> for MountArgument {
     }
 }
 
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let program_name = args().next().map_or(String::from(""), |name| name);
 
     let program_name = Path::new(&program_name)
@@ -120,10 +119,12 @@ pub fn run() -> Result<()> {
         let (cfg, mode): (Config, RunMode) = args.try_into()?;
 
         if mode == RunMode::Background {
-            if let ForkResult::Child = unistd::fork()? {
-                cfg
-            } else {
-                return Ok(());
+            unsafe {
+                if let ForkResult::Child = unistd::fork()? {
+                    cfg
+                } else {
+                    return Ok(());
+                }
             }
         } else {
             cfg
@@ -136,9 +137,7 @@ pub fn run() -> Result<()> {
         serde_yaml::from_slice(&cfg_data)?
     };
 
-    init_smol_runtime();
-
-    smol::block_on(Task::spawn(inner_run(cfg)))
+    inner_run(cfg).await
 }
 
 async fn inner_run(cfg: Config) -> Result<()> {
