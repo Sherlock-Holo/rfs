@@ -1932,45 +1932,39 @@ impl FuseFilesystem for Filesystem {
 
             debug!("got readdirplus result");
 
-            let entries =
-                dir_entries
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(move |(index, dir_entry)| {
-                        let attr = if let Some(attr) = dir_entry.attr {
-                            attr
-                        } else {
-                            warn!(
-                                "dir entry {} in parent {} attr is None",
-                                dir_entry.name, parent
-                            );
+            let entries = dir_entries.into_iter().filter_map(move |dir_entry| {
+                let attr = if let Some(attr) = dir_entry.attr {
+                    attr
+                } else {
+                    warn!(
+                        "dir entry {} in parent {} attr is None",
+                        dir_entry.name, parent
+                    );
 
-                            return None;
-                        };
+                    return None;
+                };
 
-                        let attr =
-                            if let Ok(attr) = proto_attr_into_fuse_attr(attr, req.uid, req.gid) {
-                                attr
-                            } else {
-                                warn!(
-                                    "parse dir entry {} in parent {} fuse attr failed",
-                                    dir_entry.name, parent
-                                );
+                let attr = if let Ok(attr) = proto_attr_into_fuse_attr(attr, req.uid, req.gid) {
+                    attr
+                } else {
+                    warn!(
+                        "parse dir entry {} in parent {} fuse attr failed",
+                        dir_entry.name, parent
+                    );
 
-                                return None;
-                            };
+                    return None;
+                };
 
-                        Some(DirectoryEntryPlus {
-                            inode: dir_entry.inode,
-                            generation: 0,
-                            index: offset as u64 + index as u64 + 1,
-                            kind: attr.kind,
-                            name: OsString::from(dir_entry.name),
-                            attr,
-                            entry_ttl: TTL,
-                            attr_ttl: TTL,
-                        })
-                    });
+                Some(DirectoryEntryPlus {
+                    inode: dir_entry.inode,
+                    generation: 0,
+                    kind: attr.kind,
+                    name: OsString::from(dir_entry.name),
+                    attr,
+                    entry_ttl: TTL,
+                    attr_ttl: TTL,
+                })
+            });
 
             return Ok(ReplyDirectoryPlus {
                 entries: stream::iter(entries).map(Ok),

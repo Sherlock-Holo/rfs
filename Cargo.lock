@@ -230,9 +230,9 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fuse3"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ee869eec9186bb6ffec2dd5077013be70bbeb24dd3716405f82f78f91dc3c98"
+checksum = "b141ae1e23d0676c506e3afed2d8a74662dbf0d5ae5847b4a217c234f31721ce"
 dependencies = [
  "async-trait",
  "bincode",

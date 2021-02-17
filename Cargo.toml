@@ -32,7 +32,7 @@ async-notify = "0.2"
 async-signals = "0.3"
 snap = "1.0"
 atomic_value = "0.1"
-fuse3 = { version = "0.2.0-beta.2", features = ["file-lock", "tokio-runtime", "unprivileged"] }
+fuse3 = { version = "0.2.0-beta.3", features = ["file-lock", "tokio-runtime", "unprivileged"] }
 semver-parser = "0.10"
 async-trait = "0.1"
 tokio = { version = "1.2", features = ["fs", "net", "rt", "sync", "time", "macros"] }
