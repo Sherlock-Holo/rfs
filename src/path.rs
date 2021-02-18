@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use fuse3::Errno;
 use path_clean::clean as original_clean;
@@ -24,15 +24,21 @@ pub trait PathClean<P> {
     fn clean(&self) -> P;
 }
 
-impl<P: AsRef<Path>> PathClean<Result<String, Error>> for P {
-    fn clean(&self) -> Result<String, Error> {
+impl<P: AsRef<Path>> PathClean<Result<PathBuf, Error>> for P {
+    fn clean(&self) -> Result<PathBuf, Error> {
         match self.as_ref().as_os_str().to_os_string().into_string() {
             Err(original_path) => Err(Error(format!(
                 "path \"{:?}\" has invalid char",
                 original_path
             ))),
-            Ok(path) => Ok(original_clean(&path)),
+            Ok(path) => Ok(PathBuf::from(original_clean(&path))),
         }
+    }
+}
+
+impl<P: AsRef<str>> PathClean<PathBuf> for P {
+    fn clean(&self) -> PathBuf {
+        PathBuf::from(original_clean(self.as_ref()))
     }
 }
 

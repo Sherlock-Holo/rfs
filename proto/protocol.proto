@@ -6,418 +6,416 @@ import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 
 enum EntryType {
-    file = 0;
-    dir = 1;
+  file = 0;
+  dir = 1;
 }
 
 enum LockType {
-    NoLock = 0;
-    ReadLock = 1;
-    WriteLock = 2;
+  NoLock = 0;
+  ReadLock = 1;
+  WriteLock = 2;
 }
 
 message Error {
-    uint32 errno = 1;
+  uint32 errno = 1;
 }
 
 message Attr {
-    uint64 inode = 1;
-    string name = 2;
-    int32 mode = 3;
-    int64 size = 4;
-    EntryType type = 5;
-    google.protobuf.Timestamp accessTime = 6;
-    google.protobuf.Timestamp modifyTime = 7;
-    google.protobuf.Timestamp changeTime = 8;
+  string name = 1;
+  int32 mode = 2;
+  int64 size = 3;
+  EntryType type = 4;
+  google.protobuf.Timestamp accessTime = 5;
+  google.protobuf.Timestamp modifyTime = 6;
+  google.protobuf.Timestamp changeTime = 7;
 }
 
 message ReadDirRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    uint64 offset = 3;
+  Header head = 1;
+  string parent = 2;
+  uint64 offset = 3;
+  uint64 limit = 4;
 }
 
 message ReadDirResponse {
-    message DirEntry {
-        int64 index = 1;
-        uint64 inode = 2;
-        string name = 3;
-        EntryType type = 4;
-        Attr attr = 5;
-    }
+  message DirEntry {
+    string name = 1;
+    EntryType type = 2;
+    Attr attr = 3;
+  }
 
-    repeated DirEntry dirEntries = 1;
-    Error error = 2;
+  repeated DirEntry dirEntries = 1;
+  Error error = 2;
 }
 
 message LookupRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    string name = 3;
+  Header head = 1;
+  string parent = 2;
+  string name = 3;
 }
 
 message LookupResponse {
-    oneof result {
-        Attr attr = 1;
-        Error error = 2;
-    }
+  oneof result {
+    Attr attr = 1;
+    Error error = 2;
+  }
 }
 
 message MkdirRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    string name = 3;
-    uint32 mode = 4;
+  Header head = 1;
+  string parent = 2;
+  string name = 3;
+  uint32 mode = 4;
 }
 
 message MkdirResponse {
-    oneof result {
-        Attr attr = 1;
-        Error error = 2;
-    }
+  oneof result {
+    Attr attr = 1;
+    Error error = 2;
+  }
 }
 
 message CreateFileRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    string name = 3;
-    uint32 mode = 4; // such as 0644
-    uint32 flags = 5; // O_RDONLY or O_RDWR
+  Header head = 1;
+  string parent = 2;
+  string name = 3;
+  uint32 mode = 4; // such as 0644
+  uint32 flags = 5; // O_RDONLY or O_RDWR
 }
 
 message CreateFileResponse {
-    uint64 fileHandleId = 1;
-    Attr attr = 2;
-    Error error = 3;
+  uint64 fileHandleId = 1;
+  Attr attr = 2;
+  Error error = 3;
 }
 
 message UnlinkRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    string name = 3;
+  Header head = 1;
+  string parent = 2;
+  string name = 3;
 }
 
 message UnlinkResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message RmDirRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    string Name = 3;
+  Header head = 1;
+  string parent = 2;
+  string Name = 3;
 }
 
 message RmDirResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message RenameRequest {
-    Header head = 1;
-    uint64 old_parent = 2;
-    string oldName = 3;
-    uint64 new_parent = 4;
-    string newName = 5;
+  Header head = 1;
+  string oldParent = 2;
+  string oldName = 3;
+  string newParent = 4;
+  string newName = 5;
 }
 
 message RenameResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message OpenFileRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    uint32 flags = 3;
+  Header head = 1;
+  string path = 2;
+  uint32 flags = 3;
 }
 
 message OpenFileResponse {
-    oneof result {
-        uint64 fileHandleId = 1;
-        Error error = 2;
-    }
+  oneof result {
+    uint64 fileHandleId = 1;
+    Error error = 2;
+  }
 }
 
 message AllocateRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
-    uint64 offset = 3;
-    uint64 size = 4;
-    uint32 mode = 5;
+  Header head = 1;
+  uint64 fileHandleId = 2;
+  uint64 offset = 3;
+  uint64 size = 4;
+  uint32 mode = 5;
 }
 
 message AllocateResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message ReadFileRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
-    int64 offset = 3;
-    uint64 size = 4;
+  Header head = 1;
+  uint64 fileHandleId = 2;
+  int64 offset = 3;
+  uint64 size = 4;
 }
 
 message ReadFileResponse {
-    Error error = 1;
-    bytes data = 2; // if data len is less than size, means EOF
-    bool compressed = 3;
+  Error error = 1;
+  bytes data = 2; // if data len is less than size, means EOF
+  bool compressed = 3;
 }
 
 message WriteFileRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
-    int64 offset = 3;
-    bytes data = 4;
-    bool compressed = 5;
+  Header head = 1;
+  uint64 fileHandleId = 2;
+  int64 offset = 3;
+  bytes data = 4;
+  bool compressed = 5;
 }
 
 message WriteFileResponse {
-    oneof result {
-        uint64 written = 1;
-        Error error = 2;
-    }
+  oneof result {
+    uint64 written = 1;
+    Error error = 2;
+  }
 }
 
 message CloseFileRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
+  Header head = 1;
+  uint64 fileHandleId = 2;
 }
 
 message CloseFileResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message SyncFileRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
-    //    uint64 offset = 3;
-    //    bytes data = 4;
+  Header head = 1;
+  uint64 fileHandleId = 2;
+  //    uint64 offset = 3;
+  //    bytes data = 4;
 }
 
 message SyncFileResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message FlushRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
+  Header head = 1;
+  uint64 fileHandleId = 2;
 }
 
 message FlushResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message GetAttrRequest {
-    Header head = 1;
-    uint64 inode = 2;
+  Header head = 1;
+  string path = 2;
 }
 
 message GetAttrResponse {
-    oneof result {
-        Attr attr = 1;
-        Error error = 2;
-    }
+  oneof result {
+    Attr attr = 1;
+    Error error = 2;
+  }
 }
 
 message SetAttrRequest {
-    Header head = 1;
-    uint64 inode = 2;
-    Attr attr = 3;
+  Header head = 1;
+  string path = 2;
+  Attr attr = 3;
 }
 
 message SetAttrResponse {
-    oneof result {
-        Attr attr = 1;
-        Error error = 2;
-    }
+  oneof result {
+    Attr attr = 1;
+    Error error = 2;
+  }
 }
 
 message SetLockRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
-    uint64 unique = 3;
-    LockType lockKind = 4;
-    bool block = 5;
+  Header head = 1;
+  uint64 fileHandleId = 2;
+  uint64 unique = 3;
+  LockType lockKind = 4;
+  bool block = 5;
 }
 
 message SetLockResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message ReleaseLockRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
-    bool block = 4;
+  Header head = 1;
+  uint64 fileHandleId = 2;
+  bool block = 4;
 }
 
 message ReleaseLockResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 // now only handle set lock interrupt
 message InterruptRequest {
-    Header head = 1;
-    uint64 unique = 2;
+  Header head = 1;
+  uint64 unique = 2;
 }
 
 message InterruptResponse {
-    Error error = 1;
+  Error error = 1;
 }
 
 message Header {
-    string version = 1; // current version is 0.2
-    bytes uuid = 2;
+  string version = 1; // current version is 0.4
+  bytes uuid = 2;
 }
 
 message PingRequest {
-    Header header = 1;
+  Header header = 1;
 }
 
 message PingResponse {
 }
 
 message RegisterRequest {
-    bool support_compress = 1;
+  bool supportCompress = 1;
 }
 
 message RegisterResponse {
-    bytes uuid = 1;
-    bool allow_compress = 2;
+  bytes uuid = 1;
+  bool allowCompress = 2;
 }
 
 message LogoutRequest {
-    string uuid = 1;
+  string uuid = 1;
 }
 
 message LogoutResponse {
 }
 
 message GetLockRequest {
-    Header head = 1;
-    uint64 fileHandleId = 2;
+  Header head = 1;
+  uint64 fileHandleId = 2;
 }
 
 message GetLockResponse {
-    oneof result {
-        LockType lockType = 1;
-        Error error = 2;
-    }
+  oneof result {
+    LockType lockType = 1;
+    Error error = 2;
+  }
 }
 
 message CopyFileRangeRequest {
-    Header head = 1;
-    uint64 fileHandleIdIn = 2;
-    uint64 offsetIn = 3;
-    uint64 fileHandleIdOut = 4;
-    uint64 offsetOut = 5;
-    uint64 size = 6;
-    uint64 flags = 7;
+  Header head = 1;
+  uint64 fileHandleIdIn = 2;
+  uint64 offsetIn = 3;
+  uint64 fileHandleIdOut = 4;
+  uint64 offsetOut = 5;
+  uint64 size = 6;
+  uint64 flags = 7;
 }
 
 message CopyFileRangeResponse {
-    oneof result {
-        uint64 copied = 1;
-        Error error = 2;
-    }
+  oneof result {
+    uint64 copied = 1;
+    Error error = 2;
+  }
 }
 
 message StatFsRequest {
-    Header head = 1;
+  Header head = 1;
 }
 
 message StatFs {
-    uint64 blocks = 1;
-    uint64 blockFree = 2;
-    uint64 blockAvailable = 3;
-    uint64 files = 4;
-    uint64 fileFree = 5;
-    uint32 blockSize = 6;
-    uint32 maxNameLength = 7;
-    uint32 fragmentSize = 8;
+  uint64 blocks = 1;
+  uint64 blockFree = 2;
+  uint64 blockAvailable = 3;
+  uint64 files = 4;
+  uint64 fileFree = 5;
+  uint32 blockSize = 6;
+  uint32 maxNameLength = 7;
+  uint32 fragmentSize = 8;
 }
 
 message StatFsResponse {
-    oneof result {
-        StatFs statfs = 1;
-        Error error = 2;
-    }
+  oneof result {
+    StatFs statfs = 1;
+    Error error = 2;
+  }
 }
 
 // no acl, no link
 service Rfs {
-    // dir
-    rpc ReadDir (ReadDirRequest) returns (ReadDirResponse) {
-    }
+  // dir
+  rpc ReadDir (ReadDirRequest) returns (ReadDirResponse) {
+  }
 
-    rpc Lookup (LookupRequest) returns (LookupResponse) {
-    }
+  rpc Lookup (LookupRequest) returns (LookupResponse) {
+  }
 
-    rpc Mkdir (MkdirRequest) returns (MkdirResponse) {
-    }
+  rpc Mkdir (MkdirRequest) returns (MkdirResponse) {
+  }
 
-    rpc CreateFile (CreateFileRequest) returns (CreateFileResponse) {
-    }
+  rpc CreateFile (CreateFileRequest) returns (CreateFileResponse) {
+  }
 
-    rpc Unlink (UnlinkRequest) returns (UnlinkResponse) {
-    }
+  rpc Unlink (UnlinkRequest) returns (UnlinkResponse) {
+  }
 
-    rpc RmDir (RmDirRequest) returns (RmDirResponse) {
-    }
+  rpc RmDir (RmDirRequest) returns (RmDirResponse) {
+  }
 
-    rpc Rename (RenameRequest) returns (RenameResponse) {
-    }
+  rpc Rename (RenameRequest) returns (RenameResponse) {
+  }
 
-    // file
-    rpc OpenFile (OpenFileRequest) returns (OpenFileResponse) {
-    }
+  // file
+  rpc OpenFile (OpenFileRequest) returns (OpenFileResponse) {
+  }
 
-    rpc Allocate (AllocateRequest) returns (AllocateResponse) {
-    }
+  rpc Allocate (AllocateRequest) returns (AllocateResponse) {
+  }
 
-    rpc ReadFile (ReadFileRequest) returns (ReadFileResponse) {
-    }
+  rpc ReadFile (ReadFileRequest) returns (ReadFileResponse) {
+  }
 
-    rpc WriteFile (WriteFileRequest) returns (WriteFileResponse) {
-    }
+  rpc WriteFile (WriteFileRequest) returns (WriteFileResponse) {
+  }
 
-    rpc CloseFile (CloseFileRequest) returns (CloseFileResponse) {
-    }
+  rpc CloseFile (CloseFileRequest) returns (CloseFileResponse) {
+  }
 
-    rpc SyncFile (SyncFileRequest) returns (SyncFileResponse) {
-    }
+  rpc SyncFile (SyncFileRequest) returns (SyncFileResponse) {
+  }
 
-    rpc Flush (FlushRequest) returns (FlushResponse) {
-    }
+  rpc Flush (FlushRequest) returns (FlushResponse) {
+  }
 
-    rpc SetLock (SetLockRequest) returns (SetLockResponse) {
-    }
+  rpc SetLock (SetLockRequest) returns (SetLockResponse) {
+  }
 
-    rpc ReleaseLock (ReleaseLockRequest) returns (ReleaseLockResponse) {
-    }
+  rpc ReleaseLock (ReleaseLockRequest) returns (ReleaseLockResponse) {
+  }
 
-    rpc Interrupt (InterruptRequest) returns (InterruptResponse) {
-    }
+  rpc Interrupt (InterruptRequest) returns (InterruptResponse) {
+  }
 
-    rpc GetLock (GetLockRequest) returns (GetLockResponse) {
-    }
+  rpc GetLock (GetLockRequest) returns (GetLockResponse) {
+  }
 
-    rpc StatFs (StatFsRequest) returns (StatFsResponse) {
-    }
+  rpc StatFs (StatFsRequest) returns (StatFsResponse) {
+  }
 
-    // normal
-    rpc GetAttr (GetAttrRequest) returns (GetAttrResponse) {
-    }
+  // normal
+  rpc GetAttr (GetAttrRequest) returns (GetAttrResponse) {
+  }
 
-    rpc SetAttr (SetAttrRequest) returns (SetAttrResponse) {
-    }
+  rpc SetAttr (SetAttrRequest) returns (SetAttrResponse) {
+  }
 
-    rpc CopyFileRange (CopyFileRangeRequest) returns (CopyFileRangeResponse) {
-    }
+  rpc CopyFileRange (CopyFileRangeRequest) returns (CopyFileRangeResponse) {
+  }
 
-    rpc Ping (PingRequest) returns (PingResponse) {
-    }
+  rpc Ping (PingRequest) returns (PingResponse) {
+  }
 
-    rpc Register (RegisterRequest) returns (RegisterResponse) {
-    }
+  rpc Register (RegisterRequest) returns (RegisterResponse) {
+  }
 
-    rpc Logout (LogoutRequest) returns (LogoutResponse) {
-    }
+  rpc Logout (LogoutRequest) returns (LogoutResponse) {
+  }
 }

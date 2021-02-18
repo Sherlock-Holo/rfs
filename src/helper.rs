@@ -1,8 +1,6 @@
-use std::collections::HashSet;
-use std::hash::Hash;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse3::raw::reply::FileAttr;
+use fuse3::path::reply::FileAttr;
 use fuse3::{Errno, FileType, Result};
 
 use crate::pb::{Attr as PbAttr, EntryType as PbEntryType};
@@ -42,7 +40,6 @@ pub fn convert_proto_time_to_system_time(proto_time: Option<prost_types::Timesta
 
 pub fn fuse_attr_into_proto_attr(fuse_attr: FileAttr, name: &str) -> PbAttr {
     PbAttr {
-        inode: fuse_attr.ino,
         name: name.to_string(),
         r#type: match fuse_attr.kind {
             FileType::Directory => PbEntryType::Dir.into(),
@@ -74,8 +71,6 @@ pub fn proto_attr_into_fuse_attr(proto_attr: PbAttr, uid: u32, gid: u32) -> Resu
     Ok(FileAttr {
         uid,
         gid,
-        ino: proto_attr.inode,
-        generation: 0,
         size: proto_attr.size as u64,
         blocks: get_blocks(proto_attr.size as u64),
         atime: convert_proto_time_to_system_time(proto_attr.access_time),
@@ -106,16 +101,6 @@ fn get_blocks(size: u64) -> u64 {
     }
 }
 
-/// compare_and_get_new will find out which item that old collection doesn't have
-pub fn compare_and_get_new<Item: Eq + Hash>(
-    old: impl IntoIterator<Item = Item>,
-    new: impl IntoIterator<Item = Item>,
-) -> Vec<Item> {
-    let old = old.into_iter().collect::<HashSet<Item>>();
-
-    new.into_iter().filter(|name| !old.contains(name)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,26 +112,5 @@ mod tests {
         });
 
         assert_eq!(x, 101);
-    }
-
-    #[test]
-    fn compare_and_get_new_test() {
-        let old = vec![1, 2, 3, 4, 5];
-        let new = vec![2, 4, 6, 8, 10];
-
-        assert_eq!(compare_and_get_new(old, new), vec![6, 8, 10]);
-
-        let old = vec![1, 2, 3, 4, 5];
-        let new = vec![2, 4, 6, 8, 10];
-
-        assert_eq!(
-            compare_and_get_new(old.iter(), new.iter()),
-            vec![&6, &8, &10]
-        );
-
-        let old = vec![1, 2, 3, 4, 5];
-        let new = vec![1, 2, 3];
-
-        assert_eq!(compare_and_get_new(old, new), vec![]);
     }
 }

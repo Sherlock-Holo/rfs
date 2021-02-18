@@ -14,15 +14,13 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use async_notify::Notify;
 #[cfg(test)]
-use fuse3::Inode;
-#[cfg(test)]
-use fuse3::{raw::reply::FileAttr, FileType};
+use fuse3::{path::reply::FileAttr, FileType};
 use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
 use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::{FallocateFlags, FlockArg};
-use tokio::fs::File as SysFile;
+use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task;
@@ -49,9 +47,7 @@ pub enum LockKind {
 pub struct FileHandle {
     id: u64,
 
-    #[cfg(test)]
-    inode: Inode,
-    sys_file: SysFile,
+    sys_file: File,
 
     // avoid useless read/write syscall to improve performance
     kind: FileHandleKind,
@@ -63,16 +59,9 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    pub fn new(
-        id: u64,
-        #[cfg(test)] inode: Inode,
-        sys_file: SysFile,
-        kind: FileHandleKind,
-    ) -> Self {
+    pub fn new(id: u64, sys_file: File, kind: FileHandleKind) -> Self {
         Self {
             id,
-            #[cfg(test)]
-            inode,
             sys_file,
             kind,
             lock_table: None,
@@ -121,8 +110,6 @@ impl FileHandle {
         let metadata = self.sys_file.metadata().await?;
 
         Ok(FileAttr {
-            ino: self.inode,
-            generation: 0,
             size: metadata.len(),
             blocks: metadata.blocks(),
             kind: FileType::RegularFile,

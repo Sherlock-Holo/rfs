@@ -9,9 +9,8 @@ use async_notify::Notify;
 use async_signals::Signals;
 use async_trait::async_trait;
 use atomic_value::AtomicValue;
-use fuse3::raw::prelude::*;
-use fuse3::raw::Filesystem as FuseFilesystem;
-use fuse3::{MountOptions, Result};
+use fuse3::path::prelude::*;
+use fuse3::{Errno, MountOptions, Result};
 use futures_util::stream::{self, Empty, Stream};
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
@@ -35,6 +34,7 @@ const INITIAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLIER: f64 = 1.5;
 const MIN_COMPRESS_SIZE: usize = 2048;
 const PING_INTERVAL: Duration = Duration::from_secs(60);
+const READDIR_LIMIT: u64 = 10;
 
 pub struct Filesystem {
     uuid: RwLock<Option<Uuid>>,
@@ -219,7 +219,7 @@ impl Filesystem {
 }
 
 #[async_trait]
-impl FuseFilesystem for Filesystem {
+impl PathFilesystem for Filesystem {
     type DirEntryStream = Empty<Result<DirectoryEntry>>;
     type DirEntryPlusStream = impl Stream<Item = Result<DirectoryEntryPlus>> + Send;
 
@@ -328,7 +328,7 @@ impl FuseFilesystem for Filesystem {
         info!("logout success")
     }
 
-    async fn lookup(&self, req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
+    async fn lookup(&self, req: Request, parent: &OsStr, name: &OsStr) -> Result<ReplyEntry> {
         let name = match name.to_str() {
             None => return Err(libc::EINVAL.into()),
             Some(name) => name.to_string(),
@@ -343,7 +343,7 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(LookupRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
             });
 
@@ -395,7 +395,6 @@ impl FuseFilesystem for Filesystem {
                 lookup_response::Result::Attr(attr) => Ok(ReplyEntry {
                     ttl: TTL,
                     attr: proto_attr_into_fuse_attr(attr, req.uid, req.gid)?,
-                    generation: 0,
                 }),
             };
         }
@@ -410,10 +409,16 @@ impl FuseFilesystem for Filesystem {
     async fn getattr(
         &self,
         req: Request,
-        inode: u64,
+        path: Option<&OsStr>,
         _fh: Option<u64>,
         _flags: u32,
     ) -> Result<ReplyAttr> {
+        let path = path
+            .ok_or_else(Errno::new_not_exist)?
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
+
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -423,7 +428,7 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(GetAttrRequest {
                 head: Some(header.clone()),
-                inode,
+                path: path.clone(),
             });
 
             let mut client = (*client.load()).clone();
@@ -487,10 +492,16 @@ impl FuseFilesystem for Filesystem {
     async fn setattr(
         &self,
         req: Request,
-        inode: u64,
+        path: Option<&OsStr>,
         _fh: Option<u64>,
         set_attr: SetAttr,
     ) -> Result<ReplyAttr> {
+        let path = path
+            .ok_or_else(Errno::new_not_exist)?
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
+
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -500,9 +511,8 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(SetAttrRequest {
                 head: Some(header.clone()),
-                inode,
+                path: path.clone(),
                 attr: Some(Attr {
-                    inode,
                     name: String::new(),
                     mode: if let Some(mode) = set_attr.mode {
                         mode as i32
@@ -585,7 +595,7 @@ impl FuseFilesystem for Filesystem {
     async fn mkdir(
         &self,
         req: Request,
-        parent: u64,
+        parent: &OsStr,
         name: &OsStr,
         mode: u32,
         _umask: u32,
@@ -604,7 +614,7 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(MkdirRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
                 mode,
             });
@@ -654,7 +664,6 @@ impl FuseFilesystem for Filesystem {
                 mkdir_response::Result::Attr(attr) => Ok(ReplyEntry {
                     ttl: TTL,
                     attr: proto_attr_into_fuse_attr(attr, req.uid, req.gid)?,
-                    generation: 0,
                 }),
             };
         }
@@ -666,7 +675,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+    async fn unlink(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<()> {
         let name = match name.to_str() {
             None => return Err(libc::EINVAL.into()),
             Some(name) => name.to_string(),
@@ -681,7 +690,7 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(UnlinkRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
             });
 
@@ -731,7 +740,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+    async fn rmdir(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<()> {
         let name = match name.to_str() {
             None => return Err(libc::EINVAL.into()),
             Some(name) => name.to_string(),
@@ -746,7 +755,7 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(RmDirRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
             });
 
@@ -799,20 +808,19 @@ impl FuseFilesystem for Filesystem {
     async fn rename(
         &self,
         _req: Request,
-        parent: u64,
+        origin_parent: &OsStr,
+        origin_name: &OsStr,
+        parent: &OsStr,
         name: &OsStr,
-        new_parent: u64,
-        new_name: &OsStr,
     ) -> Result<()> {
-        let name = match name.to_str() {
-            None => return Err(libc::EINVAL.into()),
-            Some(name) => name.to_string(),
-        };
-
-        let new_name = match new_name.to_str() {
-            None => return Err(libc::EINVAL.into()),
-            Some(new_name) => new_name.to_string(),
-        };
+        let origin_name = origin_name
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
+        let name = name
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
 
         let header = self.get_rpc_header().await;
 
@@ -823,10 +831,10 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(RenameRequest {
                 head: Some(header.clone()),
-                old_parent: parent,
-                old_name: name.to_string(),
-                new_parent,
-                new_name: new_name.to_string(),
+                old_parent: origin_parent.to_string_lossy().to_string(),
+                old_name: origin_name.to_string(),
+                new_parent: parent.to_string_lossy().to_string(),
+                new_name: name.to_string(),
             });
 
             let mut client = (*client.load()).clone();
@@ -875,19 +883,24 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn open(&self, _req: Request, inode: u64, flags: u32) -> Result<ReplyOpen> {
+    async fn open(&self, _req: Request, path: &OsStr, flags: u32) -> Result<ReplyOpen> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
 
-        debug!("client open inode {} flags {}", inode, flags);
+        debug!("client open path {:?} flags {}", path, flags);
 
         let mut rpc_timeout = INITIAL_TIMEOUT;
+
+        let path = path
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
 
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(OpenFileRequest {
                 head: Some(header.clone()),
-                inode,
+                path: path.to_owned(),
                 flags,
             });
 
@@ -950,7 +963,7 @@ impl FuseFilesystem for Filesystem {
     async fn read(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         offset: u64,
         size: u32,
@@ -1044,7 +1057,7 @@ impl FuseFilesystem for Filesystem {
     async fn write(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         offset: u64,
         data: &[u8],
@@ -1158,7 +1171,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn statsfs(&self, _req: Request, _inode: u64) -> Result<ReplyStatFs> {
+    async fn statsfs(&self, _req: Request, _path: &OsStr) -> Result<ReplyStatFs> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -1235,7 +1248,7 @@ impl FuseFilesystem for Filesystem {
     async fn release(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         _flags: u32,
         _lock_owner: u64,
@@ -1299,7 +1312,13 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn fsync(&self, _req: Request, _inode: u64, fh: u64, _datasync: bool) -> Result<()> {
+    async fn fsync(
+        &self,
+        _req: Request,
+        _path: Option<&OsStr>,
+        fh: u64,
+        _datasync: bool,
+    ) -> Result<()> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -1358,7 +1377,13 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn flush(&self, _req: Request, _inode: u64, fh: u64, _lock_owner: u64) -> Result<()> {
+    async fn flush(
+        &self,
+        _req: Request,
+        _path: Option<&OsStr>,
+        fh: u64,
+        _lock_owner: u64,
+    ) -> Result<()> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -1420,7 +1445,7 @@ impl FuseFilesystem for Filesystem {
     async fn getlk(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         _lock_owner: u64,
         start: u64,
@@ -1515,7 +1540,7 @@ impl FuseFilesystem for Filesystem {
     async fn setlk(
         &self,
         req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         _lock_owner: u64,
         _start: u64,
@@ -1642,14 +1667,14 @@ impl FuseFilesystem for Filesystem {
     }
 
     #[inline]
-    async fn access(&self, _req: Request, _inode: u64, _mask: u32) -> Result<()> {
+    async fn access(&self, _req: Request, _path: &OsStr, _mask: u32) -> Result<()> {
         Ok(())
     }
 
     async fn create(
         &self,
         req: Request,
-        parent: u64,
+        parent: &OsStr,
         name: &OsStr,
         mode: u32,
         flags: u32,
@@ -1668,7 +1693,10 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(CreateFileRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent
+                    .to_str()
+                    .ok_or_else(|| Errno::from(libc::EINVAL))?
+                    .to_owned(),
                 name: name.to_string(),
                 mode,
                 flags,
@@ -1800,7 +1828,7 @@ impl FuseFilesystem for Filesystem {
     async fn fallocate(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         offset: u64,
         length: u64,
@@ -1870,12 +1898,12 @@ impl FuseFilesystem for Filesystem {
     async fn readdirplus(
         &self,
         req: Request,
-        parent: u64,
+        parent: &OsStr,
         _fh: u64,
         offset: u64,
         _lock_owner: u64,
     ) -> Result<ReplyDirectoryPlus<Self::DirEntryPlusStream>> {
-        debug!("readdirplus inode {}, offset {}", parent, offset);
+        debug!("readdirplus path {:?}, offset {}", parent, offset);
 
         let header = self.get_rpc_header().await;
 
@@ -1884,10 +1912,16 @@ impl FuseFilesystem for Filesystem {
         let mut rpc_timeout = INITIAL_TIMEOUT;
 
         for _ in 0..3 {
+            let parent = parent
+                .to_str()
+                .ok_or_else(|| Errno::from(libc::EINVAL))?
+                .to_owned();
+
             let rpc_req = TonicRequest::new(ReadDirRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.clone(),
                 offset: offset as _,
+                limit: READDIR_LIMIT,
             });
 
             let mut client = (*client.load()).clone();
@@ -1937,7 +1971,7 @@ impl FuseFilesystem for Filesystem {
                     attr
                 } else {
                     warn!(
-                        "dir entry {} in parent {} attr is None",
+                        "dir entry {} in parent {:?} attr is None",
                         dir_entry.name, parent
                     );
 
@@ -1948,7 +1982,7 @@ impl FuseFilesystem for Filesystem {
                     attr
                 } else {
                     warn!(
-                        "parse dir entry {} in parent {} fuse attr failed",
+                        "parse dir entry {} in parent {:?} fuse attr failed",
                         dir_entry.name, parent
                     );
 
@@ -1956,8 +1990,6 @@ impl FuseFilesystem for Filesystem {
                 };
 
                 Some(DirectoryEntryPlus {
-                    inode: dir_entry.inode,
-                    generation: 0,
                     kind: attr.kind,
                     name: OsString::from(dir_entry.name),
                     attr,
@@ -1982,13 +2014,14 @@ impl FuseFilesystem for Filesystem {
     async fn rename2(
         &self,
         req: Request,
-        parent: u64,
+        origin_parent: &OsStr,
+        origin_name: &OsStr,
+        parent: &OsStr,
         name: &OsStr,
-        new_parent: u64,
-        new_name: &OsStr,
         _flags: u32,
     ) -> Result<()> {
-        self.rename(req, parent, name, new_parent, new_name).await
+        self.rename(req, origin_parent, origin_name, parent, name)
+            .await
     }
 
     /*async fn lseek(&self, _req: Request, _inode: u64, _fh: u64, _offset: u64, _whence: u32) -> Result<ReplyLSeek> {
@@ -1998,10 +2031,10 @@ impl FuseFilesystem for Filesystem {
     async fn copy_file_range(
         &self,
         _req: Request,
-        _inode: u64,
+        _from_path: Option<&OsStr>,
         fh_in: u64,
         off_in: u64,
-        _inode_out: u64,
+        _to_path: Option<&OsStr>,
         fh_out: u64,
         off_out: u64,
         length: u64,
