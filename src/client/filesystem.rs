@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::os::raw::c_int;
 use std::path::Path;
@@ -21,13 +22,19 @@ use snap::write::FrameEncoder;
 use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::{self, timeout};
+use tonic::body::BoxBody;
 use tonic::transport::{Channel, ClientTlsConfig, Uri};
 use tonic::{Code, Request as TonicRequest};
+use tower::layer::util::{Identity, Stack};
+use tower::{Service, ServiceBuilder};
 use uuid::Uuid;
 
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
+
+use super::rpc::middleware::timeout::{PathTimeoutLayer, PathTimeoutService};
+use super::rpc::middleware::BoxError;
 
 const TTL: Duration = Duration::from_secs(1);
 const INITIAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,11 +45,12 @@ const READDIR_LIMIT: u64 = 10;
 
 pub struct Filesystem {
     uuid: RwLock<Option<Uuid>>,
-    client: Arc<AtomicValue<RfsClient<Channel>>>,
+    client: Arc<AtomicValue<RfsClient<PathTimeoutService<Channel>>>>,
     failed_notify: Arc<Notify>,
     compress: RwLock<bool>,
     uri: Uri,
     tls_cfg: ClientTlsConfig,
+    client_service_builder: ServiceBuilder<Stack<PathTimeoutLayer, Identity>>,
 }
 
 impl Filesystem {
@@ -61,7 +69,10 @@ impl Filesystem {
 
         info!("server connected");
 
-        let client = Arc::new(AtomicValue::new(RfsClient::new(channel)));
+        let layer = PathTimeoutLayer::new(INITIAL_TIMEOUT, None);
+        let builder = ServiceBuilder::new().layer(layer);
+        let service = builder.service(channel);
+        let client = Arc::new(AtomicValue::new(RfsClient::new(service)));
 
         Ok(Filesystem {
             uuid: RwLock::new(None),
@@ -70,6 +81,7 @@ impl Filesystem {
             compress: RwLock::new(compress),
             uri,
             tls_cfg,
+            client_service_builder: builder,
         })
     }
 
@@ -130,7 +142,8 @@ impl Filesystem {
     }
 
     async fn reconnect_loop(
-        client: Arc<AtomicValue<RfsClient<Channel>>>,
+        builder: ServiceBuilder<Stack<PathTimeoutLayer, Identity>>,
+        client: Arc<AtomicValue<RfsClient<PathTimeoutService<Channel>>>>,
         uri: Uri,
         tls_cfg: ClientTlsConfig,
         failed_notify: Arc<Notify>,
@@ -144,15 +157,12 @@ impl Filesystem {
                 let uri = uri.clone();
                 let tls_cfg = tls_cfg.clone();
 
-                match tokio::spawn(async move {
-                    Channel::builder(uri)
-                        .tls_config(tls_cfg)?
-                        .tcp_keepalive(Some(Duration::from_secs(5)))
-                        .connect()
-                        .await
-                })
-                .await
-                .unwrap()
+                match Channel::builder(uri)
+                    .tls_config(tls_cfg)
+                    .expect("tls config is invalid")
+                    .tcp_keepalive(Some(Duration::from_secs(5)))
+                    .connect()
+                    .await
                 {
                     Err(err) => {
                         error!("reconnect failed {}", err);
@@ -166,17 +176,23 @@ impl Filesystem {
                 };
             };
 
-            client.store(RfsClient::new(channel));
+            client.store(RfsClient::new(builder.service(channel)));
 
             info!("reconnect success");
         }
     }
 
-    async fn ping_loop(
-        client: Arc<AtomicValue<RfsClient<Channel>>>,
+    async fn ping_loop<S, Resp>(
+        client: Arc<AtomicValue<RfsClient<S>>>,
         uuid: Uuid,
         failed_notify: Arc<Notify>,
-    ) {
+    ) where
+        Resp: tonic::body::Body + http_body::Body + 'static,
+        <Resp as http_body::Body>::Error: Into<BoxError> + Send,
+        S: Service<http::Request<BoxBody>, Response = http::Response<Resp>> + Clone,
+        S::Error: Into<BoxError>,
+        S::Future: Future<Output = std::result::Result<S::Response, S::Error>>,
+    {
         let mut rpc_timeout = INITIAL_TIMEOUT;
         let mut failed = false;
 
@@ -278,6 +294,7 @@ impl PathFilesystem for Filesystem {
                     ));
 
                     tokio::spawn(Self::reconnect_loop(
+                        self.client_service_builder.clone(),
                         self.client.clone(),
                         uri,
                         tls_cfg,

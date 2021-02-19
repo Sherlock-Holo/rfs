@@ -19,7 +19,7 @@ mod pb {
     impl From<fuse3::Errno> for Error {
         fn from(err: fuse3::Errno) -> Self {
             Error {
-                errno: libc::c_int::from(err) as u32,
+                errno: -libc::c_int::from(err) as u32,
             }
         }
     }
@@ -34,7 +34,7 @@ pub fn log_init(debug: bool) {
 
     builder
         .filter(Some("h2"), LevelFilter::Info)
-        .filter(Some("tower_buffer"), LevelFilter::Info)
+        .filter(Some("tower"), LevelFilter::Info)
         .filter(Some("hyper"), LevelFilter::Info)
         .filter(Some("rustls"), LevelFilter::Info);
 

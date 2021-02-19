@@ -39,6 +39,10 @@ tokio = { version = "1.2", features = ["fs", "net", "rt", "sync", "time", "macro
 bytes = "1.0"
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["fs"] }
+pin-project = "1.0"
+tower = "0.4"
+http = "0.2"
+http-body = "0.4"
 
 #[dependencies.fuse3]
 #branch = "master"
