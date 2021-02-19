@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::{self, timeout};
 use tonic::body::BoxBody;
-use tonic::transport::{Channel, ClientTlsConfig, Uri};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Uri};
 use tonic::{Code, Request as TonicRequest};
 use tower::layer::util::{Identity, Stack};
 use tower::{Service, ServiceBuilder};
@@ -48,8 +48,7 @@ pub struct Filesystem {
     client: Arc<AtomicValue<RfsClient<PathTimeoutService<Channel>>>>,
     failed_notify: Arc<Notify>,
     compress: RwLock<bool>,
-    uri: Uri,
-    tls_cfg: ClientTlsConfig,
+    endpoint: Endpoint,
     client_service_builder: ServiceBuilder<Stack<PathTimeoutLayer, Identity>>,
 }
 
@@ -61,11 +60,12 @@ impl Filesystem {
 
         info!("connecting server");
 
-        let channel = Channel::builder(uri.clone())
-            .tls_config(tls_cfg.clone())?
-            .tcp_keepalive(Some(Duration::from_secs(5)))
-            .connect()
-            .await?;
+        let endpoint = Endpoint::from(uri)
+            .tls_config(tls_cfg)?
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(5)));
+
+        let channel = endpoint.connect().await?;
 
         info!("server connected");
 
@@ -79,8 +79,7 @@ impl Filesystem {
             client,
             failed_notify: Arc::new(Notify::new()),
             compress: RwLock::new(compress),
-            uri,
-            tls_cfg,
+            endpoint,
             client_service_builder: builder,
         })
     }
@@ -144,8 +143,7 @@ impl Filesystem {
     async fn reconnect_loop(
         builder: ServiceBuilder<Stack<PathTimeoutLayer, Identity>>,
         client: Arc<AtomicValue<RfsClient<PathTimeoutService<Channel>>>>,
-        uri: Uri,
-        tls_cfg: ClientTlsConfig,
+        endpoint: Endpoint,
         failed_notify: Arc<Notify>,
     ) {
         loop {
@@ -154,16 +152,7 @@ impl Filesystem {
             warn!("rpc failed, need reconnect");
 
             let channel = loop {
-                let uri = uri.clone();
-                let tls_cfg = tls_cfg.clone();
-
-                match Channel::builder(uri)
-                    .tls_config(tls_cfg)
-                    .expect("tls config is invalid")
-                    .tcp_keepalive(Some(Duration::from_secs(5)))
-                    .connect()
-                    .await
-                {
+                match endpoint.connect().await {
                     Err(err) => {
                         error!("reconnect failed {}", err);
 
@@ -284,9 +273,6 @@ impl PathFilesystem for Filesystem {
 
                     let failed_notify = self.failed_notify.clone();
 
-                    let uri = self.uri.clone();
-                    let tls_cfg = self.tls_cfg.clone();
-
                     tokio::spawn(Self::ping_loop(
                         self.client.clone(),
                         uuid,
@@ -296,8 +282,7 @@ impl PathFilesystem for Filesystem {
                     tokio::spawn(Self::reconnect_loop(
                         self.client_service_builder.clone(),
                         self.client.clone(),
-                        uri,
-                        tls_cfg,
+                        self.endpoint.clone(),
                         failed_notify,
                     ));
 

@@ -357,15 +357,10 @@ mod tests {
     use tokio::time::timeout;
     use tokio::{fs, time};
 
-    use crate::log_init;
-    use crate::server::filesystem::LockKind;
-
     use super::*;
 
     #[tokio::test]
     async fn init_filesystem() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -378,8 +373,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -395,8 +388,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -412,8 +403,6 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -430,8 +419,6 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -447,8 +434,6 @@ mod tests {
 
     #[tokio::test]
     async fn get_attr_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -465,8 +450,6 @@ mod tests {
 
     #[tokio::test]
     async fn get_attr_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -483,8 +466,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_dir_attr() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -516,8 +497,6 @@ mod tests {
 
     #[tokio::test]
     async fn remove_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -539,8 +518,6 @@ mod tests {
 
     #[tokio::test]
     async fn remove_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -562,8 +539,6 @@ mod tests {
 
     #[tokio::test]
     async fn rename_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -587,8 +562,6 @@ mod tests {
 
     #[tokio::test]
     async fn rename_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -612,8 +585,6 @@ mod tests {
 
     #[tokio::test]
     async fn move_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -645,8 +616,6 @@ mod tests {
 
     #[tokio::test]
     async fn move_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -678,8 +647,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -707,8 +674,6 @@ mod tests {
 
     #[tokio::test]
     async fn open_file_rw() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -733,8 +698,6 @@ mod tests {
 
     #[tokio::test]
     async fn open_file_ro() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -756,8 +719,6 @@ mod tests {
 
     #[tokio::test]
     async fn open_file_wo() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -782,8 +743,6 @@ mod tests {
 
     #[tokio::test]
     async fn write_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -802,8 +761,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -828,8 +785,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_attr_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -874,8 +829,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_share_lock_success() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -913,8 +866,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_share_lock_failed() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -949,8 +900,6 @@ mod tests {
 
     #[tokio::test]
     async fn try_set_share_lock_success() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -968,8 +917,6 @@ mod tests {
 
     #[tokio::test]
     async fn try_set_share_lock_failed() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -991,8 +938,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_exclusive_lock() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1036,8 +981,6 @@ mod tests {
 
     #[tokio::test]
     async fn try_set_exclusive_lock() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1062,8 +1005,6 @@ mod tests {
 
     #[tokio::test]
     async fn release_share_lock() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1087,8 +1028,6 @@ mod tests {
 
     #[tokio::test]
     async fn release_exclusive_lock() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1112,8 +1051,6 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_lock() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1148,8 +1085,6 @@ mod tests {
 
     #[tokio::test]
     async fn wait_exclusive_lock() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1192,8 +1127,6 @@ mod tests {
 
     #[tokio::test]
     async fn get_lock_kind() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1241,8 +1174,6 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_exist_entry() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let tmp_file = tempfile::NamedTempFile::new_in(&tmp_dir).unwrap();
@@ -1267,8 +1198,6 @@ mod tests {
     // issue #8
     #[tokio::test]
     async fn rename_to_exist_dir() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1294,8 +1223,6 @@ mod tests {
     // issue #8
     #[tokio::test]
     async fn rename_to_exist_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1320,8 +1247,6 @@ mod tests {
 
     #[tokio::test]
     async fn fallocate() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1340,8 +1265,6 @@ mod tests {
 
     #[tokio::test]
     async fn copy_file_range() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
@@ -1376,8 +1299,6 @@ mod tests {
 
     #[tokio::test]
     async fn remove_dir_deep() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
