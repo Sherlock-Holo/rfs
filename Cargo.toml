@@ -17,7 +17,7 @@ members = [".", "rfs-client", "rfs-server"]
 [dependencies]
 log = "0.4"
 pretty_env_logger = "0.4"
-nix = "0.19"
+nix = "0.20"
 libc = "0.2"
 path-clean = "0.1"
 futures-util = "0.3"
@@ -32,9 +32,9 @@ async-notify = "0.2"
 async-signals = "0.3"
 snap = "1.0"
 atomic_value = "0.1"
-fuse3 = { version = "0.2.0-beta.3", features = ["file-lock", "tokio-runtime", "unprivileged"] }
+fuse3 = { version = "0.2.0-beta.4", features = ["file-lock", "tokio-runtime", "unprivileged"] }
 semver-parser = "0.10"
-async-trait = "0.1"
+async-trait = "= 0.1.42"
 tokio = { version = "1.2", features = ["fs", "net", "rt", "sync", "time", "macros"] }
 bytes = "1.0"
 async-stream = "0.3"
