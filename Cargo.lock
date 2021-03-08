@@ -70,9 +70,9 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.42"
+version = "0.1.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d3a45e77e34375a7923b1e8febb049bb011f064714a8e17a1a616fef01da13d"
+checksum = "7e098e9c493fdf92832223594d9a164f96bdf17ba81a42aff86f85c76768726a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -986,9 +986,9 @@ dependencies = [
 
 [[package]]
 name = "security-framework"
-version = "2.1.1"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dfd318104249865096c8da1dfabf09ddbb6d0330ea176812a62ec75e40c4166"
+checksum = "d493c5f39e02dfb062cd8f33301f90f9b13b650e8c1b1d0fd75c19dd64bff69d"
 dependencies = [
  "bitflags",
  "core-foundation",
