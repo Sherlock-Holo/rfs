@@ -1,5 +1,5 @@
 mount_path: /tmp/client-test
-server_addr: "https://127.0.0.1:9876"
+server_addr: "https://rfs-server:9876"
 cert_path: cert.pem
 key_path: key.pem
 debug_ca_path: ca.pem # only use for debug, DO NOT use in production.

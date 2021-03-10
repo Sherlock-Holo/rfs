@@ -1,52 +1,53 @@
 use std::env;
-use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::mem;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::io::RawFd;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use fuse3::reply::ReplyStatFs;
-use fuse3::{FileAttr, FileType, Result};
-use futures_channel::mpsc::Receiver;
-use futures_util::stream::StreamExt;
-use log::{debug, info};
+use fuse3::path::reply::{FileAttr, ReplyStatFs};
+use fuse3::{Errno, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use nix::dir::Dir as NixDir;
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 use nix::sys::statfs;
 use nix::unistd;
+use tokio::fs;
+use tokio::fs::{DirBuilder, OpenOptions};
+use tokio_stream::wrappers::ReadDirStream;
+use tracing::{debug, error, info, instrument};
 
 pub use attr::SetAttr;
-use dir::Dir;
-use entry::Entry;
 pub use file_handle::FileHandle;
 pub use file_handle::LockKind;
 pub use file_handle::LockTable;
-use inode::{Inode, InodeMap};
-pub use request::Request;
 
 use crate::path::PathClean;
+use crate::server::filesystem::attr::metadata_to_file_attr;
+use crate::server::filesystem::file_handle::FileHandleKind;
+use crate::Apply;
 
 mod attr;
-mod dir;
-mod entry;
-mod file;
 mod file_handle;
-mod inode;
-mod request;
 
 pub struct Filesystem {
-    inode_map: InodeMap,
-    inode_gen: Inode,
-    file_handle_id_gen: u64,
-    root_dir_fd: NixDir,
-    receiver: Receiver<Request>,
+    file_handle_id_gen: AtomicU64,
+    root_dir_fd: RawFd,
 }
 
 impl Filesystem {
     /// new a Filesystem will enter a new mount namespace, then chroot to root path
     /// ensure won't be affected by uds client fuse mount
-    pub async fn new<P: AsRef<Path>>(root: P, receiver: Receiver<Request>) -> Result<Self> {
+    pub async fn new<P: AsRef<Path>>(root: P) -> Result<Self> {
         info!("root is {:?}", root.as_ref());
 
-        let root_dir_fd = NixDir::open(root.as_ref(), OFlag::O_DIRECTORY, Mode::S_IRWXU)?;
+        let root_dir = NixDir::open(root.as_ref(), OFlag::O_DIRECTORY, Mode::S_IRWXU)?;
+        let root_dir_fd = root_dir.as_raw_fd();
+
+        // avoid the root dir fd be closed
+        mem::forget(root_dir);
 
         // pivot_root mode, butI think we don't need use pivot_root, chroot is safe enough
         /*sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)?;
@@ -88,308 +89,257 @@ impl Filesystem {
             })
             .await;*/
 
-        Self::chroot(&root).await?;
-
-        let mut inode_map = InodeMap::new();
-
-        let root = Entry::from(Dir::new_root());
-
-        inode_map.insert(1, root);
+        Self::chroot(root.as_ref()).await?;
 
         Ok(Self {
-            inode_gen: 1,
-            file_handle_id_gen: 0,
-            inode_map,
+            file_handle_id_gen: AtomicU64::new(1),
             root_dir_fd,
-            receiver,
         })
     }
 
-    async fn chroot<P: AsRef<Path>>(root: P) -> Result<()> {
-        unistd::chroot(root.as_ref().as_os_str())?;
+    #[instrument]
+    async fn chroot(root: &Path) -> Result<()> {
+        unistd::chroot(root.as_os_str())?;
 
-        info!("chroot {:?} success", root.as_ref());
+        info!("chroot {:?} success", root);
 
         env::set_current_dir("/")?;
 
         Ok(())
     }
 
-    pub async fn run(&mut self) {
-        while let Some(request) = self.receiver.next().await {
-            match request {
-                Request::Lookup {
-                    parent,
-                    name,
-                    mut response,
-                } => {
-                    let result = self.lookup(parent, &name).await;
-                    let _ = response.try_send(result);
-                }
+    fn get_fh_id(&self) -> u64 {
+        self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed)
+    }
 
-                Request::GetAttr {
-                    inode,
-                    mut response,
-                } => {
-                    let result = self.get_attr(inode).await;
-                    let _ = response.try_send(result);
-                }
+    #[instrument(skip(self))]
+    pub async fn lookup(&self, parent: String, name: &str) -> Result<FileAttr> {
+        debug!("lookup name {} in parent {}", name, parent);
 
-                Request::SetAttr {
-                    inode,
-                    new_attr,
-                    mut response,
-                } => {
-                    let result = self.set_attr(inode, new_attr).await;
-                    let _ = response.try_send(result);
-                }
+        let path = PathBuf::from(parent)
+            .apply(|path| path.push(name))
+            .clean()?;
 
-                Request::CreateDir {
-                    parent,
-                    name,
-                    mode,
-                    mut response,
-                } => {
-                    let result = self.create_dir(parent, &name, mode).await;
-                    let _ = response.try_send(result);
-                }
+        metadata_to_file_attr(fs::metadata(path).await?)
+    }
 
-                Request::RemoveEntry {
-                    parent,
-                    name,
-                    is_dir,
-                    mut response,
-                } => {
-                    let result = self.remove_entry(parent, &name, is_dir).await;
-                    let _ = response.try_send(result);
-                }
+    #[inline]
+    #[instrument(skip(self))]
+    pub async fn get_attr(&self, path: &str) -> Result<FileAttr> {
+        let path: PathBuf = path.clean();
 
-                Request::Rename {
-                    old_parent,
-                    old_name,
-                    new_parent,
-                    new_name,
-                    mut response,
-                } => {
-                    let result = self
-                        .rename(old_parent, &old_name, new_parent, &new_name)
-                        .await;
-                    let _ = response.try_send(result);
-                }
+        metadata_to_file_attr(fs::metadata(path).await?)
+    }
 
-                Request::Open {
-                    inode,
-                    flags,
-                    mut response,
-                } => {
-                    let result = self.open(inode, flags).await;
-                    let _ = response.try_send(result);
-                }
+    #[instrument(skip(self))]
+    pub async fn set_attr(&self, path: &str, set_attr: SetAttr) -> Result<FileAttr> {
+        let path: PathBuf = path.clean();
 
-                Request::ReadDir {
-                    inode,
-                    offset,
-                    mut response,
-                } => {
-                    let result = self.read_dir(inode, offset).await;
-                    let _ = response.try_send(result);
-                }
+        let metadata = fs::metadata(&path).await?;
 
-                Request::CreateFile {
-                    parent,
-                    name,
-                    mode,
-                    flags,
-                    mut response,
-                } => {
-                    let result = self.create_file(parent, &name, mode, flags).await;
-                    let _ = response.try_send(result);
-                }
+        if let Some(mode) = set_attr.mode {
+            let mut permissions = metadata.permissions();
 
-                Request::StatFs { mut response } => {
-                    let result = self.statfs().await;
-                    let _ = response.try_send(result);
+            permissions.set_mode(mode);
+
+            fs::set_permissions(&path, permissions).await?;
+        }
+
+        if let Some(size) = set_attr.size {
+            if metadata.is_dir() {
+                return Err(Errno::new_is_dir());
+            }
+
+            let truncate = size == 0;
+
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(truncate)
+                .open(&path)
+                .await?;
+
+            if size > 0 {
+                debug!("set attr size {}", size);
+
+                if let Err(err) = file.set_len(size).await {
+                    error!("set path {:?} size {} failed", path, size);
+
+                    return Err(err.into());
                 }
             }
         }
+
+        metadata_to_file_attr(fs::metadata(path).await?)
     }
 
-    async fn lookup(&mut self, parent: Inode, name: &OsStr) -> Result<FileAttr> {
-        let name = name.clean()?;
+    #[instrument(skip(self))]
+    pub async fn create_dir(&self, parent: String, name: &str, mode: u32) -> Result<FileAttr> {
+        debug!("create dir name {:?} in parent {:?}", name, parent);
 
-        debug!("lookup name {:?} in parent {}", name, parent);
+        let path = PathBuf::from(parent)
+            .apply(|path| path.push(name))
+            .clean()?;
 
-        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+        DirBuilder::new().mode(mode).create(&path).await?;
 
-        if let Entry::Dir(mut dir) = entry {
-            let child_entry = dir
-                .lookup(&name, &mut self.inode_map, &mut self.inode_gen)
-                .await?;
-
-            child_entry.get_attr().await
-        } else {
-            Err(libc::ENOTDIR.into())
-        }
+        metadata_to_file_attr(fs::metadata(path).await?)
     }
 
-    async fn get_attr(&mut self, inode: Inode) -> Result<FileAttr> {
-        self.inode_map
-            .get(&inode)
-            .ok_or(libc::ENOENT)?
-            .get_attr()
-            .await
-    }
-
-    async fn set_attr(&mut self, inode: Inode, set_attr: SetAttr) -> Result<FileAttr> {
-        self.inode_map
-            .get(&inode)
-            .ok_or(libc::ENOENT)?
-            .set_attr(set_attr)
-            .await
-    }
-
-    async fn create_dir(&mut self, parent: Inode, name: &OsStr, mode: u32) -> Result<FileAttr> {
-        let name = name.clean()?;
-
-        debug!("create dir name {:?} in parent {}", name, parent);
-
-        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
-
-        if let Entry::Dir(mut dir) = entry {
-            dir.create_dir(name, mode, &mut self.inode_map, &mut self.inode_gen)
-                .await?
-                .get_attr()
-                .await
-        } else {
-            Err(libc::ENOTDIR.into())
-        }
-    }
-
-    async fn remove_entry(&mut self, parent: Inode, name: &OsStr, is_dir: bool) -> Result<()> {
-        let name = name.clean()?;
-
+    #[instrument(skip(self))]
+    pub async fn remove_entry(&self, parent: String, name: &str, remove_dir: bool) -> Result<()> {
         debug!(
-            "remove name {:?} from parent {}, is dir {}",
-            name, parent, is_dir
+            "remove name {:?} from parent {:?}, remove dir {}",
+            name, parent, remove_dir
         );
 
-        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+        let path = PathBuf::from(parent)
+            .apply(|path| path.push(name))
+            .clean()?;
 
-        if let Entry::Dir(mut dir) = entry {
-            let kind = if is_dir {
-                FileType::Directory
-            } else {
-                FileType::RegularFile
-            };
-
-            dir.remove_child(name, kind, &mut self.inode_map, &mut self.inode_gen)
-                .await
+        if remove_dir {
+            Ok(fs::remove_dir(path).await?)
         } else {
-            Err(libc::ENOTDIR.into())
+            Ok(fs::remove_file(path).await?)
         }
     }
 
-    async fn rename(
-        &mut self,
-        old_parent: Inode,
-        old_name: &OsStr,
-        new_parent: Inode,
-        new_name: &OsStr,
+    #[instrument(skip(self))]
+    pub async fn rename(
+        &self,
+        old_parent: String,
+        old_name: &str,
+        new_parent: String,
+        new_name: &str,
     ) -> Result<()> {
-        let old_name = old_name.clean()?;
-        let new_name = new_name.clean()?;
-
         debug!(
-            "rename {:?} from {} to {} as {:?}",
+            "rename {:?} from {:?} to {:?} as {:?}",
             old_name, old_parent, new_parent, new_name
         );
 
-        let old_parent = self.inode_map.get(&old_parent).ok_or(libc::ENOENT)?.clone();
-        let new_parent = self.inode_map.get(&new_parent).ok_or(libc::ENOENT)?.clone();
+        let old_path = PathBuf::from(old_parent)
+            .apply(|path| path.push(old_name))
+            .clean()?;
+        let new_path = PathBuf::from(new_parent)
+            .apply(|path| path.push(new_name))
+            .clean()?;
 
-        if let Entry::Dir(mut old_parent) = old_parent {
-            if let Entry::Dir(mut new_parent) = new_parent {
-                return old_parent
-                    .move_child_to_new_parent(
-                        old_name,
-                        &mut new_parent,
-                        new_name,
-                        &mut self.inode_map,
-                        &mut self.inode_gen,
-                    )
-                    .await;
-            }
-        }
-
-        Err(libc::ENOTDIR.into())
+        Ok(fs::rename(old_path, new_path).await?)
     }
 
-    async fn open(&mut self, inode: Inode, flags: i32) -> Result<FileHandle> {
-        debug!("open inode {} flags {}", inode, flags);
+    #[instrument(skip(self))]
+    pub async fn open(&self, path: &str, flags: i32) -> Result<FileHandle> {
+        let path: PathBuf = path.clean();
 
-        let entry = self.inode_map.get(&inode).ok_or(libc::ENOENT)?;
+        debug!("open path {:?} flags {}", path, flags);
 
-        if let Entry::File(file) = entry {
-            file.open(flags, &mut self.file_handle_id_gen).await
+        let mut options = OpenOptions::new();
+
+        let fh_kind = if flags & libc::O_RDWR > 0 {
+            options.write(true);
+            options.read(true);
+
+            debug!("open {:?} with O_RDWR", path);
+
+            FileHandleKind::ReadWrite
+        } else if flags & libc::O_WRONLY > 0 {
+            options.write(true);
+            options.read(false);
+
+            debug!("open {:?} with O_WRONLY", path);
+
+            FileHandleKind::WriteOnly
         } else {
-            Err(libc::EISDIR.into())
+            options.write(false);
+            options.read(true);
+
+            debug!("open {:?} read only", path);
+
+            FileHandleKind::ReadOnly
+        };
+
+        if flags & libc::O_TRUNC > 0 {
+            debug!("open {:?} with O_TRUNC", path);
+
+            options.truncate(true);
         }
+
+        let sys_file = options.open(path).await?;
+
+        let file_handle_id = self.get_fh_id();
+
+        Ok(FileHandle::new(file_handle_id, sys_file, fh_kind))
     }
 
-    async fn read_dir(
-        &mut self,
-        inode: Inode,
-        offset: i64,
-    ) -> Result<Vec<(Inode, i64, FileAttr, OsString)>> {
-        debug!("readdir in parent {}", inode);
+    #[instrument(skip(self))]
+    pub async fn read_dir(
+        &self,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<(FileAttr, String)>> {
+        let path: PathBuf = path.clean();
 
-        let entry = self.inode_map.get(&inode).ok_or(libc::ENOENT)?.clone();
+        debug!("readdir in parent {:?}", path);
 
-        if let Entry::Dir(mut dir) = entry {
-            let children = dir
-                .readdir(&mut self.inode_map, &mut self.inode_gen)
-                .await?;
+        let current_attr = metadata_to_file_attr(fs::metadata(&path).await?)?;
+        let parent_attr = match path.parent() {
+            None => current_attr,
+            Some(parent_path) => metadata_to_file_attr(fs::metadata(parent_path).await?)?,
+        };
 
-            Ok(children
-                .into_iter()
-                .enumerate()
-                .map(|(index, (inode, name, attr))| (inode, (index + 1) as i64, attr, name))
-                .skip(offset as usize)
-                .collect())
-        } else {
-            Err(libc::ENOTDIR.into())
-        }
+        let entries = ReadDirStream::new(fs::read_dir(&path).await?).and_then(|entry| async move {
+            let attr = metadata_to_file_attr(entry.metadata().await?)?;
+
+            Ok((attr, entry.file_name().to_string_lossy().to_string()))
+        });
+
+        Ok(stream::iter(vec![
+            Ok((current_attr, String::from("."))),
+            Ok((parent_attr, String::from(".."))),
+        ])
+        .chain(entries)
+        .skip(offset)
+        .take(limit)
+        .try_collect::<Vec<_>>()
+        .await?)
     }
 
-    async fn create_file(
-        &mut self,
-        parent: Inode,
-        name: &OsStr,
+    #[instrument(skip(self))]
+    pub async fn create_file(
+        &self,
+        parent: String,
+        name: &str,
         mode: u32,
         flags: i32,
     ) -> Result<(FileHandle, FileAttr)> {
-        let name = name.clean()?;
+        debug!("create file name {} in parent {}", name, parent);
 
-        debug!("create file name {:?} in parent {}", name, parent);
+        let path = PathBuf::from(parent)
+            .apply(|path| path.push(name))
+            .clean()?;
 
-        let entry = self.inode_map.get(&parent).ok_or(libc::ENOENT)?.clone();
+        let sys_file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(mode)
+            .custom_flags(flags)
+            .open(path)
+            .await?;
 
-        if let Entry::Dir(mut dir) = entry {
-            let attr = dir
-                .create_file(name, mode, flags, &mut self.inode_map, &mut self.inode_gen)
-                .await?
-                .get_attr()
-                .await?;
+        let attr = metadata_to_file_attr(sys_file.metadata().await?)?;
 
-            let file_handle = self.open(attr.ino, flags).await?;
+        let fd_id = self.get_fh_id();
 
-            Ok((file_handle, attr))
-        } else {
-            Err(libc::ENOTDIR.into())
-        }
+        Ok((
+            FileHandle::new(fd_id, sys_file, FileHandleKind::ReadWrite),
+            attr,
+        ))
     }
 
-    async fn statfs(&mut self) -> Result<ReplyStatFs> {
+    #[instrument(skip(self))]
+    pub async fn statfs(&self) -> Result<ReplyStatFs> {
         let statfs = statfs::fstatfs(&self.root_dir_fd)?;
 
         Ok(ReplyStatFs {
@@ -412,845 +362,338 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_std::fs;
-    use async_std::future::timeout;
-    use async_std::sync::Mutex;
-    use async_std::task;
-    use fuse3::Errno;
-    use futures_channel::mpsc::channel;
-    use futures_util::sink::SinkExt;
-
-    use crate::server::filesystem::file_handle::FileHandleKind;
-    use crate::server::filesystem::LockKind;
-    use crate::{init_smol_runtime, log_init};
+    use fuse3::{Errno, FileType};
+    use tokio::sync::Mutex;
+    use tokio::task;
+    use tokio::time::timeout;
+    use tokio::{fs, time};
 
     use super::*;
 
-    #[async_std::test]
+    #[tokio::test]
     async fn init_filesystem() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        let attr = filesystem.get_attr("/").await.unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::GetAttr {
-            inode: 1,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 1);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn create_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        let attr = filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn create_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        let (_, attr) = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (_, attr) = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn lookup_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        let attr = filesystem.lookup("/".to_string(), "test").await.unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn lookup_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        let attr = filesystem.lookup("/".to_string(), "test").await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        // create file
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn get_attr_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        let attr = filesystem.get_attr("/test").await.unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::GetAttr {
-            inode: 2,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn get_attr_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        let attr = filesystem.get_attr("/test").await.unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::GetAttr {
-            inode: 2,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_dir_attr() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        let attr = filesystem
+            .set_attr(
+                "/test",
+                SetAttr {
+                    ctime: None,
+                    mtime: None,
+                    atime: None,
+                    flags: None,
+                    uid: None,
+                    gid: None,
+                    size: None,
+                    mode: Some(0o700),
+                },
+            )
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::SetAttr {
-            inode: 2,
-            new_attr: SetAttr {
-                ctime: None,
-                mtime: None,
-                atime: None,
-                flags: None,
-                uid: None,
-                gid: None,
-                size: None,
-                mode: Some(0o700),
-            },
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o700);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn remove_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .remove_entry("/".to_string(), "test", true)
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::RemoveEntry {
-            parent: 1,
-            name: OsString::from("test"),
-            is_dir: true,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
+        assert_eq!(
+            filesystem.lookup("/".to_string(), "test").await,
+            Err(Errno::new_not_exist())
+        );
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn remove_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        filesystem
+            .remove_entry("/".to_string(), "test", false)
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::RemoveEntry {
-            parent: 1,
-            name: OsString::from("test"),
-            is_dir: false,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
+        assert_eq!(
+            filesystem.lookup("/".to_string(), "test").await,
+            Err(Errno::new_not_exist())
+        );
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .rename("/".to_string(), "test", "/".to_string(), "new-test")
+            .await
+            .unwrap();
+        let attr = filesystem
+            .lookup("/".to_string(), "new-test")
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Rename {
-            old_parent: 1,
-            old_name: OsString::from("test"),
-            new_parent: 1,
-            new_name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        filesystem
+            .rename("/".to_string(), "test", "/".to_string(), "new-test")
+            .await
+            .unwrap();
+        let attr = filesystem
+            .lookup("/".to_string(), "new-test")
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        // create dir
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Rename {
-            old_parent: 1,
-            old_name: OsString::from("test"),
-            new_parent: 1,
-            new_name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn move_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "old", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .create_dir("/".to_string(), "new", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .create_dir("/old".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .rename("/old".to_string(), "test", "/new".to_string(), "new-test")
+            .await
+            .unwrap();
+        let attr = filesystem
+            .lookup("/new".to_string(), "new-test")
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("old"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 2
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("new"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 3
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 2,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 4
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Rename {
-            old_parent: 2,
-            old_name: OsString::from("test"),
-            new_parent: 3,
-            new_name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 3,
-            name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn move_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "old", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .create_dir("/".to_string(), "new", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .create_file("/old".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        filesystem
+            .rename("/old".to_string(), "test", "/new".to_string(), "new-test")
+            .await
+            .unwrap();
+        let attr = filesystem
+            .lookup("/new".to_string(), "new-test")
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("old"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 2
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("new"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 3
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 2,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        }; // inode 4
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Rename {
-            old_parent: 2,
-            old_name: OsString::from("test"),
-            new_parent: 3,
-            new_name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 3,
-            name: OsString::from("new-test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 4);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn read_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::ReadDir {
-            inode: 1,
-            offset: 0,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let children = rx.next().await.unwrap().unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        let children = filesystem.read_dir("/", 0, 10).await.unwrap();
 
         assert_eq!(children.len(), 3);
 
-        let (inode, _, attr, name) = &children[0];
-
-        assert_eq!(*inode, 1);
+        let (attr, name) = &children[0];
         assert_eq!(attr.kind, FileType::Directory);
-        assert_eq!(*name, OsString::from("."));
+        assert_eq!(*name, String::from("."));
 
-        let (inode, _, attr, name) = &children[1];
-
-        assert_eq!(*inode, 1);
+        let (attr, name) = &children[1];
         assert_eq!(attr.kind, FileType::Directory);
-        assert_eq!(*name, OsString::from(".."));
+        assert_eq!(*name, String::from(".."));
 
-        let (inode, _, attr, name) = &children[2];
-
-        assert_eq!(*inode, 2);
+        let (attr, name) = &children[2];
         assert_eq!(attr.kind, FileType::Directory);
-        assert_eq!(*name, OsString::from("test"));
+        assert_eq!(*name, String::from("test"));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn open_file_rw() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle = rx.next().await.unwrap().unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        let file_handle = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(
@@ -1260,100 +703,42 @@ mod tests {
 
         let attr = file_handle.get_attr().await.unwrap();
 
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn open_file_ro() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDONLY,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle = rx.next().await.unwrap().unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        let file_handle = filesystem.open("/test", libc::O_RDONLY).await.unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(file_handle.get_file_handle_kind(), FileHandleKind::ReadOnly);
 
         let attr = file_handle.get_attr().await.unwrap();
 
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn open_file_wo() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_WRONLY,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle = rx.next().await.unwrap().unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        let file_handle = filesystem.open("/test", libc::O_WRONLY).await.unwrap();
 
         assert_eq!(file_handle.get_id(), 2);
         assert_eq!(
@@ -1363,38 +748,20 @@ mod tests {
 
         let attr = file_handle.get_attr().await.unwrap();
 
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn write_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
+        let (mut file_handle, _) = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
 
         let written = file_handle.write(b"test", 0).await.unwrap();
         file_handle.flush().await.unwrap();
@@ -1403,35 +770,18 @@ mod tests {
         assert_eq!(file_handle.get_attr().await.unwrap().size, 4)
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn read_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        let (mut file_handle, _) = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let read = file_handle.read(&mut vec![0; 0], 0).await.unwrap();
+        let read = file_handle.read(&mut [0], 0).await.unwrap();
         assert_eq!(read, 0);
 
         file_handle.write(b"test", 0).await.unwrap();
@@ -1444,71 +794,42 @@ mod tests {
         assert_eq!(&b"test"[..], &buf[..])
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_attr_file() {
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
+        let (mut file_handle, _) = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
 
         assert_eq!(file_handle.write(b"test", 0).await, Ok(b"test".len()));
 
         file_handle.flush().await.unwrap();
 
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::SetAttr {
-            inode: 2,
-            new_attr: SetAttr {
-                mode: Some(0o600),
-                uid: None,
-                gid: None,
-                size: Some(2),
-                atime: None,
-                mtime: None,
-                ctime: None,
-                flags: None,
-            },
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
+        let attr = filesystem
+            .set_attr(
+                "/test",
+                SetAttr {
+                    mode: Some(0o600),
+                    uid: None,
+                    gid: None,
+                    size: Some(2),
+                    atime: None,
+                    mtime: None,
+                    ctime: None,
+                    flags: None,
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(attr.perm, 0o600);
         assert_eq!(attr.size, 2);
 
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDONLY,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let mut file_handle = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem.open("/test", libc::O_RDONLY).await.unwrap();
 
         let mut buf = vec![0; 4];
 
@@ -1517,47 +838,18 @@ mod tests {
         assert_eq!(&b"te"[..], &buf[..read])
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_share_lock_success() {
-        init_smol_runtime();
-
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let mut file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let mut file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1583,45 +875,18 @@ mod tests {
         assert!(lock_job);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_share_lock_failed() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let mut file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let mut file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1644,89 +909,35 @@ mod tests {
         }
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn try_set_share_lock_success() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle2 = rx.next().await.unwrap().unwrap();
+        let file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
         assert_eq!(file_handle2.try_set_lock(true).await, Ok(()));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn try_set_share_lock_failed() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle2 = rx.next().await.unwrap().unwrap();
+        let file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         assert_eq!(file_handle.try_set_lock(true).await, Ok(()));
 
@@ -1736,45 +947,18 @@ mod tests {
         )
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn set_exclusive_lock() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let mut file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let mut file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -1806,45 +990,18 @@ mod tests {
         }
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn try_set_exclusive_lock() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle2 = rx.next().await.unwrap().unwrap();
+        let file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         assert_eq!(file_handle.try_set_lock(false).await, Ok(()));
         assert_eq!(
@@ -1857,145 +1014,64 @@ mod tests {
         );
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn release_share_lock() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
 
         let lock_job = file_handle.set_lock(1, true, lock_queue).await.unwrap();
 
         assert!(lock_job.await.unwrap());
-        assert_eq!(file_handle.try_release_lock().await, Ok(()));
+        assert_eq!(file_handle.release_lock().await, Ok(()));
 
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn release_exclusive_lock() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_queue = Arc::new(Mutex::new(BTreeMap::new()));
 
         let lock_job = file_handle.set_lock(1, false, lock_queue).await.unwrap();
 
         assert!(lock_job.await.unwrap());
-        assert_eq!(file_handle.try_release_lock().await, Ok(()));
+        assert_eq!(file_handle.release_lock().await, Ok(()));
 
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn interrupt_lock() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let mut file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let mut file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2018,45 +1094,18 @@ mod tests {
         assert!(!lock_job.await.unwrap())
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn wait_exclusive_lock() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Open {
-            inode: 2,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let mut file_handle2 = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
+        let mut file_handle2 = filesystem.open("/test", libc::O_RDWR).await.unwrap();
 
         let lock_table = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -2070,9 +1119,9 @@ mod tests {
         );
 
         task::spawn(async move {
-            task::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
 
-            file_handle.try_release_lock().await.unwrap();
+            file_handle.release_lock().await.unwrap();
         });
 
         let lock_job = file_handle2
@@ -2087,33 +1136,17 @@ mod tests {
         assert!(lock_result.unwrap())
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn get_lock_kind() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut file_handle, _) = rx.next().await.unwrap().unwrap();
+        let mut file_handle = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
 
@@ -2130,7 +1163,7 @@ mod tests {
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::Exclusive);
 
-        file_handle.try_release_lock().await.unwrap();
+        file_handle.release_lock().await.unwrap();
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
 
@@ -2145,17 +1178,13 @@ mod tests {
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::Share);
 
-        file_handle.try_release_lock().await.unwrap();
+        file_handle.release_lock().await.unwrap();
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn lookup_exist_entry() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let tmp_file = tempfile::NamedTempFile::new_in(&tmp_dir).unwrap();
@@ -2163,264 +1192,109 @@ mod tests {
         let perm = fs::metadata(tmp_file.path()).await.unwrap().permissions();
         let perm = perm.mode() ^ libc::S_IFREG;
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        let attr = filesystem
+            .lookup(
+                "/".to_string(),
+                tmp_file.path().file_name().unwrap().to_str().unwrap(),
+            )
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: tmp_file.path().file_name().unwrap().to_os_string(),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm as u32, perm);
     }
 
     // issue #8
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_to_exist_dir() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .create_dir("/".to_string(), "exist", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .rename("/".to_string(), "test", "/".to_string(), "exist")
+            .await
+            .unwrap();
+        let attr = filesystem.lookup("/".to_string(), "exist").await.unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 2
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("exist"),
-            mode: 0o755,
-            response: tx,
-        }; // inode 3
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Rename {
-            old_parent: 1,
-            old_name: OsString::from("test"),
-            new_parent: 1,
-            new_name: OsString::from("exist"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("exist"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);
     }
 
     // issue #8
-    #[async_std::test]
+    #[tokio::test]
     async fn rename_to_exist_file() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        filesystem
+            .create_file("/".to_string(), "exist", 0o644, libc::O_RDWR)
+            .await
+            .unwrap();
+        filesystem
+            .rename("/".to_string(), "test", "/".to_string(), "exist")
+            .await
+            .unwrap();
+        let attr = filesystem.lookup("/".to_string(), "exist").await.unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        }; // inode 2
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("exist"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        }; // inode 3
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Rename {
-            old_parent: 1,
-            old_name: OsString::from("test"),
-            new_parent: 1,
-            new_name: OsString::from("exist"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("exist"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
-
-        assert_eq!(attr.ino, 2);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.perm, 0o644);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn fallocate() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut fh, _) = rx.next().await.unwrap().unwrap();
-
+        let mut fh = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
         fh.fallocate(0, 100, 0).await.unwrap();
 
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::GetAttr {
-            inode: 2,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let attr = rx.next().await.unwrap().unwrap();
+        let attr = filesystem.get_attr("/test").await.unwrap();
 
         assert_eq!(attr.size, 100);
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn copy_file_range() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
-
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test1"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut fh1, _) = rx.next().await.unwrap().unwrap();
+        let mut fh1 = filesystem
+            .create_file("/".to_string(), "test", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(fh1.write(b"test", 0).await.unwrap(), 4);
 
         fh1.flush().await.unwrap();
 
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::CreateFile {
-            parent: 1,
-            name: OsString::from("test2"),
-            mode: 0o644,
-            flags: libc::O_RDWR,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        let (mut fh2, _) = rx.next().await.unwrap().unwrap();
+        let mut fh2 = filesystem
+            .create_file("/".to_string(), "test2", 0o644, libc::O_RDWR)
+            .await
+            .unwrap()
+            .0;
 
         let copied = fh1.copy_to(0, 0, 4, Some(&fh2)).await.unwrap();
 
@@ -2434,71 +1308,24 @@ mod tests {
         assert_eq!(&buf[..n], b"test");
     }
 
-    #[async_std::test]
+    #[tokio::test]
     async fn remove_dir_deep() {
-        init_smol_runtime();
-
-        log_init(true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (mut fs_tx, fs_rx) = channel(1);
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
 
-        let mut filesystem = Filesystem::new(tmp_dir.path(), fs_rx).await.unwrap();
+        filesystem
+            .create_dir("/".to_string(), "test", 0o755)
+            .await
+            .unwrap();
+        filesystem
+            .create_dir("/test".to_string(), "sub-dir", 0o755)
+            .await
+            .unwrap();
 
-        task::spawn(async move { filesystem.run().await });
-
-        let (tx, mut rx) = channel(1);
-
-        // create dir
-        let req = Request::CreateDir {
-            parent: 1,
-            name: OsString::from("test"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        // create sub dir
-        let req = Request::CreateDir {
-            parent: 2,
-            name: OsString::from("sub-dir"),
-            mode: 0o755,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::RemoveEntry {
-            parent: 1,
-            name: OsString::from("test"),
-            is_dir: true,
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        rx.next().await.unwrap().unwrap();
-
-        let (tx, mut rx) = channel(1);
-
-        let req = Request::Lookup {
-            parent: 1,
-            name: OsString::from("test"),
-            response: tx,
-        };
-
-        fs_tx.send(req).await.unwrap();
-
-        assert_eq!(rx.next().await.unwrap(), Err(Errno::from(libc::ENOENT)))
+        assert_eq!(
+            filesystem.remove_entry("/".to_string(), "test", true).await,
+            Err(Errno::from(libc::ENOTEMPTY))
+        );
     }
 }

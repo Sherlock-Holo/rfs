@@ -1,51 +1,55 @@
-use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::os::raw::c_int;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_notify::Notify;
 use async_signals::Signals;
-use async_std::future::timeout;
-use async_std::sync::{Mutex, RwLock};
 use async_trait::async_trait;
 use atomic_value::AtomicValue;
-use fuse3::reply::*;
-use fuse3::{Filesystem as FuseFilesystem, MountOptions, Request, Result, Session, SetAttr};
-use futures_util::stream;
+use fuse3::path::prelude::*;
+use fuse3::{Errno, MountOptions, Result};
+use futures_util::stream::{self, Empty, Stream};
 use futures_util::StreamExt;
-use log::{debug, error, info, warn};
 use nix::mount;
 use nix::mount::MntFlags;
-use smol::{Task, Timer};
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
-use tonic::transport::{Channel, ClientTlsConfig, Uri};
+use tokio::sync::RwLock;
+use tokio::task;
+use tokio::time::{self, timeout};
+use tonic::body::BoxBody;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Uri};
 use tonic::{Code, Request as TonicRequest};
+use tower::layer::util::{Identity, Stack};
+use tower::{Service, ServiceBuilder};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 use crate::helper::proto_attr_into_fuse_attr;
 use crate::pb::rfs_client::RfsClient;
 use crate::pb::*;
 
-type ReadDirCache = Arc<Mutex<HashMap<u64, (Instant, Vec<DirectoryEntryPlus>)>>>;
+use super::rpc::middleware::timeout::{PathTimeoutLayer, PathTimeoutService};
+use super::rpc::middleware::BoxError;
 
 const TTL: Duration = Duration::from_secs(1);
-const INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
+const INITIAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MULTIPLIER: f64 = 1.5;
 const MIN_COMPRESS_SIZE: usize = 2048;
 const PING_INTERVAL: Duration = Duration::from_secs(60);
+const READDIR_LIMIT: u64 = 10;
 
 pub struct Filesystem {
     uuid: RwLock<Option<Uuid>>,
-    client: Arc<AtomicValue<RfsClient<Channel>>>,
+    client: Arc<AtomicValue<RfsClient<PathTimeoutService<Channel>>>>,
     failed_notify: Arc<Notify>,
     compress: RwLock<bool>,
-    uri: Uri,
-    tls_cfg: ClientTlsConfig,
-    read_dir_cache: ReadDirCache,
+    endpoint: Endpoint,
+    client_service_builder: ServiceBuilder<Stack<PathTimeoutLayer, Identity>>,
 }
 
 impl Filesystem {
@@ -56,24 +60,27 @@ impl Filesystem {
 
         info!("connecting server");
 
-        let channel = Channel::builder(uri.clone())
-            .tls_config(tls_cfg.clone())
-            .tcp_keepalive(Some(Duration::from_secs(5)))
-            .connect()
-            .await?;
+        let endpoint = Endpoint::from(uri)
+            .tls_config(tls_cfg)?
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(5)));
+
+        let channel = endpoint.connect().await?;
 
         info!("server connected");
 
-        let client = Arc::new(AtomicValue::new(RfsClient::new(channel)));
+        let layer = PathTimeoutLayer::new(INITIAL_TIMEOUT, None);
+        let builder = ServiceBuilder::new().layer(layer);
+        let service = builder.service(channel);
+        let client = Arc::new(AtomicValue::new(RfsClient::new(service)));
 
         Ok(Filesystem {
             uuid: RwLock::new(None),
             client,
             failed_notify: Arc::new(Notify::new()),
             compress: RwLock::new(compress),
-            uri,
-            tls_cfg,
-            read_dir_cache: Arc::new(Mutex::new(HashMap::new())),
+            endpoint,
+            client_service_builder: builder,
         })
     }
 
@@ -84,7 +91,7 @@ impl Filesystem {
 
         let mut stop_signal = Signals::new(vec![libc::SIGINT, libc::SIGTERM])?;
 
-        Task::spawn(async move {
+        tokio::spawn(async move {
             debug!("waiting stop signal");
 
             stop_signal.next().await;
@@ -95,41 +102,16 @@ impl Filesystem {
 
             info!("stopping rfs");
 
-            Task::blocking(async move {
+            task::spawn_blocking(move || {
                 while let Err(err) = mount::umount2(&unmount_point, MntFlags::MNT_DETACH) {
                     error!("lazy unmount failed {}", err);
 
-                    Timer::after(Duration::from_secs(1)).await;
+                    std::thread::sleep(Duration::from_secs(1));
                 }
             })
-            .await;
-        })
-        .detach();
-
-        let read_dir_cache = self.read_dir_cache.clone();
-
-        Task::spawn(async move {
-            loop {
-                Timer::after(Duration::from_secs(60 * 5)).await;
-
-                let mut guard = read_dir_cache.lock().await;
-
-                let mut invalid_cache = vec![];
-
-                guard.iter().for_each(|(inode, (instant, _))| {
-                    if instant.elapsed() > TTL {
-                        invalid_cache.push(*inode);
-                    }
-                });
-
-                invalid_cache.into_iter().for_each(|inode| {
-                    debug!("remove parent {} outdated readdirplus", inode);
-
-                    guard.remove(&inode);
-                });
-            }
-        })
-        .detach();
+            .await
+            .unwrap();
+        });
 
         let mount_options = MountOptions::default()
             .fs_name("rfs")
@@ -159,9 +141,9 @@ impl Filesystem {
     }
 
     async fn reconnect_loop(
-        client: Arc<AtomicValue<RfsClient<Channel>>>,
-        uri: Uri,
-        tls_cfg: ClientTlsConfig,
+        builder: ServiceBuilder<Stack<PathTimeoutLayer, Identity>>,
+        client: Arc<AtomicValue<RfsClient<PathTimeoutService<Channel>>>>,
+        endpoint: Endpoint,
         failed_notify: Arc<Notify>,
     ) {
         loop {
@@ -170,22 +152,11 @@ impl Filesystem {
             warn!("rpc failed, need reconnect");
 
             let channel = loop {
-                let uri = uri.clone();
-                let tls_cfg = tls_cfg.clone();
-
-                match Task::spawn(async move {
-                    Channel::builder(uri)
-                        .tls_config(tls_cfg)
-                        .tcp_keepalive(Some(Duration::from_secs(5)))
-                        .connect()
-                        .await
-                })
-                .await
-                {
+                match endpoint.connect().await {
                     Err(err) => {
                         error!("reconnect failed {}", err);
 
-                        Timer::after(Duration::from_millis(500)).await;
+                        time::sleep(Duration::from_millis(500)).await;
 
                         continue;
                     }
@@ -194,24 +165,30 @@ impl Filesystem {
                 };
             };
 
-            client.store(RfsClient::new(channel));
+            client.store(RfsClient::new(builder.service(channel)));
 
             info!("reconnect success");
         }
     }
 
-    async fn ping_loop(
-        client: Arc<AtomicValue<RfsClient<Channel>>>,
+    async fn ping_loop<S, Resp>(
+        client: Arc<AtomicValue<RfsClient<S>>>,
         uuid: Uuid,
         failed_notify: Arc<Notify>,
-    ) {
+    ) where
+        Resp: tonic::body::Body + http_body::Body + 'static,
+        <Resp as http_body::Body>::Error: Into<BoxError> + Send,
+        S: Service<http::Request<BoxBody>, Response = http::Response<Resp>> + Clone,
+        S::Error: Into<BoxError>,
+        S::Future: Future<Output = std::result::Result<S::Response, S::Error>>,
+    {
         let mut rpc_timeout = INITIAL_TIMEOUT;
         let mut failed = false;
 
         'outer: loop {
             for _ in 0..3 {
                 if !failed {
-                    Timer::after(PING_INTERVAL).await;
+                    time::sleep(PING_INTERVAL).await;
                 }
 
                 let ping_req = TonicRequest::new(PingRequest {
@@ -223,7 +200,11 @@ impl Filesystem {
 
                 let mut client = (*client.load()).clone();
 
-                if timeout(rpc_timeout, client.ping(ping_req)).await.is_ok() {
+                if timeout(rpc_timeout, client.ping(ping_req))
+                    .instrument(info_span!("send ping"))
+                    .await
+                    .is_ok()
+                {
                     rpc_timeout = INITIAL_TIMEOUT;
 
                     failed = false;
@@ -247,7 +228,10 @@ impl Filesystem {
 }
 
 #[async_trait]
-impl FuseFilesystem for Filesystem {
+impl PathFilesystem for Filesystem {
+    type DirEntryStream = Empty<Result<DirectoryEntry>>;
+    type DirEntryPlusStream = impl Stream<Item = Result<DirectoryEntryPlus>> + Send;
+
     async fn init(&self, _req: Request) -> Result<()> {
         let mut client = (*self.client.load()).clone();
 
@@ -258,12 +242,16 @@ impl FuseFilesystem for Filesystem {
                 support_compress: *compress_guard,
             });
 
-            return match client.register(req).await {
+            return match client
+                .register(req)
+                .instrument(info_span!("register"))
+                .await
+            {
                 Err(err) => {
                     if code_can_retry(err.code()) {
                         warn!("register failed {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -293,23 +281,18 @@ impl FuseFilesystem for Filesystem {
 
                     let failed_notify = self.failed_notify.clone();
 
-                    let uri = self.uri.clone();
-                    let tls_cfg = self.tls_cfg.clone();
-
-                    Task::spawn(Self::ping_loop(
+                    tokio::spawn(Self::ping_loop(
                         self.client.clone(),
                         uuid,
                         failed_notify.clone(),
-                    ))
-                    .detach();
+                    ));
 
-                    Task::spawn(Self::reconnect_loop(
+                    tokio::spawn(Self::reconnect_loop(
+                        self.client_service_builder.clone(),
                         self.client.clone(),
-                        uri,
-                        tls_cfg,
+                        self.endpoint.clone(),
                         failed_notify,
-                    ))
-                    .detach();
+                    ));
 
                     Ok(())
                 }
@@ -336,7 +319,10 @@ impl FuseFilesystem for Filesystem {
 
         let mut client = (*self.client.load()).clone();
 
-        match timeout(Duration::from_secs(10), client.logout(req)).await {
+        match timeout(Duration::from_secs(10), client.logout(req))
+            .instrument(info_span!("logout"))
+            .await
+        {
             Err(err) => {
                 error!("logout timeout {}", err);
 
@@ -355,7 +341,7 @@ impl FuseFilesystem for Filesystem {
         info!("logout success")
     }
 
-    async fn lookup(&self, req: Request, parent: u64, name: &OsStr) -> Result<ReplyEntry> {
+    async fn lookup(&self, req: Request, parent: &OsStr, name: &OsStr) -> Result<ReplyEntry> {
         let name = match name.to_str() {
             None => return Err(libc::EINVAL.into()),
             Some(name) => name.to_string(),
@@ -370,13 +356,16 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(LookupRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.lookup(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.lookup(rpc_req))
+                .instrument(info_span!("lookup"))
+                .await
+            {
                 Err(err) => {
                     warn!("lookup rpc timeout {}", err);
 
@@ -393,7 +382,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("lookup rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -422,7 +411,6 @@ impl FuseFilesystem for Filesystem {
                 lookup_response::Result::Attr(attr) => Ok(ReplyEntry {
                     ttl: TTL,
                     attr: proto_attr_into_fuse_attr(attr, req.uid, req.gid)?,
-                    generation: 0,
                 }),
             };
         }
@@ -437,10 +425,16 @@ impl FuseFilesystem for Filesystem {
     async fn getattr(
         &self,
         req: Request,
-        inode: u64,
+        path: Option<&OsStr>,
         _fh: Option<u64>,
         _flags: u32,
     ) -> Result<ReplyAttr> {
+        let path = path
+            .ok_or_else(Errno::new_not_exist)?
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
+
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -450,12 +444,15 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(GetAttrRequest {
                 head: Some(header.clone()),
-                inode,
+                path: path.clone(),
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.get_attr(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.get_attr(rpc_req))
+                .instrument(info_span!("get_attr"))
+                .await
+            {
                 Err(err) => {
                     warn!("getattr rpc timeout {}", err);
 
@@ -472,7 +469,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("getattr rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -514,10 +511,16 @@ impl FuseFilesystem for Filesystem {
     async fn setattr(
         &self,
         req: Request,
-        inode: u64,
+        path: Option<&OsStr>,
         _fh: Option<u64>,
         set_attr: SetAttr,
     ) -> Result<ReplyAttr> {
+        let path = path
+            .ok_or_else(Errno::new_not_exist)?
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
+
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -527,9 +530,8 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(SetAttrRequest {
                 head: Some(header.clone()),
-                inode,
+                path: path.clone(),
                 attr: Some(Attr {
-                    inode,
                     name: String::new(),
                     mode: if let Some(mode) = set_attr.mode {
                         mode as i32
@@ -550,7 +552,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.set_attr(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.set_attr(rpc_req))
+                .instrument(info_span!("set_attr"))
+                .await
+            {
                 Err(err) => {
                     warn!("setattr rpc timeout {}", err);
 
@@ -567,7 +572,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("setattr rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -612,7 +617,7 @@ impl FuseFilesystem for Filesystem {
     async fn mkdir(
         &self,
         req: Request,
-        parent: u64,
+        parent: &OsStr,
         name: &OsStr,
         mode: u32,
         _umask: u32,
@@ -631,14 +636,17 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(MkdirRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
                 mode,
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.mkdir(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.mkdir(rpc_req))
+                .instrument(info_span!("mkdir"))
+                .await
+            {
                 Err(err) => {
                     warn!("mkdir rpc timeout {}", err);
 
@@ -655,7 +663,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("mkdir rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -681,7 +689,6 @@ impl FuseFilesystem for Filesystem {
                 mkdir_response::Result::Attr(attr) => Ok(ReplyEntry {
                     ttl: TTL,
                     attr: proto_attr_into_fuse_attr(attr, req.uid, req.gid)?,
-                    generation: 0,
                 }),
             };
         }
@@ -693,7 +700,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn unlink(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+    async fn unlink(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<()> {
         let name = match name.to_str() {
             None => return Err(libc::EINVAL.into()),
             Some(name) => name.to_string(),
@@ -708,13 +715,16 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(UnlinkRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.unlink(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.unlink(rpc_req))
+                .instrument(info_span!("unlink"))
+                .await
+            {
                 Err(err) => {
                     warn!("unlink rpc timeout {}", err);
 
@@ -731,7 +741,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("unlink rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -758,7 +768,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn rmdir(&self, _req: Request, parent: u64, name: &OsStr) -> Result<()> {
+    async fn rmdir(&self, _req: Request, parent: &OsStr, name: &OsStr) -> Result<()> {
         let name = match name.to_str() {
             None => return Err(libc::EINVAL.into()),
             Some(name) => name.to_string(),
@@ -773,13 +783,16 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(RmDirRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.to_string_lossy().to_string(),
                 name: name.to_string(),
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.rm_dir(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.rm_dir(rpc_req))
+                .instrument(info_span!("rmdir"))
+                .await
+            {
                 Err(err) => {
                     warn!("rmdir rpc timeout {}", err);
 
@@ -796,7 +809,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("rmdir rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -826,20 +839,19 @@ impl FuseFilesystem for Filesystem {
     async fn rename(
         &self,
         _req: Request,
-        parent: u64,
+        origin_parent: &OsStr,
+        origin_name: &OsStr,
+        parent: &OsStr,
         name: &OsStr,
-        new_parent: u64,
-        new_name: &OsStr,
     ) -> Result<()> {
-        let name = match name.to_str() {
-            None => return Err(libc::EINVAL.into()),
-            Some(name) => name.to_string(),
-        };
-
-        let new_name = match new_name.to_str() {
-            None => return Err(libc::EINVAL.into()),
-            Some(new_name) => new_name.to_string(),
-        };
+        let origin_name = origin_name
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
+        let name = name
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
 
         let header = self.get_rpc_header().await;
 
@@ -850,15 +862,18 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(RenameRequest {
                 head: Some(header.clone()),
-                old_parent: parent,
-                old_name: name.to_string(),
-                new_parent,
-                new_name: new_name.to_string(),
+                old_parent: origin_parent.to_string_lossy().to_string(),
+                old_name: origin_name.to_string(),
+                new_parent: parent.to_string_lossy().to_string(),
+                new_name: name.to_string(),
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.rename(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.rename(rpc_req))
+                .instrument(info_span!("rename"))
+                .await
+            {
                 Err(err) => {
                     warn!("rename rpc timeout {}", err);
 
@@ -875,7 +890,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("rename rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -902,25 +917,33 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn open(&self, _req: Request, inode: u64, flags: u32) -> Result<ReplyOpen> {
+    async fn open(&self, _req: Request, path: &OsStr, flags: u32) -> Result<ReplyOpen> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
 
-        debug!("client open inode {} flags {}", inode, flags);
+        debug!("client open path {:?} flags {}", path, flags);
 
         let mut rpc_timeout = INITIAL_TIMEOUT;
+
+        let path = path
+            .to_str()
+            .ok_or_else(|| Errno::from(libc::EINVAL))?
+            .to_owned();
 
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(OpenFileRequest {
                 head: Some(header.clone()),
-                inode,
+                path: path.to_owned(),
                 flags,
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.open_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.open_file(rpc_req))
+                .instrument(info_span!("open"))
+                .await
+            {
                 Err(err) => {
                     warn!("open file rpc timeout {}", err);
 
@@ -937,7 +960,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("open rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -977,7 +1000,7 @@ impl FuseFilesystem for Filesystem {
     async fn read(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         offset: u64,
         size: u32,
@@ -998,7 +1021,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.read_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.read_file(rpc_req))
+                .instrument(info_span!("read"))
+                .await
+            {
                 Err(err) => {
                     warn!("read_file rpc timeout {}", err);
 
@@ -1015,7 +1041,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("read_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1033,7 +1059,7 @@ impl FuseFilesystem for Filesystem {
                     }
 
                     if result.compressed {
-                        match Task::blocking(async move {
+                        match task::spawn_blocking(move || {
                             let mut decoder = FrameDecoder::new(result.data.as_slice());
 
                             let mut data = Vec::with_capacity(result.data.len());
@@ -1047,15 +1073,14 @@ impl FuseFilesystem for Filesystem {
                             Ok(data)
                         })
                         .await
+                        .unwrap()
                         {
                             Err(err) => Err(err.into()),
-                            Ok(data) => Ok(ReplyData {
-                                data: Box::new(data),
-                            }),
+                            Ok(data) => Ok(ReplyData { data: data.into() }),
                         }
                     } else {
                         Ok(ReplyData {
-                            data: Box::new(result.data),
+                            data: result.data.into(),
                         })
                     }
                 }
@@ -1072,7 +1097,7 @@ impl FuseFilesystem for Filesystem {
     async fn write(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         offset: u64,
         data: &[u8],
@@ -1086,7 +1111,7 @@ impl FuseFilesystem for Filesystem {
 
         let data = data.to_vec();
 
-        let (data, compressed) = Task::blocking(async move {
+        let (data, compressed) = task::spawn_blocking(move || {
             if enable_compress && data.len() > MIN_COMPRESS_SIZE {
                 let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE)); // should I choose a better size?
 
@@ -1119,7 +1144,9 @@ impl FuseFilesystem for Filesystem {
                 (data, false)
             }
         })
-        .await;
+        .instrument(info_span!("compress_write_data"))
+        .await
+        .unwrap();
 
         let mut rpc_timeout = INITIAL_TIMEOUT;
 
@@ -1134,7 +1161,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.write_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.write_file(rpc_req))
+                .instrument(info_span!("write"))
+                .await
+            {
                 Err(err) => {
                     warn!("write file rpc timeout {}", err);
 
@@ -1151,7 +1181,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("write_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1185,7 +1215,7 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn statsfs(&self, _req: Request, _inode: u64) -> Result<ReplyStatFs> {
+    async fn statsfs(&self, _req: Request, _path: &OsStr) -> Result<ReplyStatFs> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -1199,7 +1229,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.stat_fs(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.stat_fs(rpc_req))
+                .instrument(info_span!("statsfs"))
+                .await
+            {
                 Err(err) => {
                     warn!("statfs rpc timeout {}", err);
 
@@ -1216,7 +1249,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("statfs rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1262,7 +1295,7 @@ impl FuseFilesystem for Filesystem {
     async fn release(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         _flags: u32,
         _lock_owner: u64,
@@ -1282,7 +1315,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.close_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.close_file(rpc_req))
+                .instrument(info_span!("release"))
+                .await
+            {
                 Err(err) => {
                     warn!("close file rpc timeout {}", err);
 
@@ -1299,7 +1335,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("close_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1326,7 +1362,13 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn fsync(&self, _req: Request, _inode: u64, fh: u64, _datasync: bool) -> Result<()> {
+    async fn fsync(
+        &self,
+        _req: Request,
+        _path: Option<&OsStr>,
+        fh: u64,
+        _datasync: bool,
+    ) -> Result<()> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -1341,7 +1383,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.sync_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.sync_file(rpc_req))
+                .instrument(info_span!("fsync"))
+                .await
+            {
                 Err(err) => {
                     warn!("sync file rpc timeout {}", err);
 
@@ -1358,7 +1403,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("sync_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1385,7 +1430,13 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    async fn flush(&self, _req: Request, _inode: u64, fh: u64, _lock_owner: u64) -> Result<()> {
+    async fn flush(
+        &self,
+        _req: Request,
+        _path: Option<&OsStr>,
+        fh: u64,
+        _lock_owner: u64,
+    ) -> Result<()> {
         let header = self.get_rpc_header().await;
 
         let client = self.client.clone();
@@ -1400,7 +1451,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.flush(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.flush(rpc_req))
+                .instrument(info_span!("flush"))
+                .await
+            {
                 Err(err) => {
                     warn!("flush rpc timeout {}", err);
 
@@ -1417,7 +1471,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("flush rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1444,112 +1498,10 @@ impl FuseFilesystem for Filesystem {
         Err(libc::ETIMEDOUT.into())
     }
 
-    /*async fn readdir(
-        &self,
-        _req: Request,
-        parent: u64,
-        _fh: u64,
-        offset: i64,
-    ) -> Result<ReplyDirectory> {
-        debug!("readdir inode {}, offset {}", parent, offset);
-
-        let header = self.get_rpc_header().await;
-
-        let client = self.client.clone();
-
-        let mut rpc_timeout = INITIAL_TIMEOUT;
-
-        for _ in 0..3 {
-            let rpc_req = TonicRequest::new(ReadDirRequest {
-                head: Some(header.clone()),
-                inode: parent,
-                offset: offset as _,
-            });
-
-            let mut client = (*client.load()).clone();
-
-            let result = match timeout(rpc_timeout, client.read_dir(rpc_req)).await {
-                Err(err) => {
-                    warn!("readdir rpc timeout {}", err);
-
-                    rpc_timeout = rpc_timeout.mul_f64(MULTIPLIER);
-
-                    continue;
-                }
-
-                Ok(result) => result,
-            };
-
-            let dir_entries: Vec<read_dir_response::DirEntry> = match result {
-                Err(err) => {
-                    if code_can_retry(err.code()) {
-                        warn!("read_dir rpc has error {}", err);
-
-                        Timer::after(Duration::from_secs(1)).await;
-
-                        continue;
-                    }
-
-                    error!("read_dir rpc has error {}", err);
-
-                    return Err(libc::EIO.into());
-                }
-
-                Ok(resp) => {
-                    let resp = resp.into_inner();
-
-                    if let Some(error) = resp.error {
-                        return Err((error.errno as c_int).into());
-                    }
-
-                    resp.dir_entries
-                }
-            };
-
-            debug!("got readdir result");
-
-            let entries =
-                dir_entries
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(move |(index, dir_entry)| {
-                        let dir = EntryType::Dir as i32;
-                        let file = EntryType::File as i32;
-
-                        let kind = if dir_entry.r#type == dir {
-                            FileType::Directory
-                        } else if dir_entry.r#type == file {
-                            FileType::RegularFile
-                        } else {
-                            warn!("unexpect file type {}", dir_entry.r#type);
-
-                            return None;
-                        };
-
-                        Some(DirectoryEntry {
-                            inode: dir_entry.inode,
-                            index: offset as u64 + index as u64 + 1,
-                            kind,
-                            name: OsString::from(dir_entry.name),
-                        })
-                    });
-
-            return Ok(ReplyDirectory {
-                entries: Box::pin(stream::iter(entries)),
-            });
-        }
-
-        error!("read_dir failed more than 3 times");
-
-        self.failed_notify.notify();
-
-        Err(libc::ETIMEDOUT.into())
-    }*/
-
     async fn getlk(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         _lock_owner: u64,
         start: u64,
@@ -1571,7 +1523,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.get_lock(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.get_lock(rpc_req))
+                .instrument(info_span!("getlk"))
+                .await
+            {
                 Err(err) => {
                     warn!("getlk rpc timeout {}", err);
 
@@ -1588,7 +1543,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("get_lock rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1644,7 +1599,7 @@ impl FuseFilesystem for Filesystem {
     async fn setlk(
         &self,
         req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         _lock_owner: u64,
         _start: u64,
@@ -1669,7 +1624,10 @@ impl FuseFilesystem for Filesystem {
 
                 let mut client = (*client.load()).clone();
 
-                let result = match timeout(rpc_timeout, client.release_lock(rpc_req)).await {
+                let result = match timeout(rpc_timeout, client.release_lock(rpc_req))
+                    .instrument(info_span!("setlk"))
+                    .await
+                {
                     Err(err) => {
                         warn!("release_lock rpc timeout {}", err);
 
@@ -1686,7 +1644,7 @@ impl FuseFilesystem for Filesystem {
                         if code_can_retry(err.code()) {
                             warn!("release_lock rpc has error {}", err);
 
-                            Timer::after(Duration::from_secs(1)).await;
+                            time::sleep(Duration::from_secs(1)).await;
 
                             continue;
                         }
@@ -1738,7 +1696,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("set_lock rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1771,14 +1729,14 @@ impl FuseFilesystem for Filesystem {
     }
 
     #[inline]
-    async fn access(&self, _req: Request, _inode: u64, _mask: u32) -> Result<()> {
+    async fn access(&self, _req: Request, _path: &OsStr, _mask: u32) -> Result<()> {
         Ok(())
     }
 
     async fn create(
         &self,
         req: Request,
-        parent: u64,
+        parent: &OsStr,
         name: &OsStr,
         mode: u32,
         flags: u32,
@@ -1797,7 +1755,10 @@ impl FuseFilesystem for Filesystem {
         for _ in 0..3 {
             let rpc_req = TonicRequest::new(CreateFileRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent
+                    .to_str()
+                    .ok_or_else(|| Errno::from(libc::EINVAL))?
+                    .to_owned(),
                 name: name.to_string(),
                 mode,
                 flags,
@@ -1805,7 +1766,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.create_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.create_file(rpc_req))
+                .instrument(info_span!("create"))
+                .await
+            {
                 Err(err) => {
                     warn!("create file rpc timeout {}", err);
 
@@ -1822,7 +1786,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("create_file rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1882,7 +1846,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.interrupt(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.interrupt(rpc_req))
+                .instrument(info_span!("interrupt"))
+                .await
+            {
                 Err(err) => {
                     warn!("interrupt rpc timeout {}", err);
 
@@ -1899,7 +1866,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("interrupt rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1929,7 +1896,7 @@ impl FuseFilesystem for Filesystem {
     async fn fallocate(
         &self,
         _req: Request,
-        _inode: u64,
+        _path: Option<&OsStr>,
         fh: u64,
         offset: u64,
         length: u64,
@@ -1952,7 +1919,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.allocate(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.allocate(rpc_req))
+                .instrument(info_span!("fallocate"))
+                .await
+            {
                 Err(err) => {
                     warn!("allocate rpc timeout {}", err);
 
@@ -1969,7 +1939,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("allocate rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -1999,52 +1969,38 @@ impl FuseFilesystem for Filesystem {
     async fn readdirplus(
         &self,
         req: Request,
-        parent: u64,
+        parent: &OsStr,
         _fh: u64,
         offset: u64,
         _lock_owner: u64,
-    ) -> Result<ReplyDirectoryPlus> {
-        debug!("readdirplus inode {}, offset {}", parent, offset);
+    ) -> Result<ReplyDirectoryPlus<Self::DirEntryPlusStream>> {
+        debug!("readdirplus path {:?}, offset {}", parent, offset);
 
         let header = self.get_rpc_header().await;
-
-        {
-            let mut read_dir_cache = self.read_dir_cache.lock().await;
-
-            if let Some((instant, cache)) = read_dir_cache.get(&parent) {
-                if instant.elapsed() <= TTL {
-                    let entries = cache.iter().skip(offset as _).cloned().collect::<Vec<_>>();
-
-                    debug!("readdirplus cache hit");
-
-                    return Ok(ReplyDirectoryPlus {
-                        entries: stream::iter(entries).boxed(),
-                    });
-                }
-
-                // cache is timeout
-                read_dir_cache.remove(&parent);
-            }
-        }
-
-        // if offset is 0, the result contains all entries, we can cache them to reuse in the next
-        // readdirplus, otherwise we don't cache it because it doesn't contain all entries.
-        let can_cache = offset == 0;
 
         let client = self.client.clone();
 
         let mut rpc_timeout = INITIAL_TIMEOUT;
 
         for _ in 0..3 {
+            let parent = parent
+                .to_str()
+                .ok_or_else(|| Errno::from(libc::EINVAL))?
+                .to_owned();
+
             let rpc_req = TonicRequest::new(ReadDirRequest {
                 head: Some(header.clone()),
-                inode: parent,
+                parent: parent.clone(),
                 offset: offset as _,
+                limit: READDIR_LIMIT,
             });
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.read_dir(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.read_dir(rpc_req))
+                .instrument(info_span!("readdirplus"))
+                .await
+            {
                 Err(err) => {
                     warn!("readdir rpc timeout {}", err);
 
@@ -2061,7 +2017,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("read_dir rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }
@@ -2084,62 +2040,41 @@ impl FuseFilesystem for Filesystem {
 
             debug!("got readdirplus result");
 
-            let entries =
-                dir_entries
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(move |(index, dir_entry)| {
-                        let attr = if let Some(attr) = dir_entry.attr {
-                            attr
-                        } else {
-                            warn!(
-                                "dir entry {} in parent {} attr is None",
-                                dir_entry.name, parent
-                            );
+            let entries = dir_entries.into_iter().filter_map(move |dir_entry| {
+                let attr = if let Some(attr) = dir_entry.attr {
+                    attr
+                } else {
+                    warn!(
+                        "dir entry {} in parent {:?} attr is None",
+                        dir_entry.name, parent
+                    );
 
-                            return None;
-                        };
+                    return None;
+                };
 
-                        let attr =
-                            if let Ok(attr) = proto_attr_into_fuse_attr(attr, req.uid, req.gid) {
-                                attr
-                            } else {
-                                warn!(
-                                    "parse dir entry {} in parent {} fuse attr failed",
-                                    dir_entry.name, parent
-                                );
+                let attr = if let Ok(attr) = proto_attr_into_fuse_attr(attr, req.uid, req.gid) {
+                    attr
+                } else {
+                    warn!(
+                        "parse dir entry {} in parent {:?} fuse attr failed",
+                        dir_entry.name, parent
+                    );
 
-                                return None;
-                            };
+                    return None;
+                };
 
-                        Some(DirectoryEntryPlus {
-                            inode: dir_entry.inode,
-                            generation: 0,
-                            index: offset as u64 + index as u64 + 1,
-                            kind: attr.kind,
-                            name: OsString::from(dir_entry.name),
-                            attr,
-                            entry_ttl: TTL,
-                            attr_ttl: TTL,
-                        })
-                    });
-
-            return if can_cache {
-                let entries = entries.collect::<Vec<_>>();
-
-                self.read_dir_cache
-                    .lock()
-                    .await
-                    .insert(parent, (Instant::now(), entries.clone()));
-
-                Ok(ReplyDirectoryPlus {
-                    entries: Box::pin(stream::iter(entries)),
+                Some(DirectoryEntryPlus {
+                    kind: attr.kind,
+                    name: OsString::from(dir_entry.name),
+                    attr,
+                    entry_ttl: TTL,
+                    attr_ttl: TTL,
                 })
-            } else {
-                Ok(ReplyDirectoryPlus {
-                    entries: Box::pin(stream::iter(entries)),
-                })
-            };
+            });
+
+            return Ok(ReplyDirectoryPlus {
+                entries: stream::iter(entries).map(Ok),
+            });
         }
 
         error!("read_dir failed more than 3 times");
@@ -2153,13 +2088,15 @@ impl FuseFilesystem for Filesystem {
     async fn rename2(
         &self,
         req: Request,
-        parent: u64,
+        origin_parent: &OsStr,
+        origin_name: &OsStr,
+        parent: &OsStr,
         name: &OsStr,
-        new_parent: u64,
-        new_name: &OsStr,
         _flags: u32,
     ) -> Result<()> {
-        self.rename(req, parent, name, new_parent, new_name).await
+        self.rename(req, origin_parent, origin_name, parent, name)
+            .instrument(info_span!("rename2"))
+            .await
     }
 
     /*async fn lseek(&self, _req: Request, _inode: u64, _fh: u64, _offset: u64, _whence: u32) -> Result<ReplyLSeek> {
@@ -2169,10 +2106,10 @@ impl FuseFilesystem for Filesystem {
     async fn copy_file_range(
         &self,
         _req: Request,
-        _inode: u64,
+        _from_path: Option<&OsStr>,
         fh_in: u64,
         off_in: u64,
-        _inode_out: u64,
+        _to_path: Option<&OsStr>,
         fh_out: u64,
         off_out: u64,
         length: u64,
@@ -2197,7 +2134,10 @@ impl FuseFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.copy_file_range(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.copy_file_range(rpc_req))
+                .instrument(info_span!("copy_file_range"))
+                .await
+            {
                 Err(err) => {
                     warn!("copy_file_range rpc timeout {}", err);
 
@@ -2214,7 +2154,7 @@ impl FuseFilesystem for Filesystem {
                     if code_can_retry(err.code()) {
                         warn!("copy_file_range rpc has error {}", err);
 
-                        Timer::after(Duration::from_secs(1)).await;
+                        time::sleep(Duration::from_secs(1)).await;
 
                         continue;
                     }

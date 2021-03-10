@@ -3,11 +3,10 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse3::{FileAttr, FileType, Result};
+use fuse3::path::reply::FileAttr;
+use fuse3::{FileType, Result};
 
 use crate::BLOCK_SIZE;
-
-use super::inode::Inode;
 
 #[derive(Debug, Copy, Clone)]
 pub struct SetAttr {
@@ -21,10 +20,8 @@ pub struct SetAttr {
     pub flags: Option<u32>,
 }
 
-pub fn metadata_to_file_attr(inode: Inode, metadata: Metadata) -> Result<FileAttr> {
+pub fn metadata_to_file_attr(metadata: Metadata) -> Result<FileAttr> {
     Ok(FileAttr {
-        ino: inode,
-        generation: 0,
         size: metadata.len(),
         blocks: metadata.blocks(),
         kind: if metadata.is_dir() {

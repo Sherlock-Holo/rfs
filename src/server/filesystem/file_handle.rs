@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::SeekFrom;
 use std::os::raw::c_int;
 #[cfg(test)]
@@ -12,23 +13,20 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use async_notify::Notify;
-use async_std::fs::File as SysFile;
-use async_std::sync::{Mutex, RwLock};
-use fuse3::{Errno, Result};
 #[cfg(test)]
-use fuse3::{FileAttr, FileType};
+use fuse3::{path::reply::FileAttr, FileType};
+use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
-use futures_util::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::{FallocateFlags, FlockArg};
-use smol::Task;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::{Mutex, RwLock};
+use tokio::task;
+use tracing::{debug, error, instrument};
 
 #[cfg(test)]
 use crate::BLOCK_SIZE;
-
-#[cfg(test)]
-use super::inode::Inode;
 
 pub type LockTable = Arc<Mutex<BTreeMap<u64, Arc<Notify>>>>;
 
@@ -46,12 +44,11 @@ pub enum LockKind {
     Exclusive,
 }
 
+#[derive(Debug)]
 pub struct FileHandle {
     id: u64,
 
-    #[cfg(test)]
-    inode: Inode,
-    sys_file: SysFile,
+    sys_file: File,
 
     // avoid useless read/write syscall to improve performance
     kind: FileHandleKind,
@@ -63,16 +60,9 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    pub fn new(
-        id: u64,
-        #[cfg(test)] inode: Inode,
-        sys_file: SysFile,
-        kind: FileHandleKind,
-    ) -> Self {
+    pub fn new(id: u64, sys_file: File, kind: FileHandleKind) -> Self {
         Self {
             id,
-            #[cfg(test)]
-            inode,
             sys_file,
             kind,
             lock_table: None,
@@ -80,6 +70,7 @@ impl FileHandle {
         }
     }
 
+    #[instrument(skip(buf))]
     pub async fn read(&mut self, buf: &mut [u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::WriteOnly = self.kind {
             return Err(Errno::from(libc::EBADF));
@@ -98,6 +89,7 @@ impl FileHandle {
         Ok(n)
     }
 
+    #[instrument(skip(data))]
     pub async fn write(&mut self, data: &[u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::ReadOnly = self.kind {
             return Err(Errno::from(libc::EBADF));
@@ -121,8 +113,6 @@ impl FileHandle {
         let metadata = self.sys_file.metadata().await?;
 
         Ok(FileAttr {
-            ino: self.inode,
-            generation: 0,
             size: metadata.len(),
             blocks: metadata.blocks(),
             kind: FileType::RegularFile,
@@ -159,12 +149,13 @@ impl FileHandle {
         self.get_attr().await
     }*/
 
+    #[instrument]
     pub async fn set_lock(
         &mut self,
         unique: u64,
         share: bool,
         lock_table: LockTable,
-    ) -> Result<Task<Result<bool>>> {
+    ) -> Result<impl Future<Output = Result<bool>>> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         let flock_arg = if share {
@@ -189,54 +180,63 @@ impl FileHandle {
 
         debug!("save unique {} lock canceler", unique);
 
-        Ok(Task::spawn(async move {
-            let lock_success = loop {
-                let lock_job = Task::blocking(async move { fcntl::flock(raw_fd, flock_arg) });
+        Ok(async move {
+            tokio::spawn(async move {
+                let lock_success = loop {
+                    let lock_job = async move {
+                        task::spawn_blocking(move || fcntl::flock(raw_fd, flock_arg))
+                            .await
+                            .unwrap()
+                    };
 
-                let result = futures_util::select! {
-                    _ = lock_canceler.notified().fuse() => break false,
-                    result = lock_job.fuse() => result,
-                };
+                    let result = futures_util::select! {
+                        _ = lock_canceler.notified().fuse() => break false,
+                        result = lock_job.fuse() => result,
+                    };
 
-                if let Err(err) = result {
-                    error!("nix lock failed, error is {}", err);
+                    if let Err(err) = result {
+                        error!("nix lock failed, error is {}", err);
 
-                    match err.clone().as_errno() {
-                        Some(errno) => {
-                            if errno as c_int == libc::EINTR {
-                                debug!("nix lock is interrupted, retry it");
+                        match err.clone().as_errno() {
+                            Some(errno) => {
+                                if errno as c_int == libc::EINTR {
+                                    debug!("nix lock is interrupted, retry it");
 
-                                continue;
-                            } else {
-                                return Err(Errno::from(errno as c_int));
+                                    continue;
+                                } else {
+                                    return Err(Errno::from(errno as c_int));
+                                }
                             }
+
+                            None => return Err(Errno::from(err)),
                         }
-
-                        None => return Err(Errno::from(err)),
+                    } else {
+                        break true;
                     }
-                } else {
-                    break true;
-                }
-            };
-
-            if lock_success {
-                let mut lock_kind = lock_kind.write().await;
-
-                *lock_kind = if share {
-                    LockKind::Share
-                } else {
-                    LockKind::Exclusive
                 };
 
-                debug!("unique {} set lock success", unique);
-            }
+                if lock_success {
+                    let mut lock_kind = lock_kind.write().await;
 
-            lock_table.lock().await.remove(&unique);
+                    *lock_kind = if share {
+                        LockKind::Share
+                    } else {
+                        LockKind::Exclusive
+                    };
 
-            Ok(lock_success)
-        }))
+                    debug!("unique {} set lock success", unique);
+                }
+
+                lock_table.lock().await.remove(&unique);
+
+                Ok(lock_success)
+            })
+            .await
+            .unwrap()
+        })
     }
 
+    #[instrument]
     pub async fn try_set_lock(&self, share: bool) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
@@ -271,7 +271,8 @@ impl FileHandle {
         Ok(())
     }*/
 
-    pub async fn try_release_lock(&self) -> Result<()> {
+    #[instrument]
+    pub async fn release_lock(&self) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         fcntl::flock(raw_fd, FlockArg::UnlockNonblock)?;
@@ -284,14 +285,16 @@ impl FileHandle {
     }
 
     // flush should release all lock
+    #[instrument]
     pub async fn flush(&mut self) -> Result<()> {
         self.sys_file.flush().await?;
 
-        self.try_release_lock().await?;
+        self.release_lock().await?;
 
         Ok(())
     }
 
+    #[instrument]
     pub async fn fsync(&mut self, only_data_sync: bool) -> Result<()> {
         if only_data_sync {
             self.sys_file.sync_data().await?;
@@ -302,6 +305,7 @@ impl FileHandle {
         Ok(())
     }
 
+    #[instrument]
     pub async fn fallocate(&mut self, offset: u64, size: u64, mode: u32) -> Result<()> {
         let fd = self.sys_file.as_raw_fd();
 
@@ -333,14 +337,16 @@ impl FileHandle {
             fallocate_flags |= FallocateFlags::FALLOC_FL_UNSHARE_RANGE;
         }
 
-        Task::blocking(async move {
+        task::spawn_blocking(move || {
             fcntl::fallocate(fd, fallocate_flags, offset as _, size as _)?;
 
             Ok(())
         })
         .await
+        .unwrap()
     }
 
+    #[instrument]
     pub async fn copy_to(
         &self,
         offset_in: u64,
@@ -356,7 +362,7 @@ impl FileHandle {
             fd_in
         };
 
-        let size = Task::blocking(async move {
+        let size = task::spawn_blocking(move || {
             let mut offset_in = offset_in as i64;
             let mut offset_out = offset_out as i64;
 
@@ -368,7 +374,8 @@ impl FileHandle {
                 size,
             )
         })
-        .await?;
+        .await
+        .unwrap()?;
 
         Ok(size)
     }
@@ -393,10 +400,11 @@ impl AsRawFd for FileHandle {
     }
 }
 
-impl Drop for FileHandle {
+// drop not grantee will flush
+/*impl Drop for FileHandle {
     fn drop(&mut self) {
         smol::block_on(async {
             let _ = self.flush().await;
         })
     }
-}
+}*/

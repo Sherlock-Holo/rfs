@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use rfs_client::run;
 
-fn main() -> Result<()> {
-    run()
+#[tokio::main]
+async fn main() -> Result<()> {
+    run().await
 }
