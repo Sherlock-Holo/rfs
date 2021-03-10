@@ -8,7 +8,6 @@ use std::time::Duration;
 use fuse3::Errno;
 use fuse3::FileType;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use log::{debug, error, info, warn};
 use semver_parser::version;
 use semver_parser::version::Version;
 use snap::read::FrameDecoder;
@@ -20,6 +19,7 @@ use tonic::transport::Server as TonicServer;
 use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::Response;
 use tonic::{Code, Request, Status};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
@@ -98,11 +98,7 @@ impl Server {
     }
 
     async fn get_user(&self, header: Option<Header>) -> Result<Arc<User>> {
-        let uuid: Uuid = if let Some(mut header) = header {
-            if header.version == "0.2" {
-                header.version = "0.2.0".to_string();
-            }
-
+        let uuid: Uuid = if let Some(header) = header {
             let version = if let Ok(version) = version::parse(&header.version) {
                 version
             } else {
@@ -187,6 +183,7 @@ impl Server {
 
 #[async_trait::async_trait]
 impl Rfs for Server {
+    #[instrument(skip(self))]
     async fn read_dir(
         &self,
         request: Request<ReadDirRequest>,
@@ -227,6 +224,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn lookup(&self, request: Request<LookupRequest>) -> Result<Response<LookupResponse>> {
         let request = request.into_inner();
 
@@ -245,6 +243,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn mkdir(&self, request: Request<MkdirRequest>) -> Result<Response<MkdirResponse>> {
         let request = request.into_inner();
 
@@ -268,6 +267,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn create_file(
         &self,
         request: Request<CreateFileRequest>,
@@ -308,6 +308,7 @@ impl Rfs for Server {
         }))
     }
 
+    #[instrument(skip(self))]
     async fn unlink(&self, request: Request<UnlinkRequest>) -> Result<Response<UnlinkResponse>> {
         let request = request.into_inner();
 
@@ -326,6 +327,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn rm_dir(&self, request: Request<RmDirRequest>) -> Result<Response<RmDirResponse>> {
         let request = request.into_inner();
 
@@ -344,6 +346,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn rename(&self, request: Request<RenameRequest>) -> Result<Response<RenameResponse>> {
         let request = request.into_inner();
 
@@ -367,6 +370,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn open_file(
         &self,
         request: Request<OpenFileRequest>,
@@ -398,6 +402,7 @@ impl Rfs for Server {
         }))
     }
 
+    #[instrument(skip(self))]
     async fn allocate(
         &self,
         request: Request<AllocateRequest>,
@@ -423,6 +428,7 @@ impl Rfs for Server {
         Ok(Response::new(AllocateResponse { error: result }))
     }
 
+    #[instrument(skip(self))]
     async fn read_file(
         &self,
         request: Request<ReadFileRequest>,
@@ -480,6 +486,7 @@ impl Rfs for Server {
         }))
     }
 
+    #[instrument(skip(self, request))]
     async fn write_file(
         &self,
         request: Request<WriteFileRequest>,
@@ -533,6 +540,7 @@ impl Rfs for Server {
         }))
     }
 
+    #[instrument(skip(self))]
     async fn close_file(
         &self,
         request: Request<CloseFileRequest>,
@@ -550,6 +558,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn sync_file(
         &self,
         request: Request<SyncFileRequest>,
@@ -567,6 +576,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn flush(&self, request: Request<FlushRequest>) -> Result<Response<FlushResponse>> {
         let request = request.into_inner();
 
@@ -581,6 +591,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn set_lock(
         &self,
         request: Request<SetLockRequest>,
@@ -635,6 +646,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn release_lock(
         &self,
         request: Request<ReleaseLockRequest>,
@@ -652,6 +664,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn interrupt(
         &self,
         request: Request<InterruptRequest>,
@@ -669,6 +682,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn get_lock(
         &self,
         request: Request<GetLockRequest>,
@@ -696,6 +710,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn stat_fs(&self, request: Request<StatFsRequest>) -> Result<Response<StatFsResponse>> {
         let request = request.into_inner();
 
@@ -721,6 +736,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn get_attr(
         &self,
         request: Request<GetAttrRequest>,
@@ -742,6 +758,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn set_attr(
         &self,
         request: Request<SetAttrRequest>,
@@ -771,21 +788,15 @@ impl Rfs for Server {
             } else {
                 None
             },
-            atime: if let Some(atime) = attr.access_time {
-                Some(convert_proto_time_to_system_time(Some(atime)))
-            } else {
-                None
-            },
-            mtime: if let Some(mtime) = attr.modify_time {
-                Some(convert_proto_time_to_system_time(Some(mtime)))
-            } else {
-                None
-            },
-            ctime: if let Some(ctime) = attr.change_time {
-                Some(convert_proto_time_to_system_time(Some(ctime)))
-            } else {
-                None
-            },
+            atime: attr
+                .access_time
+                .map(|atime| convert_proto_time_to_system_time(Some(atime))),
+            mtime: attr
+                .modify_time
+                .map(|mtime| convert_proto_time_to_system_time(Some(mtime))),
+            ctime: attr
+                .change_time
+                .map(|ctime| convert_proto_time_to_system_time(Some(ctime))),
         };
 
         match self.filesystem.set_attr(&request.path, new_attr).await {
@@ -801,6 +812,7 @@ impl Rfs for Server {
         }
     }
 
+    #[instrument(skip(self))]
     async fn copy_file_range(
         &self,
         request: Request<CopyFileRangeRequest>,
@@ -836,11 +848,9 @@ impl Rfs for Server {
         let user = self.get_user(request.header).await?;
 
         user.update_last_alive_time().await;
+        let user_id = user.get_id().await.to_hyphenated().to_string();
 
-        debug!(
-            "receive ping message from {}",
-            user.get_id().await.to_hyphenated().to_string()
-        );
+        debug!("receive ping message from {}", user_id);
 
         Ok(Response::new(PingResponse {}))
     }

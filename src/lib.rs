@@ -1,7 +1,8 @@
 #![feature(type_alias_impl_trait)]
 #![feature(generic_associated_types)]
 
-use log::LevelFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
 pub use client::Filesystem;
 pub use helper::Apply;
@@ -29,20 +30,26 @@ mod server;
 
 pub(crate) const BLOCK_SIZE: u32 = 4096;
 
-pub fn log_init(debug: bool) {
-    let mut builder = pretty_env_logger::formatted_timed_builder();
+pub fn log_init(server_name: String, debug: bool) {
+    let (tracer, _uninstall) = opentelemetry_jaeger::new_pipeline()
+        .with_service_name(server_name)
+        .install()
+        .unwrap();
 
-    builder
-        .filter(Some("h2"), LevelFilter::Info)
-        .filter(Some("tower"), LevelFilter::Info)
-        .filter(Some("hyper"), LevelFilter::Info)
-        .filter(Some("rustls"), LevelFilter::Info);
+    let stdout_subscriber = tracing_subscriber::fmt::layer().json().with_target(false);
 
-    if debug {
-        builder.filter_level(LevelFilter::Debug);
+    let trace = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    let level_filter = if debug {
+        tracing_subscriber::filter::LevelFilter::DEBUG
     } else {
-        builder.filter_level(LevelFilter::Info);
-    }
+        tracing_subscriber::filter::LevelFilter::INFO
+    };
 
-    builder.init();
+    let subscriber = Registry::default()
+        .with(level_filter)
+        .with(trace)
+        .with(stdout_subscriber);
+
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 }

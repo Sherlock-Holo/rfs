@@ -14,7 +14,6 @@ use fuse3::path::prelude::*;
 use fuse3::{Errno, MountOptions, Result};
 use futures_util::stream::{self, Empty, Stream};
 use futures_util::StreamExt;
-use log::{debug, error, info, warn};
 use nix::mount;
 use nix::mount::MntFlags;
 use snap::read::FrameDecoder;
@@ -27,6 +26,7 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Uri};
 use tonic::{Code, Request as TonicRequest};
 use tower::layer::util::{Identity, Stack};
 use tower::{Service, ServiceBuilder};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 use crate::helper::proto_attr_into_fuse_attr;
@@ -200,7 +200,11 @@ impl Filesystem {
 
                 let mut client = (*client.load()).clone();
 
-                if timeout(rpc_timeout, client.ping(ping_req)).await.is_ok() {
+                if timeout(rpc_timeout, client.ping(ping_req))
+                    .instrument(info_span!("send ping"))
+                    .await
+                    .is_ok()
+                {
                     rpc_timeout = INITIAL_TIMEOUT;
 
                     failed = false;
@@ -238,7 +242,11 @@ impl PathFilesystem for Filesystem {
                 support_compress: *compress_guard,
             });
 
-            return match client.register(req).await {
+            return match client
+                .register(req)
+                .instrument(info_span!("register"))
+                .await
+            {
                 Err(err) => {
                     if code_can_retry(err.code()) {
                         warn!("register failed {}", err);
@@ -311,7 +319,10 @@ impl PathFilesystem for Filesystem {
 
         let mut client = (*self.client.load()).clone();
 
-        match timeout(Duration::from_secs(10), client.logout(req)).await {
+        match timeout(Duration::from_secs(10), client.logout(req))
+            .instrument(info_span!("logout"))
+            .await
+        {
             Err(err) => {
                 error!("logout timeout {}", err);
 
@@ -351,7 +362,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.lookup(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.lookup(rpc_req))
+                .instrument(info_span!("lookup"))
+                .await
+            {
                 Err(err) => {
                     warn!("lookup rpc timeout {}", err);
 
@@ -435,7 +449,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.get_attr(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.get_attr(rpc_req))
+                .instrument(info_span!("get_attr"))
+                .await
+            {
                 Err(err) => {
                     warn!("getattr rpc timeout {}", err);
 
@@ -535,7 +552,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.set_attr(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.set_attr(rpc_req))
+                .instrument(info_span!("set_attr"))
+                .await
+            {
                 Err(err) => {
                     warn!("setattr rpc timeout {}", err);
 
@@ -623,7 +643,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.mkdir(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.mkdir(rpc_req))
+                .instrument(info_span!("mkdir"))
+                .await
+            {
                 Err(err) => {
                     warn!("mkdir rpc timeout {}", err);
 
@@ -698,7 +721,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.unlink(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.unlink(rpc_req))
+                .instrument(info_span!("unlink"))
+                .await
+            {
                 Err(err) => {
                     warn!("unlink rpc timeout {}", err);
 
@@ -763,7 +789,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.rm_dir(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.rm_dir(rpc_req))
+                .instrument(info_span!("rmdir"))
+                .await
+            {
                 Err(err) => {
                     warn!("rmdir rpc timeout {}", err);
 
@@ -841,7 +870,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.rename(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.rename(rpc_req))
+                .instrument(info_span!("rename"))
+                .await
+            {
                 Err(err) => {
                     warn!("rename rpc timeout {}", err);
 
@@ -908,7 +940,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.open_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.open_file(rpc_req))
+                .instrument(info_span!("open"))
+                .await
+            {
                 Err(err) => {
                     warn!("open file rpc timeout {}", err);
 
@@ -986,7 +1021,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.read_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.read_file(rpc_req))
+                .instrument(info_span!("read"))
+                .await
+            {
                 Err(err) => {
                     warn!("read_file rpc timeout {}", err);
 
@@ -1106,6 +1144,7 @@ impl PathFilesystem for Filesystem {
                 (data, false)
             }
         })
+        .instrument(info_span!("compress_write_data"))
         .await
         .unwrap();
 
@@ -1122,7 +1161,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.write_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.write_file(rpc_req))
+                .instrument(info_span!("write"))
+                .await
+            {
                 Err(err) => {
                     warn!("write file rpc timeout {}", err);
 
@@ -1187,7 +1229,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.stat_fs(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.stat_fs(rpc_req))
+                .instrument(info_span!("statsfs"))
+                .await
+            {
                 Err(err) => {
                     warn!("statfs rpc timeout {}", err);
 
@@ -1270,7 +1315,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.close_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.close_file(rpc_req))
+                .instrument(info_span!("release"))
+                .await
+            {
                 Err(err) => {
                     warn!("close file rpc timeout {}", err);
 
@@ -1335,7 +1383,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.sync_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.sync_file(rpc_req))
+                .instrument(info_span!("fsync"))
+                .await
+            {
                 Err(err) => {
                     warn!("sync file rpc timeout {}", err);
 
@@ -1400,7 +1451,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.flush(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.flush(rpc_req))
+                .instrument(info_span!("flush"))
+                .await
+            {
                 Err(err) => {
                     warn!("flush rpc timeout {}", err);
 
@@ -1469,7 +1523,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.get_lock(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.get_lock(rpc_req))
+                .instrument(info_span!("getlk"))
+                .await
+            {
                 Err(err) => {
                     warn!("getlk rpc timeout {}", err);
 
@@ -1567,7 +1624,10 @@ impl PathFilesystem for Filesystem {
 
                 let mut client = (*client.load()).clone();
 
-                let result = match timeout(rpc_timeout, client.release_lock(rpc_req)).await {
+                let result = match timeout(rpc_timeout, client.release_lock(rpc_req))
+                    .instrument(info_span!("setlk"))
+                    .await
+                {
                     Err(err) => {
                         warn!("release_lock rpc timeout {}", err);
 
@@ -1706,7 +1766,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.create_file(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.create_file(rpc_req))
+                .instrument(info_span!("create"))
+                .await
+            {
                 Err(err) => {
                     warn!("create file rpc timeout {}", err);
 
@@ -1783,7 +1846,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.interrupt(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.interrupt(rpc_req))
+                .instrument(info_span!("interrupt"))
+                .await
+            {
                 Err(err) => {
                     warn!("interrupt rpc timeout {}", err);
 
@@ -1853,7 +1919,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.allocate(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.allocate(rpc_req))
+                .instrument(info_span!("fallocate"))
+                .await
+            {
                 Err(err) => {
                     warn!("allocate rpc timeout {}", err);
 
@@ -1928,7 +1997,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.read_dir(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.read_dir(rpc_req))
+                .instrument(info_span!("readdirplus"))
+                .await
+            {
                 Err(err) => {
                     warn!("readdir rpc timeout {}", err);
 
@@ -2023,6 +2095,7 @@ impl PathFilesystem for Filesystem {
         _flags: u32,
     ) -> Result<()> {
         self.rename(req, origin_parent, origin_name, parent, name)
+            .instrument(info_span!("rename2"))
             .await
     }
 
@@ -2061,7 +2134,10 @@ impl PathFilesystem for Filesystem {
 
             let mut client = (*client.load()).clone();
 
-            let result = match timeout(rpc_timeout, client.copy_file_range(rpc_req)).await {
+            let result = match timeout(rpc_timeout, client.copy_file_range(rpc_req))
+                .instrument(info_span!("copy_file_range"))
+                .await
+            {
                 Err(err) => {
                     warn!("copy_file_range rpc timeout {}", err);
 

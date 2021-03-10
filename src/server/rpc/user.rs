@@ -6,14 +6,15 @@ use std::time::{Duration, Instant};
 use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
 use futures_util::select;
-use log::debug;
 use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 use super::super::filesystem::FileHandle;
 use super::super::filesystem::LockKind;
 use super::super::filesystem::LockTable;
 
+#[derive(Debug)]
 struct InnerUser {
     uuid: Uuid,
     file_handle_map: BTreeMap<u64, Arc<Mutex<FileHandle>>>,
@@ -21,6 +22,7 @@ struct InnerUser {
     lock_table: LockTable,
 }
 
+#[derive(Debug)]
 pub struct User {
     inner: RwLock<InnerUser>,
     enable_compress: bool,
@@ -39,7 +41,6 @@ impl User {
         }
     }
 
-    //#[inline]
     pub async fn add_file_handle(&self, file_handle: FileHandle) {
         self.inner
             .write()
@@ -48,6 +49,7 @@ impl User {
             .insert(file_handle.get_id(), Arc::new(Mutex::new(file_handle)));
     }
 
+    #[instrument]
     pub async fn read_file(&self, fh_id: u64, offset: i64, size: u64) -> Result<Vec<u8>> {
         let file_handle = self
             .inner
@@ -67,6 +69,7 @@ impl User {
         Ok(buf)
     }
 
+    #[instrument(skip(data))]
     pub async fn write_file(&self, fh_id: u64, offset: i64, data: &[u8]) -> Result<usize> {
         let file_handle = self
             .inner
@@ -82,6 +85,7 @@ impl User {
         Ok(written)
     }
 
+    #[instrument]
     pub async fn close_file(&self, fh_id: u64) -> Result<()> {
         let mut guard = self.inner.write().await;
 
@@ -95,6 +99,7 @@ impl User {
         }
     }
 
+    #[instrument]
     pub async fn sync_file(&self, fh_id: u64) -> Result<()> {
         let file_handle = self
             .inner
@@ -110,6 +115,7 @@ impl User {
         Ok(())
     }
 
+    #[instrument]
     pub async fn flush(&self, fh_id: u64) -> Result<()> {
         let file_handle = self
             .inner
@@ -125,21 +131,7 @@ impl User {
         Ok(())
     }
 
-    /*pub async fn set_file_attr(&self, fh_id: u64, set_attr: SetAttr) -> Result<FileAttr> {
-        let file_handle = self
-            .inner
-            .read()
-            .await
-            .file_handle_map
-            .get(&fh_id)
-            .ok_or(Errno::from(libc::EBADF))?
-            .clone();
-
-        let attr = file_handle.lock().await.set_attr(set_attr).await?;
-
-        Ok(attr)
-    }*/
-
+    #[instrument]
     pub async fn set_lock(
         self: &Arc<Self>,
         fh_id: u64,
@@ -167,6 +159,7 @@ impl User {
         Ok(lock_job)
     }
 
+    #[instrument]
     pub async fn try_set_lock(&self, fh_id: u64, share: bool) -> Result<()> {
         let file_handle = self
             .inner
@@ -185,6 +178,7 @@ impl User {
         file_handle.try_set_lock(share).await
     }
 
+    #[instrument]
     pub async fn release_lock(&self, fh_id: u64) -> Result<()> {
         let file_handle = self
             .inner
@@ -195,12 +189,12 @@ impl User {
             .ok_or_else(|| Errno::from(libc::EBADF))?
             .clone();
 
-        file_handle.lock().await.try_release_lock().await?;
+        file_handle.lock().await.release_lock().await?;
 
         Ok(())
     }
 
-    //#[inline]
+    #[instrument]
     pub async fn interrupt_lock(&self, unique: u64) -> Result<()> {
         debug!("interrupt unique {} lock", unique);
 
@@ -217,7 +211,7 @@ impl User {
         Ok(())
     }
 
-    //#[inline]
+    #[instrument]
     pub async fn get_lock_kind(&self, fh_id: u64) -> Result<LockKind> {
         let file_handle = self
             .inner
@@ -233,6 +227,7 @@ impl User {
         Ok(lock_kind)
     }
 
+    #[instrument]
     pub async fn fallocate(&self, fh_id: u64, offset: u64, size: u64, mode: u32) -> Result<()> {
         let file_handle = self
             .inner
@@ -252,6 +247,7 @@ impl User {
         Ok(())
     }
 
+    #[instrument]
     pub async fn copy_file_range(
         &self,
         fh_in: u64,
@@ -300,7 +296,6 @@ impl User {
         self.inner.read().await.uuid
     }
 
-    #[inline]
     pub fn support_compress(&self) -> bool {
         self.enable_compress
     }

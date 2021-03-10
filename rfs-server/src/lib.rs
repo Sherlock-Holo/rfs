@@ -5,12 +5,12 @@ use async_signals::Signals;
 use futures_util::future::FutureExt;
 use futures_util::select;
 use futures_util::stream::StreamExt;
-use log::{debug, info};
 use nix::libc;
 use serde::Deserialize;
 use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tokio::fs;
+use tracing::info;
 
 use rfs::log_init;
 use rfs::Server;
@@ -46,7 +46,7 @@ pub async fn run() -> Result<()> {
         false
     };
 
-    log_init(debug);
+    log_init("rfs-server".to_owned(), debug);
 
     info!("starting rfs server");
 
@@ -71,7 +71,7 @@ pub async fn run() -> Result<()> {
         result = serve.fuse() => result,
 
         _ = stop_signal.next().fuse() => {
-            debug!("receive stop signal");
+            info!("receive stop signal");
 
             Ok(())
         }

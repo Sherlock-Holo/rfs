@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use log::info;
 use nix::unistd;
 use nix::unistd::ForkResult;
 use serde::Deserialize;
@@ -14,6 +13,7 @@ use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tokio::fs;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
+use tracing::info;
 
 use rfs::{log_init, Filesystem};
 
@@ -147,7 +147,7 @@ async fn inner_run(cfg: Config) -> Result<()> {
         false
     };
 
-    log_init(debug);
+    log_init("rfs-client".to_owned(), debug);
 
     let key = fs::read(&cfg.key_path).await.context("read key failed")?;
 

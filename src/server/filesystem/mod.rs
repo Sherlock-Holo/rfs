@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fuse3::path::reply::{FileAttr, ReplyStatFs};
 use fuse3::{Errno, Result};
 use futures_util::{stream, StreamExt, TryStreamExt};
-use log::{debug, error, info};
 use nix::dir::Dir as NixDir;
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
@@ -18,6 +17,7 @@ use nix::unistd;
 use tokio::fs;
 use tokio::fs::{DirBuilder, OpenOptions};
 use tokio_stream::wrappers::ReadDirStream;
+use tracing::{debug, error, info, instrument};
 
 pub use attr::SetAttr;
 pub use file_handle::FileHandle;
@@ -89,7 +89,7 @@ impl Filesystem {
             })
             .await;*/
 
-        Self::chroot(&root).await?;
+        Self::chroot(root.as_ref()).await?;
 
         Ok(Self {
             file_handle_id_gen: AtomicU64::new(1),
@@ -97,10 +97,11 @@ impl Filesystem {
         })
     }
 
-    async fn chroot<P: AsRef<Path>>(root: P) -> Result<()> {
-        unistd::chroot(root.as_ref().as_os_str())?;
+    #[instrument]
+    async fn chroot(root: &Path) -> Result<()> {
+        unistd::chroot(root.as_os_str())?;
 
-        info!("chroot {:?} success", root.as_ref());
+        info!("chroot {:?} success", root);
 
         env::set_current_dir("/")?;
 
@@ -111,6 +112,7 @@ impl Filesystem {
         self.file_handle_id_gen.fetch_add(1, Ordering::Relaxed)
     }
 
+    #[instrument(skip(self))]
     pub async fn lookup(&self, parent: String, name: &str) -> Result<FileAttr> {
         debug!("lookup name {} in parent {}", name, parent);
 
@@ -122,12 +124,14 @@ impl Filesystem {
     }
 
     #[inline]
+    #[instrument(skip(self))]
     pub async fn get_attr(&self, path: &str) -> Result<FileAttr> {
         let path: PathBuf = path.clean();
 
         metadata_to_file_attr(fs::metadata(path).await?)
     }
 
+    #[instrument(skip(self))]
     pub async fn set_attr(&self, path: &str, set_attr: SetAttr) -> Result<FileAttr> {
         let path: PathBuf = path.clean();
 
@@ -169,6 +173,7 @@ impl Filesystem {
         metadata_to_file_attr(fs::metadata(path).await?)
     }
 
+    #[instrument(skip(self))]
     pub async fn create_dir(&self, parent: String, name: &str, mode: u32) -> Result<FileAttr> {
         debug!("create dir name {:?} in parent {:?}", name, parent);
 
@@ -181,6 +186,7 @@ impl Filesystem {
         metadata_to_file_attr(fs::metadata(path).await?)
     }
 
+    #[instrument(skip(self))]
     pub async fn remove_entry(&self, parent: String, name: &str, remove_dir: bool) -> Result<()> {
         debug!(
             "remove name {:?} from parent {:?}, remove dir {}",
@@ -198,6 +204,7 @@ impl Filesystem {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn rename(
         &self,
         old_parent: String,
@@ -220,6 +227,7 @@ impl Filesystem {
         Ok(fs::rename(old_path, new_path).await?)
     }
 
+    #[instrument(skip(self))]
     pub async fn open(&self, path: &str, flags: i32) -> Result<FileHandle> {
         let path: PathBuf = path.clean();
 
@@ -263,6 +271,7 @@ impl Filesystem {
         Ok(FileHandle::new(file_handle_id, sys_file, fh_kind))
     }
 
+    #[instrument(skip(self))]
     pub async fn read_dir(
         &self,
         path: &str,
@@ -296,6 +305,7 @@ impl Filesystem {
         .await?)
     }
 
+    #[instrument(skip(self))]
     pub async fn create_file(
         &self,
         parent: String,
@@ -328,6 +338,7 @@ impl Filesystem {
         ))
     }
 
+    #[instrument(skip(self))]
     pub async fn statfs(&self) -> Result<ReplyStatFs> {
         let statfs = statfs::fstatfs(&self.root_dir_fd)?;
 
@@ -1021,7 +1032,7 @@ mod tests {
         let lock_job = file_handle.set_lock(1, true, lock_queue).await.unwrap();
 
         assert!(lock_job.await.unwrap());
-        assert_eq!(file_handle.try_release_lock().await, Ok(()));
+        assert_eq!(file_handle.release_lock().await, Ok(()));
 
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
@@ -1044,7 +1055,7 @@ mod tests {
         let lock_job = file_handle.set_lock(1, false, lock_queue).await.unwrap();
 
         assert!(lock_job.await.unwrap());
-        assert_eq!(file_handle.try_release_lock().await, Ok(()));
+        assert_eq!(file_handle.release_lock().await, Ok(()));
 
         assert_eq!(file_handle2.try_set_lock(false).await, Ok(()));
     }
@@ -1110,7 +1121,7 @@ mod tests {
         task::spawn(async move {
             time::sleep(Duration::from_secs(1)).await;
 
-            file_handle.try_release_lock().await.unwrap();
+            file_handle.release_lock().await.unwrap();
         });
 
         let lock_job = file_handle2
@@ -1152,7 +1163,7 @@ mod tests {
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::Exclusive);
 
-        file_handle.try_release_lock().await.unwrap();
+        file_handle.release_lock().await.unwrap();
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
 
@@ -1167,7 +1178,7 @@ mod tests {
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::Share);
 
-        file_handle.try_release_lock().await.unwrap();
+        file_handle.release_lock().await.unwrap();
 
         assert_eq!(file_handle.get_lock_kind().await, LockKind::NoLock);
     }

@@ -17,13 +17,13 @@ use async_notify::Notify;
 use fuse3::{path::reply::FileAttr, FileType};
 use fuse3::{Errno, Result};
 use futures_util::future::FutureExt;
-use log::{debug, error};
 use nix::fcntl;
 use nix::fcntl::{FallocateFlags, FlockArg};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task;
+use tracing::{debug, error, instrument};
 
 #[cfg(test)]
 use crate::BLOCK_SIZE;
@@ -44,6 +44,7 @@ pub enum LockKind {
     Exclusive,
 }
 
+#[derive(Debug)]
 pub struct FileHandle {
     id: u64,
 
@@ -69,6 +70,7 @@ impl FileHandle {
         }
     }
 
+    #[instrument(skip(buf))]
     pub async fn read(&mut self, buf: &mut [u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::WriteOnly = self.kind {
             return Err(Errno::from(libc::EBADF));
@@ -87,6 +89,7 @@ impl FileHandle {
         Ok(n)
     }
 
+    #[instrument(skip(data))]
     pub async fn write(&mut self, data: &[u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::ReadOnly = self.kind {
             return Err(Errno::from(libc::EBADF));
@@ -146,6 +149,7 @@ impl FileHandle {
         self.get_attr().await
     }*/
 
+    #[instrument]
     pub async fn set_lock(
         &mut self,
         unique: u64,
@@ -232,6 +236,7 @@ impl FileHandle {
         })
     }
 
+    #[instrument]
     pub async fn try_set_lock(&self, share: bool) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
@@ -266,7 +271,8 @@ impl FileHandle {
         Ok(())
     }*/
 
-    pub async fn try_release_lock(&self) -> Result<()> {
+    #[instrument]
+    pub async fn release_lock(&self) -> Result<()> {
         let raw_fd = self.sys_file.as_raw_fd();
 
         fcntl::flock(raw_fd, FlockArg::UnlockNonblock)?;
@@ -279,14 +285,16 @@ impl FileHandle {
     }
 
     // flush should release all lock
+    #[instrument]
     pub async fn flush(&mut self) -> Result<()> {
         self.sys_file.flush().await?;
 
-        self.try_release_lock().await?;
+        self.release_lock().await?;
 
         Ok(())
     }
 
+    #[instrument]
     pub async fn fsync(&mut self, only_data_sync: bool) -> Result<()> {
         if only_data_sync {
             self.sys_file.sync_data().await?;
@@ -297,6 +305,7 @@ impl FileHandle {
         Ok(())
     }
 
+    #[instrument]
     pub async fn fallocate(&mut self, offset: u64, size: u64, mode: u32) -> Result<()> {
         let fd = self.sys_file.as_raw_fd();
 
@@ -337,6 +346,7 @@ impl FileHandle {
         .unwrap()
     }
 
+    #[instrument]
     pub async fn copy_to(
         &self,
         offset_in: u64,
