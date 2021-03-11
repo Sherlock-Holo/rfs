@@ -71,7 +71,7 @@ impl FileHandle {
     }
 
     #[instrument(skip(buf))]
-    pub async fn read(&mut self, buf: &mut [u8], offset: i64) -> Result<usize> {
+    pub async fn read(&mut self, mut buf: &mut [u8], offset: i64) -> Result<usize> {
         if let FileHandleKind::WriteOnly = self.kind {
             return Err(Errno::from(libc::EBADF));
         }
@@ -84,9 +84,19 @@ impl FileHandle {
 
         self.sys_file.seek(seek_from).await?;
 
-        let n = self.sys_file.read(buf).await?;
+        let mut read = 0;
 
-        Ok(n)
+        while buf.is_empty() {
+            let n = self.sys_file.read(buf).await?;
+            if n == 0 {
+                break;
+            }
+
+            read += n;
+            buf = &mut buf[n..];
+        }
+
+        Ok(read)
     }
 
     #[instrument(skip(data))]

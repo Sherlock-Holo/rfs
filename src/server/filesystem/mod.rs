@@ -358,11 +358,14 @@ impl Filesystem {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::time::Duration;
 
+    use bytes::{BufMut, BytesMut};
     use fuse3::{Errno, FileType};
+    use tokio::io::AsyncWriteExt;
     use tokio::sync::Mutex;
     use tokio::task;
     use tokio::time::timeout;
@@ -1326,6 +1329,64 @@ mod tests {
         assert_eq!(
             filesystem.remove_entry("/".to_string(), "test", true).await,
             Err(Errno::from(libc::ENOTEMPTY))
+        );
+    }
+
+    #[tokio::test]
+    async fn read_large_file() {
+        crate::log_init("test".to_owned(), true);
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let test_file_path = tmp_dir
+            .path()
+            .to_path_buf()
+            .apply(|path| path.push("test-file"));
+
+        let buffer = BytesMut::with_capacity(4 * 20 * 1024 * 1024);
+        let mut writer = buffer.writer();
+
+        for _ in 0..1024 * 1024 * 20 {
+            writer.write_all(b"test").unwrap();
+        }
+
+        let buffer = writer.into_inner();
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&test_file_path)
+            .await
+            .unwrap();
+        file.write_all(&buffer).await.unwrap();
+        file.flush().await.unwrap();
+
+        debug!("write data into prepare file");
+
+        let filesystem = Filesystem::new(tmp_dir.path()).await.unwrap();
+
+        let mut file_handle = filesystem.open("test-file", libc::O_RDONLY).await.unwrap();
+
+        let read_data = BytesMut::with_capacity(buffer.len());
+        let mut read_data = read_data.writer();
+
+        let mut read_buf = vec![0; 1024 * 1024 * 10];
+        let mut read = 0;
+
+        while read < buffer.len() {
+            let n = file_handle.read(&mut read_buf, read as i64).await.unwrap();
+            if n == 0 {
+                panic!("unexpected EOF");
+            }
+
+            read += n;
+
+            read_data.write_all(&read_buf[..n]).unwrap();
+        }
+
+        assert_eq!(
+            String::from_utf8_lossy(buffer.as_ref()),
+            String::from_utf8_lossy(read_data.into_inner().as_ref())
         );
     }
 }

@@ -36,7 +36,7 @@ pub fn log_init(server_name: String, debug: bool) {
         .install()
         .unwrap();
 
-    let stdout_subscriber = tracing_subscriber::fmt::layer().json().with_target(false);
+    let stdout_subscriber = tracing_subscriber::fmt::layer().json();
 
     let trace = tracing_opentelemetry::layer().with_tracer(tracer);
 
