@@ -86,7 +86,7 @@ impl FileHandle {
 
         let mut read = 0;
 
-        while buf.is_empty() {
+        while !buf.is_empty() {
             let n = self.sys_file.read(buf).await?;
             if n == 0 {
                 break;
