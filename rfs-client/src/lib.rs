@@ -8,14 +8,13 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use nix::unistd;
 use nix::unistd::ForkResult;
+use rfs::{log_init, Filesystem};
 use serde::Deserialize;
 use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tokio::fs;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
 use tracing::info;
-
-use rfs::{log_init, Filesystem};
 
 #[derive(Debug, Deserialize)]
 struct Config {

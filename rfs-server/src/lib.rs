@@ -6,14 +6,13 @@ use futures_util::future::FutureExt;
 use futures_util::select;
 use futures_util::stream::StreamExt;
 use nix::libc;
+use rfs::log_init;
+use rfs::Server;
 use serde::Deserialize;
 use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tokio::fs;
 use tracing::info;
-
-use rfs::log_init;
-use rfs::Server;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {

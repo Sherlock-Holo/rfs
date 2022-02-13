@@ -207,18 +207,12 @@ impl FileHandle {
                     if let Err(err) = result {
                         error!("nix lock failed, error is {}", err);
 
-                        match err.clone().as_errno() {
-                            Some(errno) => {
-                                if errno as c_int == libc::EINTR {
-                                    debug!("nix lock is interrupted, retry it");
+                        if err as c_int == libc::EINTR {
+                            debug!("nix lock is interrupted, retry it");
 
-                                    continue;
-                                } else {
-                                    return Err(Errno::from(errno as c_int));
-                                }
-                            }
-
-                            None => return Err(Errno::from(err)),
+                            continue;
+                        } else {
+                            return Err(Errno::from(err));
                         }
                     } else {
                         break true;

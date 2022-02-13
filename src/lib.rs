@@ -1,12 +1,8 @@
-#![feature(type_alias_impl_trait)]
-#![feature(generic_associated_types)]
-
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Registry;
-
 pub use client::Filesystem;
 pub use helper::Apply;
 pub use server::rpc::Server;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
 mod client;
 mod helper;
