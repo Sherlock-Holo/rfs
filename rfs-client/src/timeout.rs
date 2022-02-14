@@ -13,7 +13,7 @@ use tonic::body::BoxBody;
 use tonic::Status;
 use tower::{Layer, Service};
 
-use super::BoxError;
+pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 #[pin_project(project = MayTimeoutFutureProj)]
 #[derive(Debug)]

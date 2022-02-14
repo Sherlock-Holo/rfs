@@ -80,12 +80,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic_value"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd34a9799123e5091887a741084637dee0bb0702a8e57050e9788e5a38ab4edd"
-
-[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -973,7 +967,6 @@ dependencies = [
  "async-signals",
  "async-stream",
  "async-trait",
- "atomic_value",
  "bytes",
  "fuse3",
  "futures-channel",
@@ -1008,14 +1001,19 @@ name = "rfs-client"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "futures-util",
+ "http",
+ "http-body",
  "nix 0.23.1",
+ "pin-project",
  "rfs",
  "serde",
  "serde_yaml",
  "structopt",
  "tokio",
  "tonic",
+ "tower",
  "tracing",
 ]
 

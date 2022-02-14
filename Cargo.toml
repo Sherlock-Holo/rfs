@@ -29,7 +29,6 @@ anyhow = "1.0"
 async-notify = "0.2"
 async-signals = "0.3"
 snap = "1.0"
-atomic_value = "0.1"
 fuse3 = { version = "0.3", features = ["file-lock", "tokio-runtime", "unprivileged"] }
 semver-parser = "0.10"
 async-trait = "= 0.1"
