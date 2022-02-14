@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use async_signals::Signals;
 use async_trait::async_trait;
+use bytes::{BufMut, Bytes, BytesMut};
 use fuse3::path::prelude::*;
 use fuse3::{Errno, MountOptions, Result};
 use futures_util::stream::{self, Empty, Stream};
-use futures_util::{StreamExt, TryFutureExt};
+use futures_util::StreamExt;
 use nix::mount;
 use nix::mount::MntFlags;
 use snap::read::FrameDecoder;
@@ -68,13 +69,8 @@ where
     }
 
     async fn get_rpc_header(&self) -> Header {
-        let uuid = self
-            .uuid
-            .read()
-            .await
-            .expect("uuid not init")
-            .as_bytes()
-            .to_vec();
+        let uuid =
+            Bytes::copy_from_slice(self.uuid.read().await.expect("uuid not init").as_bytes());
 
         Header {
             uuid,
@@ -94,7 +90,7 @@ where
 
                 let ping_req = TonicRequest::new(PingRequest {
                     header: Some(Header {
-                        uuid: uuid.as_bytes().to_vec(),
+                        uuid: Bytes::copy_from_slice(uuid.as_bytes()),
                         version: VERSION.to_string(),
                     }),
                 });
@@ -207,12 +203,12 @@ where
         let resp = client
             .register(req)
             .instrument(info_span!("register"))
+            .await
             .map_err(|err| {
                 error!("register failed {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         let resp = resp.into_inner();
 
@@ -285,16 +281,11 @@ where
             name: name.to_string(),
         });
 
-        let resp = self
-            .client
-            .clone()
-            .lookup(rpc_req)
-            .map_err(|err| {
-                error!("lookup rpc has error {}", err);
+        let resp = self.client.clone().lookup(rpc_req).await.map_err(|err| {
+            error!("lookup rpc has error {}", err);
 
-                libc::EIO
-            })
-            .await?;
+            libc::EIO
+        })?;
 
         let resp = resp.into_inner();
 
@@ -334,16 +325,11 @@ where
             path: path.clone(),
         });
 
-        let resp = self
-            .client
-            .clone()
-            .get_attr(rpc_req)
-            .map_err(|err| {
-                error!("getattr rpc has error {}", err);
+        let resp = self.client.clone().get_attr(rpc_req).await.map_err(|err| {
+            error!("getattr rpc has error {}", err);
 
-                libc::EIO
-            })
-            .await?;
+            libc::EIO
+        })?;
 
         let resp = resp.into_inner();
 
@@ -404,12 +390,12 @@ where
             .clone()
             .set_attr(rpc_req)
             .instrument(info_span!("set_attr"))
+            .await
             .map_err(|err| {
                 error!("setattr rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {
@@ -458,12 +444,12 @@ where
             .clone()
             .mkdir(rpc_req)
             .instrument(info_span!("mkdir"))
+            .await
             .map_err(|err| {
                 error!("mkdir rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {
@@ -499,12 +485,12 @@ where
             .clone()
             .unlink(rpc_req)
             .instrument(info_span!("unlink"))
+            .await
             .map_err(|err| {
                 error!("unlink rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(error) = resp.into_inner().error {
             Err((error.errno as c_int).into())
@@ -532,12 +518,12 @@ where
             .clone()
             .rm_dir(rpc_req)
             .instrument(info_span!("rmdir"))
+            .await
             .map_err(|err| {
                 error!("rmdir rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(error) = resp.into_inner().error {
             Err((error.errno as c_int).into())
@@ -578,12 +564,12 @@ where
             .clone()
             .rename(rpc_req)
             .instrument(info_span!("rename"))
+            .await
             .map_err(|err| {
                 error!("rename rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(error) = resp.into_inner().error {
             Err((error.errno as c_int).into())
@@ -613,12 +599,12 @@ where
             .clone()
             .open_file(rpc_req)
             .instrument(info_span!("open"))
+            .await
             .map_err(|err| {
                 error!("open rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {
@@ -657,12 +643,12 @@ where
             .clone()
             .read_file(rpc_req)
             .instrument(info_span!("read"))
+            .await
             .map_err(|err| {
                 error!("read_file rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         let result = resp.into_inner();
 
@@ -672,7 +658,7 @@ where
 
         if result.compressed {
             match task::spawn_blocking(move || {
-                let mut decoder = FrameDecoder::new(result.data.as_slice());
+                let mut decoder = FrameDecoder::new(result.data.as_ref());
 
                 let mut data = Vec::with_capacity(result.data.len());
 
@@ -691,9 +677,7 @@ where
                 Ok(data) => Ok(ReplyData { data: data.into() }),
             }
         } else {
-            Ok(ReplyData {
-                data: result.data.into(),
-            })
+            Ok(ReplyData { data: result.data })
         }
     }
 
@@ -710,11 +694,13 @@ where
 
         let enable_compress = *self.compress.read().await;
 
-        let data = data.to_vec();
+        let data = BytesMut::from(data);
 
         let (data, compressed) = task::spawn_blocking(move || {
             if enable_compress && data.len() > MIN_COMPRESS_SIZE {
-                let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE)); // should I choose a better size?
+                // should I choose a better size?
+                let mut encoder =
+                    FrameEncoder::new(BytesMut::with_capacity(MIN_COMPRESS_SIZE).writer());
 
                 if let Err(err) = encoder.write_all(&data) {
                     warn!("compress write data failed {}", err);
@@ -729,6 +715,8 @@ where
                         }
 
                         Ok(compressed_data) => {
+                            let compressed_data = compressed_data.into_inner();
+
                             // sometimes compressed data is bigger than original data, so we should
                             // use original data directly
                             if compressed_data.len() < data.len() {
@@ -753,7 +741,7 @@ where
             head: Some(header.clone()),
             file_handle_id: fh,
             offset: offset as _,
-            data: data.clone(),
+            data: data.freeze(),
             compressed,
         });
 
@@ -762,12 +750,12 @@ where
             .clone()
             .write_file(rpc_req)
             .instrument(info_span!("write"))
+            .await
             .map_err(|err| {
                 error!("write_file rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {
@@ -795,12 +783,12 @@ where
             .clone()
             .stat_fs(rpc_req)
             .instrument(info_span!("statsfs"))
+            .await
             .map_err(|err| {
                 error!("statfs rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {
@@ -844,12 +832,12 @@ where
             .clone()
             .close_file(rpc_req)
             .instrument(info_span!("release"))
+            .await
             .map_err(|err| {
                 error!("close_file rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(err) = resp.into_inner().error {
             Err((err.errno as c_int).into())
@@ -877,12 +865,12 @@ where
             .clone()
             .sync_file(rpc_req)
             .instrument(info_span!("fsync"))
+            .await
             .map_err(|err| {
                 error!("sync_file rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(err) = resp.into_inner().error {
             Err((err.errno as c_int).into())
@@ -910,12 +898,12 @@ where
             .clone()
             .flush(rpc_req)
             .instrument(info_span!("flush"))
+            .await
             .map_err(|err| {
                 error!("flush rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(err) = resp.into_inner().error {
             Err((err.errno as c_int).into())
@@ -947,12 +935,12 @@ where
             .clone()
             .get_lock(rpc_req)
             .instrument(info_span!("getlk"))
+            .await
             .map_err(|err| {
                 error!("get_lock rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {
@@ -1011,12 +999,12 @@ where
                 .clone()
                 .release_lock(rpc_req)
                 .instrument(info_span!("setlk"))
+                .await
                 .map_err(|err| {
                     error!("release_lock rpc has error {}", err);
 
                     libc::EIO
-                })
-                .await?;
+                })?;
 
             return if let Some(error) = resp.into_inner().error {
                 Err((error.errno as c_int).into())
@@ -1106,12 +1094,12 @@ where
             .clone()
             .create_file(rpc_req)
             .instrument(info_span!("create"))
+            .await
             .map_err(|err| {
                 error!("create_file rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         let resp = resp.into_inner();
 
@@ -1151,12 +1139,12 @@ where
             .clone()
             .interrupt(rpc_req)
             .instrument(info_span!("interrupt"))
+            .await
             .map_err(|err| {
                 error!("interrupt rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(err) = resp.into_inner().error {
             Err((err.errno as c_int).into())
@@ -1189,12 +1177,12 @@ where
             .clone()
             .allocate(rpc_req)
             .instrument(info_span!("fallocate"))
+            .await
             .map_err(|err| {
                 error!("allocate rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(err) = resp.into_inner().error {
             Err((err.errno as c_int).into())
@@ -1232,12 +1220,12 @@ where
             .clone()
             .read_dir(rpc_req)
             .instrument(info_span!("readdirplus"))
+            .await
             .map_err(|err| {
                 error!("read_dir rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         let resp = resp.into_inner();
 
@@ -1338,12 +1326,12 @@ where
             .clone()
             .copy_file_range(rpc_req)
             .instrument(info_span!("copy_file_range"))
+            .await
             .map_err(|err| {
                 error!("copy_file_range rpc has error {}", err);
 
                 libc::EIO
-            })
-            .await?;
+            })?;
 
         if let Some(result) = resp.into_inner().result {
             match result {

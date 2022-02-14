@@ -920,6 +920,7 @@ dependencies = [
  "path-clean",
  "pin-project",
  "prost",
+ "prost-build",
  "prost-types",
  "semver-parser",
  "serde",

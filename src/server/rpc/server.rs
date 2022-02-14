@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::{BufMut, Bytes, BytesMut};
 use fuse3::Errno;
 use fuse3::FileType;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -443,17 +444,18 @@ impl Rfs for Server {
             Err(errno) => {
                 return Ok(Response::new(ReadFileResponse {
                     error: Some(errno.into()),
-                    data: vec![],
+                    data: Bytes::new(),
                     compressed: false,
                 }));
             }
 
-            Ok(data) => data,
+            Ok(data) => Bytes::from(data),
         };
 
         let (data, compressed) =
             if self.compress && user.support_compress() && data.len() > MIN_COMPRESS_SIZE {
-                let mut encoder = FrameEncoder::new(Vec::with_capacity(MIN_COMPRESS_SIZE));
+                let mut encoder =
+                    FrameEncoder::new(BytesMut::with_capacity(MIN_COMPRESS_SIZE).writer());
 
                 task::spawn_blocking(|| {
                     if let Err(err) = encoder.write_all(&data) {
@@ -469,7 +471,7 @@ impl Rfs for Server {
                             (data, false)
                         }
 
-                        Ok(data) => (data, true),
+                        Ok(data) => (data.into_inner().freeze(), true),
                     }
                 })
                 .await
@@ -503,7 +505,7 @@ impl Rfs for Server {
         }
 
         let result = if request.compressed {
-            let mut decoder = FrameDecoder::new(request.data.as_slice());
+            let mut decoder = FrameDecoder::new(request.data.as_ref());
 
             let mut data = Vec::with_capacity(MIN_COMPRESS_SIZE);
 
@@ -870,7 +872,7 @@ impl Rfs for Server {
         info!("user {} register", uuid);
 
         Ok(Response::new(RegisterResponse {
-            uuid: uuid.as_bytes().to_vec(),
+            uuid: Bytes::copy_from_slice(uuid.as_bytes()),
             allow_compress: enable_compress && self.compress,
         }))
     }

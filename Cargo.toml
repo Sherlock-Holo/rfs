@@ -56,3 +56,4 @@ tempfile = "3.2"
 
 [build-dependencies]
 tonic-build = "0.6"
+prost-build = "0.9"
