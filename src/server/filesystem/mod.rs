@@ -6,6 +6,10 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use attr::SetAttr;
+pub use file_handle::FileHandle;
+pub use file_handle::LockKind;
+pub use file_handle::LockTable;
 use fuse3::path::reply::{FileAttr, ReplyStatFs};
 use fuse3::{Errno, Result};
 use futures_util::{stream, StreamExt, TryStreamExt};
@@ -18,11 +22,6 @@ use tokio::fs;
 use tokio::fs::{DirBuilder, OpenOptions};
 use tokio_stream::wrappers::ReadDirStream;
 use tracing::{debug, error, info, instrument};
-
-pub use attr::SetAttr;
-pub use file_handle::FileHandle;
-pub use file_handle::LockKind;
-pub use file_handle::LockTable;
 
 use crate::path::PathClean;
 use crate::server::filesystem::attr::metadata_to_file_attr;
@@ -48,46 +47,6 @@ impl Filesystem {
 
         // avoid the root dir fd be closed
         mem::forget(root_dir);
-
-        // pivot_root mode, butI think we don't need use pivot_root, chroot is safe enough
-        /*sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS)?;
-
-        let old_root = tempfile::tempdir_in(root.as_ref())?;
-
-        let old_root_path = old_root.path().file_name().expect("old root filename should be valid");
-
-        debug!("old root {:?}", old_root_path);
-
-        // env::set_current_dir(root.as_ref())?;
-
-        mount::mount(Some(""), "/", Some(""), MsFlags::MS_PRIVATE | MsFlags::MS_REC, Some(""))?;
-
-        mount::mount(Some(root.as_ref()), root.as_ref(), Some("bind"), MsFlags::MS_BIND | MsFlags::MS_REC, Some(""))?;
-
-        unistd::pivot_root(root.as_ref(), old_root.path())?;
-
-        info!("pivot root success");
-
-        env::set_current_dir("/")?;
-
-        mount::umount2(old_root_path, MntFlags::MNT_DETACH)?;
-
-        info!("unmount old root success");
-
-        drop(old_root);
-
-        info!("remove old root dir success");
-
-        async_std::fs::read_dir("/")
-            .await?
-            .for_each(|child| {
-                let child = child.unwrap();
-
-                info!("child {:?} in /", child.path());
-
-                futures::future::ready(())
-            })
-            .await;*/
 
         Self::chroot(root.as_ref()).await?;
 
@@ -1334,8 +1293,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_large_file() {
-        crate::log_init("test".to_owned(), true);
-
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
         let test_file_path = tmp_dir

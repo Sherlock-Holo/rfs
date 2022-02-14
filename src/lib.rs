@@ -1,12 +1,11 @@
-#![feature(type_alias_impl_trait)]
-#![feature(generic_associated_types)]
-
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Registry;
-
 pub use client::Filesystem;
 pub use helper::Apply;
+use opentelemetry::global;
+use opentelemetry::global::shutdown_tracer_provider;
+use opentelemetry_jaeger::Propagator;
 pub use server::rpc::Server;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 
 mod client;
 mod helper;
@@ -30,10 +29,12 @@ mod server;
 
 pub(crate) const BLOCK_SIZE: u32 = 4096;
 
-pub fn log_init(server_name: String, debug: bool) {
-    let (tracer, _uninstall) = opentelemetry_jaeger::new_pipeline()
+pub fn log_init(server_name: String, debug: bool) -> LogShutdownGuard {
+    global::set_text_map_propagator(Propagator::new());
+
+    let tracer = opentelemetry_jaeger::new_pipeline()
         .with_service_name(server_name)
-        .install()
+        .install_simple()
         .unwrap();
 
     let stdout_subscriber = tracing_subscriber::fmt::layer().json();
@@ -52,4 +53,17 @@ pub fn log_init(server_name: String, debug: bool) {
         .with(stdout_subscriber);
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    LogShutdownGuard { _priv: () }
+}
+
+#[must_use]
+pub struct LogShutdownGuard {
+    _priv: (),
+}
+
+impl Drop for LogShutdownGuard {
+    fn drop(&mut self) {
+        shutdown_tracer_provider()
+    }
 }

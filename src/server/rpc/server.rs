@@ -22,17 +22,16 @@ use tonic::{Code, Request, Status};
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
+use super::super::filesystem::Filesystem;
+use super::super::filesystem::LockKind;
+use super::super::filesystem::SetAttr;
+use super::user::User;
 use crate::helper::{convert_proto_time_to_system_time, fuse_attr_into_proto_attr};
 use crate::pb;
 use crate::pb::read_dir_response::DirEntry;
 use crate::pb::rfs_server::Rfs;
 use crate::pb::rfs_server::RfsServer;
 use crate::pb::*;
-
-use super::super::filesystem::Filesystem;
-use super::super::filesystem::LockKind;
-use super::super::filesystem::SetAttr;
-use super::user::User;
 
 type Result<T> = std::result::Result<T, Status>;
 

@@ -1,21 +1,32 @@
-use std::convert::TryInto;
+use std::convert::{Infallible, TryInto};
 use std::env::args;
+use std::error::Error;
 use std::ffi::OsString;
+use std::future;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use nix::unistd;
 use nix::unistd::ForkResult;
+use reconnect::Reconnect;
+use rfs::{log_init, Filesystem};
 use serde::Deserialize;
 use structopt::clap::AppSettings::*;
 use structopt::StructOpt;
 use tokio::fs;
-use tonic::transport::{Certificate, ClientTlsConfig, Identity, Uri};
-use tracing::info;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity, Uri};
+use tower::{service_fn, ServiceBuilder};
+use tracing::{info, warn};
 
-use rfs::{log_init, Filesystem};
+use crate::retry::{RetryClient, RetryHandle};
+use crate::timeout::{PathTimeoutLayer, PathTimeoutService};
+
+mod reconnect;
+mod retry;
+mod timeout;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -106,6 +117,33 @@ impl TryInto<(Config, RunMode)> for MountArgument {
     }
 }
 
+#[derive(Clone)]
+struct SimpleRetryHandle {
+    count: u8,
+}
+
+impl SimpleRetryHandle {
+    fn new(max_count: u8) -> Self {
+        assert!(max_count > 0);
+
+        Self { count: max_count }
+    }
+}
+
+impl RetryHandle for SimpleRetryHandle {
+    fn should_retry(&mut self, err: &(dyn Error + Send + Sync)) -> bool {
+        if self.count > 0 {
+            warn!(%err, "error happened, retry");
+
+            self.count -= 1;
+
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub async fn run() -> Result<()> {
     let program_name = args().next().map_or(String::from(""), |name| name);
 
@@ -140,6 +178,17 @@ pub async fn run() -> Result<()> {
     inner_run(cfg).await
 }
 
+fn connect(endpoint: Endpoint) -> PathTimeoutService<RetryClient<Channel, SimpleRetryHandle>> {
+    const INITIAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let channel = endpoint.connect_lazy();
+    let retry_client = RetryClient::new(channel, SimpleRetryHandle::new(3));
+
+    ServiceBuilder::new()
+        .layer(PathTimeoutLayer::new(INITIAL_TIMEOUT, None))
+        .service(retry_client)
+}
+
 async fn inner_run(cfg: Config) -> Result<()> {
     let debug = if let Some(debug) = cfg.debug {
         debug
@@ -147,7 +196,7 @@ async fn inner_run(cfg: Config) -> Result<()> {
         false
     };
 
-    log_init("rfs-client".to_owned(), debug);
+    let _log_shutdown_guard = log_init("rfs-client".to_owned(), debug);
 
     let key = fs::read(&cfg.key_path).await.context("read key failed")?;
 
@@ -175,7 +224,22 @@ async fn inner_run(cfg: Config) -> Result<()> {
         false
     };
 
-    let filesystem = Filesystem::new(uri, tls_config, compress).await?;
+    let endpoint = Endpoint::from(uri)
+        .tls_config(tls_config)?
+        .tcp_nodelay(true)
+        .tcp_keepalive(Some(Duration::from_secs(5)));
+
+    let service = connect(endpoint.clone());
+
+    info!("server connected");
+
+    let service = Reconnect::with_connection(
+        service,
+        service_fn(|endpoint: Endpoint| future::ready(Ok::<_, Infallible>(connect(endpoint)))),
+        endpoint,
+    );
+
+    let filesystem = Filesystem::new(service, compress)?;
 
     filesystem.mount(&cfg.mount_path).await
 }

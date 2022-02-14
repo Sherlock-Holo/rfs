@@ -1,5 +1,4 @@
 use anyhow::Result;
-
 use rfs_client::run;
 
 #[tokio::main]
