@@ -19,7 +19,7 @@ use structopt::StructOpt;
 use tokio::fs;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity, Uri};
 use tower::{service_fn, ServiceBuilder};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::retry::{RetryClient, RetryHandle};
 use crate::timeout::{PathTimeoutLayer, PathTimeoutService};
@@ -117,12 +117,30 @@ impl TryInto<(Config, RunMode)> for MountArgument {
     }
 }
 
-#[derive(Default, Clone)]
-struct SimpleRetryHandle;
+#[derive(Clone)]
+struct SimpleRetryHandle {
+    count: u8,
+}
+
+impl SimpleRetryHandle {
+    fn new(max_count: u8) -> Self {
+        assert!(max_count > 0);
+
+        Self { count: max_count }
+    }
+}
 
 impl RetryHandle for SimpleRetryHandle {
-    fn should_retry(&self, err: &(dyn Error + Send + Sync)) -> bool {
-        todo!()
+    fn should_retry(&mut self, err: &(dyn Error + Send + Sync)) -> bool {
+        if self.count > 0 {
+            warn!(%err, "error happened, retry");
+
+            self.count -= 1;
+
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -164,7 +182,7 @@ fn connect(endpoint: Endpoint) -> PathTimeoutService<RetryClient<Channel, Simple
     const INITIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
     let channel = endpoint.connect_lazy();
-    let retry_client = RetryClient::new_with_retry_handle(channel, SimpleRetryHandle::default());
+    let retry_client = RetryClient::new(channel, SimpleRetryHandle::new(3));
 
     ServiceBuilder::new()
         .layer(PathTimeoutLayer::new(INITIAL_TIMEOUT, None))
@@ -178,7 +196,7 @@ async fn inner_run(cfg: Config) -> Result<()> {
         false
     };
 
-    log_init("rfs-client".to_owned(), debug);
+    let _log_shutdown_guard = log_init("rfs-client".to_owned(), debug);
 
     let key = fs::read(&cfg.key_path).await.context("read key failed")?;
 
@@ -225,5 +243,3 @@ async fn inner_run(cfg: Config) -> Result<()> {
 
     filesystem.mount(&cfg.mount_path).await
 }
-
-fn must_sync<T: Sync>(_: &T) {}

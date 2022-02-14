@@ -15,6 +15,6 @@ structopt = { version = "0.3", features = ["color"] }
 futures-util = "0.3"
 nix = "0.23"
 anyhow = "1.0"
-async-signals = "0.3"
+async-signals = "0.4"
 tokio = { version = "1.3", features = ["fs", "rt-multi-thread", "macros"] }
 tracing = "0.1"

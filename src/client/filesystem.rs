@@ -21,7 +21,7 @@ use tokio::task;
 use tokio::time::{self, timeout};
 use tonic::body::BoxBody;
 use tonic::Request as TonicRequest;
-use tower::Service;
+use tower_service::Service;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use uuid::Uuid;
 

@@ -1293,7 +1293,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_large_file() {
-        crate::log_init("test".to_owned(), true);
+        let _log_shutdown_guard = crate::log_init("test".to_owned(), true);
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
 

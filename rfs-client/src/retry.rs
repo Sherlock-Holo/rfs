@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -34,36 +33,18 @@ impl Body for BytesBody {
 }
 
 pub trait RetryHandle {
-    fn should_retry(&self, err: &(dyn Error + Send + Sync)) -> bool;
-}
-
-impl RetryHandle for fn(&(dyn Error + Send + Sync)) -> bool {
-    fn should_retry(&self, err: &(dyn Error + Send + Sync)) -> bool {
-        self(err)
-    }
+    fn should_retry(&mut self, err: &(dyn Error + Send + Sync)) -> bool;
 }
 
 #[derive(Clone)]
-pub struct RetryClient<C, RetryHandle> {
+pub struct RetryClient<C, ErrRetry> {
     client: C,
-    err_retry: Option<Arc<RetryHandle>>,
+    err_retry: ErrRetry,
 }
 
-impl<C> RetryClient<C, fn(&(dyn Error + Send + Sync)) -> bool> {
-    pub fn new(client: C) -> Self {
-        Self {
-            client,
-            err_retry: None,
-        }
-    }
-}
-
-impl<C, RetryHandle> RetryClient<C, RetryHandle> {
-    pub fn new_with_retry_handle(client: C, retry_handle: RetryHandle) -> Self {
-        Self {
-            client,
-            err_retry: Some(Arc::new(retry_handle)),
-        }
+impl<C, ErrRetry> RetryClient<C, ErrRetry> {
+    pub fn new(client: C, err_retry: ErrRetry) -> Self {
+        Self { client, err_retry }
     }
 }
 
@@ -76,7 +57,7 @@ enum RetryFutureState {
     PollResult,
 }
 
-pub struct RetryFuture<C, F, RetryHandle> {
+pub struct RetryFuture<C, F, ErrRetry> {
     state: RetryFutureState,
     client: C,
     req: Request<BoxBody>,
@@ -84,11 +65,11 @@ pub struct RetryFuture<C, F, RetryHandle> {
     data: Bytes,
     header: Option<HeaderMap>,
     result_fut: Option<F>,
-    err_retry: Option<Arc<RetryHandle>>,
+    err_retry: ErrRetry,
 }
 
-impl<C, F, RetryHandle> RetryFuture<C, F, RetryHandle> {
-    pub fn new(client: C, req: Request<BoxBody>, err_retry: Option<Arc<RetryHandle>>) -> Self {
+impl<C, F, ErrRetry> RetryFuture<C, F, ErrRetry> {
+    pub fn new(client: C, req: Request<BoxBody>, err_retry: ErrRetry) -> Self {
         Self {
             state: RetryFutureState::Init,
             client,
@@ -168,10 +149,8 @@ where
                         Err(err) => {
                             let err = err.into();
 
-                            if let Some(err_retry) = this.err_retry.as_ref() {
-                                if !err_retry.should_retry(err.as_ref()) {
-                                    return Poll::Ready(Err(err));
-                                }
+                            if !this.err_retry.should_retry(err.as_ref()) {
+                                return Poll::Ready(Err(err));
                             }
 
                             eprintln!("{:?}", err.source());

@@ -45,7 +45,7 @@ pub async fn run() -> Result<()> {
         false
     };
 
-    log_init("rfs-server".to_owned(), debug);
+    let _log_shutdown_guard = log_init("rfs-server".to_owned(), debug);
 
     info!("starting rfs server");
 
