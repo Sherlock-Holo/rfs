@@ -165,12 +165,6 @@ where
 
         let session = Session::new(mount_options);
 
-        // without this, the `session.mount_with_unprivileged` will failed and compiler want
-        // S::Future becomes Send
-        pub fn must_sync<T: Sync>(_: &T) {}
-
-        must_sync(&self);
-
         session.mount_with_unprivileged(self, mount_point).await?;
 
         Ok(())

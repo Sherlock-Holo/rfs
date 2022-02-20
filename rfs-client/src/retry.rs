@@ -10,6 +10,7 @@ use http_body::Body;
 use tonic::body::BoxBody;
 use tonic::Status;
 use tower::Service;
+use tracing::debug;
 
 pub struct BytesBody(Option<Bytes>, Option<HeaderMap>);
 
@@ -51,8 +52,8 @@ impl<C, ErrRetry> RetryClient<C, ErrRetry> {
 #[derive(Debug, Copy, Clone)]
 enum RetryFutureState {
     Init,
-    GetData,
-    GetHeader,
+    PollData,
+    PollTrailer,
     PollReady,
     PollResult,
 }
@@ -63,7 +64,7 @@ pub struct RetryFuture<C, F, ErrRetry> {
     req: Request<BoxBody>,
     buf: Option<BytesMut>,
     data: Bytes,
-    header: Option<HeaderMap>,
+    trailers: Option<HeaderMap>,
     result_fut: Option<F>,
     err_retry: ErrRetry,
 }
@@ -76,7 +77,7 @@ impl<C, F, ErrRetry> RetryFuture<C, F, ErrRetry> {
             req,
             buf: None,
             data: Bytes::new(),
-            header: None,
+            trailers: None,
             result_fut: None,
             err_retry,
         }
@@ -100,30 +101,32 @@ where
         loop {
             match this.state {
                 RetryFutureState::Init => {
-                    this.buf.replace(BytesMut::new());
+                    let size_hint = this.req.size_hint();
+                    let capacity = size_hint.upper().unwrap_or_else(|| size_hint.lower());
 
-                    this.state = RetryFutureState::GetData;
+                    this.buf.replace(BytesMut::with_capacity(capacity as _));
+
+                    this.state = RetryFutureState::PollData;
                 }
 
-                RetryFutureState::GetData => {
+                RetryFutureState::PollData => {
                     let data = ready!(Pin::new(&mut this.req).poll_data(cx)).transpose()?;
+
                     if let Some(data) = data {
                         this.buf.as_mut().unwrap().put(data);
 
                         continue;
                     } else {
-                        let data = this.buf.take().unwrap().freeze();
-                        this.data = data;
+                        this.data = this.buf.take().unwrap().freeze();
 
-                        this.state = RetryFutureState::GetHeader;
+                        this.state = RetryFutureState::PollTrailer;
                     }
                 }
 
-                RetryFutureState::GetHeader => {
-                    let header = ready!(Pin::new(&mut this.req).poll_trailers(cx))?;
-                    if let Some(header) = header {
-                        this.header.replace(header);
-                    }
+                RetryFutureState::PollTrailer => {
+                    this.trailers = ready!(Pin::new(&mut this.req).poll_trailers(cx))?;
+
+                    debug!(trailers = ?this.trailers, "poll_trailer");
 
                     this.state = RetryFutureState::PollReady;
                 }
@@ -131,11 +134,23 @@ where
                 RetryFutureState::PollReady => {
                     ready!(this.client.poll_ready(cx))?;
 
-                    let bytes_body = BytesBody(Some(this.data.clone()), this.header.clone());
+                    debug!("poll_ready done");
 
-                    let request = Request::new(BoxBody::new(bytes_body));
+                    let bytes_body = BytesBody(Some(this.data.clone()), this.trailers.clone());
+
+                    let mut req_builder = Request::builder()
+                        .method(this.req.method().clone())
+                        .uri(this.req.uri().clone());
+
+                    for (key, value) in this.req.headers().iter() {
+                        req_builder = req_builder.header(key, value);
+                    }
+
+                    let request = req_builder.body(BoxBody::new(bytes_body))?;
 
                     let result_fut = this.client.call(request);
+
+                    debug!("client call done");
 
                     this.result_fut.replace(result_fut);
 
@@ -145,17 +160,20 @@ where
                 RetryFutureState::PollResult => {
                     let fut = this.result_fut.as_mut().unwrap();
                     let result = ready!(Pin::new(fut).poll(cx));
+
+                    debug!("future poll done");
+
                     match result {
                         Err(err) => {
                             let err = err.into();
 
                             if !this.err_retry.should_retry(err.as_ref()) {
+                                debug!(%err, "error should not retry");
+
                                 return Poll::Ready(Err(err));
                             }
 
-                            eprintln!("{:?}", err.source());
-
-                            eprintln!("{}", err);
+                            debug!(%err, "error should retry");
 
                             this.state = RetryFutureState::PollReady;
 

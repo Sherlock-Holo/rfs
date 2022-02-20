@@ -4,6 +4,7 @@ use opentelemetry::global;
 use opentelemetry::global::shutdown_tracer_provider;
 use opentelemetry_jaeger::Propagator;
 pub use server::rpc::Server;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
@@ -42,13 +43,19 @@ pub fn log_init(server_name: String, debug: bool) -> LogShutdownGuard {
     let trace = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let level_filter = if debug {
-        tracing_subscriber::filter::LevelFilter::DEBUG
+        LevelFilter::DEBUG
     } else {
-        tracing_subscriber::filter::LevelFilter::INFO
+        LevelFilter::INFO
     };
 
+    let filter_target = Targets::new().with_default(level_filter).with_targets([
+        ("h2", LevelFilter::OFF),
+        ("tower", LevelFilter::OFF),
+        ("hyper", LevelFilter::OFF),
+    ]);
+
     let subscriber = Registry::default()
-        .with(level_filter)
+        .with(filter_target)
         .with(trace)
         .with(stdout_subscriber);
 
