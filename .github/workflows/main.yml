@@ -109,7 +109,6 @@ jobs:
         id: build-iamge
         uses: redhat-actions/buildah-build@v2
         with:
-          registry: docker.io
           image: docker.io/sherlockholo/rfs-client
           tags: latest
           extra-args: |
@@ -165,7 +164,6 @@ jobs:
         id: build-iamge
         uses: redhat-actions/buildah-build@v2
         with:
-          registry: docker.io
           image: docker.io/sherlockholo/rfs-server
           tags: latest
           extra-args: |
