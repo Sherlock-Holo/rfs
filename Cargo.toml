@@ -18,8 +18,7 @@ members = [".", "rfs-client", "rfs-server"]
 nix = "0.23"
 libc = "0.2"
 path-clean = "0.1"
-futures-util = "0.3"
-futures-channel = "0.3"
+futures-util = { version = "0.3", features = ["channel"] }
 tonic = { version = "0.6", features = ["transport", "tls", "tls-roots"] }
 prost = "0.9"
 prost-types = "0.9"
