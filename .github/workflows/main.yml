@@ -106,7 +106,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: build image
-        id: build-iamge
+        id: build-client-iamge
         uses: redhat-actions/buildah-build@v2
         with:
           image: docker.io/sherlockholo/rfs-client
@@ -120,8 +120,8 @@ jobs:
         id: push-image
         uses: redhat-actions/push-to-registry@v2
         with:
-          image: ${{ steps.build-image.outputs.image }}
-          tags: ${{ steps.build-image.outputs.tags }}
+          image: ${{ steps.build-client-iamge.outputs.image }}
+          tags: ${{ steps.build-client-iamge.outputs.tags }}
           registry: docker.io
 
       - name: print image url
@@ -161,7 +161,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: build image
-        id: build-iamge
+        id: build-server-iamge
         uses: redhat-actions/buildah-build@v2
         with:
           image: docker.io/sherlockholo/rfs-server
@@ -175,8 +175,8 @@ jobs:
         id: push-image
         uses: redhat-actions/push-to-registry@v2
         with:
-          image: ${{ steps.build-image.outputs.image }}
-          tags: ${{ steps.build-image.outputs.tags }}
+          image: ${{ steps.build-server-iamge.outputs.image }}
+          tags: ${{ steps.build-server-iamge.outputs.tags }}
           registry: docker.io
 
       - name: print image url
