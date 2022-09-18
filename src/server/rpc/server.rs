@@ -171,7 +171,7 @@ impl Server {
                 for dead_user_id in dead_user_ids {
                     warn!(
                         "user {} may be dead, removing",
-                        dead_user_id.to_hyphenated_ref().to_string()
+                        dead_user_id.hyphenated().to_string()
                     );
 
                     user_map.remove(&dead_user_id);
@@ -232,13 +232,14 @@ impl Rfs for Server {
 
         match self.filesystem.lookup(request.parent, &request.name).await {
             Err(errno) => Ok(Response::new(LookupResponse {
-                result: Some(pb::lookup_response::Result::Error(errno.into())),
+                result: Some(lookup_response::Result::Error(errno.into())),
             })),
 
             Ok(attr) => Ok(Response::new(LookupResponse {
-                result: Some(pb::lookup_response::Result::Attr(
-                    fuse_attr_into_proto_attr(attr, &request.name),
-                )),
+                result: Some(lookup_response::Result::Attr(fuse_attr_into_proto_attr(
+                    attr,
+                    &request.name,
+                ))),
             })),
         }
     }
@@ -255,11 +256,11 @@ impl Rfs for Server {
             .await
         {
             Err(errno) => Ok(Response::new(MkdirResponse {
-                result: Some(pb::mkdir_response::Result::Error(errno.into())),
+                result: Some(mkdir_response::Result::Error(errno.into())),
             })),
 
             Ok(attr) => Ok(Response::new(MkdirResponse {
-                result: Some(pb::mkdir_response::Result::Attr(fuse_attr_into_proto_attr(
+                result: Some(mkdir_response::Result::Attr(fuse_attr_into_proto_attr(
                     attr,
                     &request.name,
                 ))),
@@ -386,7 +387,7 @@ impl Rfs for Server {
         {
             Err(errno) => {
                 return Ok(Response::new(OpenFileResponse {
-                    result: Some(pb::open_file_response::Result::Error(errno.into())),
+                    result: Some(open_file_response::Result::Error(errno.into())),
                 }));
             }
 
@@ -398,7 +399,7 @@ impl Rfs for Server {
         user.add_file_handle(file_handle).await;
 
         Ok(Response::new(OpenFileResponse {
-            result: Some(pb::open_file_response::Result::FileHandleId(fh_id)),
+            result: Some(open_file_response::Result::FileHandleId(fh_id)),
         }))
     }
 
@@ -498,7 +499,7 @@ impl Rfs for Server {
 
         if request.compressed && !self.compress {
             return Ok(Response::new(WriteFileResponse {
-                result: Some(pb::write_file_response::Result::Error(
+                result: Some(write_file_response::Result::Error(
                     Errno::from(libc::EINVAL).into(),
                 )),
             }));
@@ -513,7 +514,7 @@ impl Rfs for Server {
                 error!("decompress write data failed {}", err);
 
                 return Ok(Response::new(WriteFileResponse {
-                    result: Some(pb::write_file_response::Result::Error(
+                    result: Some(write_file_response::Result::Error(
                         Errno::from(libc::EIO).into(),
                     )),
                 }));
@@ -529,7 +530,7 @@ impl Rfs for Server {
         let written = match result {
             Err(errno) => {
                 return Ok(Response::new(WriteFileResponse {
-                    result: Some(pb::write_file_response::Result::Error(errno.into())),
+                    result: Some(write_file_response::Result::Error(errno.into())),
                 }));
             }
 
@@ -537,7 +538,7 @@ impl Rfs for Server {
         };
 
         Ok(Response::new(WriteFileResponse {
-            result: Some(pb::write_file_response::Result::Written(written as u64)),
+            result: Some(write_file_response::Result::Written(written as u64)),
         }))
     }
 
@@ -719,11 +720,11 @@ impl Rfs for Server {
 
         match self.filesystem.statfs().await {
             Err(errno) => Ok(Response::new(StatFsResponse {
-                result: Some(pb::stat_fs_response::Result::Error(errno.into())),
+                result: Some(stat_fs_response::Result::Error(errno.into())),
             })),
 
             Ok(statfs) => Ok(Response::new(StatFsResponse {
-                result: Some(pb::stat_fs_response::Result::Statfs(StatFs {
+                result: Some(stat_fs_response::Result::Statfs(StatFs {
                     blocks: statfs.blocks,
                     block_free: statfs.bfree,
                     block_available: statfs.bavail,
@@ -748,13 +749,13 @@ impl Rfs for Server {
 
         match self.filesystem.get_attr(&request.path).await {
             Err(errno) => Ok(Response::new(GetAttrResponse {
-                result: Some(pb::get_attr_response::Result::Error(errno.into())),
+                result: Some(get_attr_response::Result::Error(errno.into())),
             })),
 
             Ok(attr) => Ok(Response::new(GetAttrResponse {
-                result: Some(pb::get_attr_response::Result::Attr(
-                    fuse_attr_into_proto_attr(attr, ""),
-                )),
+                result: Some(get_attr_response::Result::Attr(fuse_attr_into_proto_attr(
+                    attr, "",
+                ))),
             })),
         }
     }
@@ -802,11 +803,11 @@ impl Rfs for Server {
 
         match self.filesystem.set_attr(&request.path, new_attr).await {
             Err(errno) => Ok(Response::new(SetAttrResponse {
-                result: Some(pb::set_attr_response::Result::Error(errno.into())),
+                result: Some(set_attr_response::Result::Error(errno.into())),
             })),
 
             Ok(attr) => Ok(Response::new(SetAttrResponse {
-                result: Some(pb::set_attr_response::Result::Attr(
+                result: Some(set_attr_response::Result::Attr(
                     fuse_attr_into_proto_attr(attr, ""), // here the name should not important
                 )),
             })),
@@ -834,11 +835,11 @@ impl Rfs for Server {
             .await
         {
             Err(errno) => Ok(Response::new(CopyFileRangeResponse {
-                result: Some(pb::copy_file_range_response::Result::Error(errno.into())),
+                result: Some(copy_file_range_response::Result::Error(errno.into())),
             })),
 
             Ok(copied) => Ok(Response::new(CopyFileRangeResponse {
-                result: Some(pb::copy_file_range_response::Result::Copied(copied as _)),
+                result: Some(copy_file_range_response::Result::Copied(copied as _)),
             })),
         }
     }
@@ -849,7 +850,7 @@ impl Rfs for Server {
         let user = self.get_user(request.header).await?;
 
         user.update_last_alive_time().await;
-        let user_id = user.get_id().await.to_hyphenated().to_string();
+        let user_id = user.get_id().await.hyphenated().to_string();
 
         debug!("receive ping message from {}", user_id);
 

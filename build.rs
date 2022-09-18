@@ -6,7 +6,7 @@ fn main() {
     let builder = tonic_build::configure();
 
     let mut prost_config = Config::new();
-    prost_config.bytes(&["."]);
+    prost_config.bytes(["."]);
 
     let proto_path = Path::new("proto/protocol.proto");
 

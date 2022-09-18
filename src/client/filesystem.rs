@@ -47,7 +47,7 @@ pub struct Filesystem<S> {
 
 impl<S, Resp> Filesystem<S>
 where
-    Resp: http_body::Body + Send + 'static,
+    Resp: http_body::Body<Data = Bytes> + Send + 'static,
     Resp::Error: Into<BoxError> + Send,
     S: Service<http::Request<BoxBody>, Response = http::Response<Resp>>,
     S::Error: Into<BoxError>,
@@ -122,7 +122,7 @@ where
 
 impl<S, Resp> Filesystem<S>
 where
-    Resp: http_body::Body + Send + 'static,
+    Resp: http_body::Body<Data = Bytes> + Send + 'static,
     Resp::Error: Into<BoxError> + Send,
     S: Service<http::Request<BoxBody>, Response = http::Response<Resp>>,
     S: Clone + Send + Sync + 'static,
@@ -158,7 +158,8 @@ where
             .unwrap();
         });
 
-        let mount_options = MountOptions::default()
+        let mut mount_options = MountOptions::default();
+        mount_options
             .fs_name("rfs")
             .nonempty(true)
             .force_readdir_plus(true);
@@ -174,7 +175,7 @@ where
 #[async_trait]
 impl<Resp, S> PathFilesystem for Filesystem<S>
 where
-    Resp: http_body::Body + Send + 'static,
+    Resp: http_body::Body<Data = Bytes> + Send + 'static,
     <Resp as http_body::Body>::Error: Into<BoxError> + Send,
     S: Service<http::Request<BoxBody>, Response = http::Response<Resp>>,
     S: Clone + Send + Sync + 'static,
@@ -229,7 +230,7 @@ where
     async fn destroy(&self, _req: Request) {
         let req = if let Some(uuid) = *self.uuid.read().await {
             TonicRequest::new(LogoutRequest {
-                uuid: uuid.to_hyphenated().to_string(),
+                uuid: uuid.as_hyphenated().to_string(),
             })
         } else {
             warn!("before init, filesystem destroy");
